@@ -93,6 +93,7 @@ def test_create_report_and_pii_sanitization_and_photo_serving():
             "comuna": "Comuna 2",
             "neighborhood": "Granada",
             "address_hint": "Avenida 9N # 14N-20",
+            "auto_analyze": "false",
         },
         files={
             "photo": ("evidencia.jpg", img_bytes, "image/jpeg"),
@@ -269,6 +270,7 @@ def test_rate_limiter_enforced(monkeypatch):
                 "description": "Prueba de límite de velocidad ciudadano.",
                 "latitude": "3.44",
                 "longitude": "-76.52",
+                "auto_analyze": "false",
             },
             files={"photo": ("ok.png", valid_img, "image/png")},
         )

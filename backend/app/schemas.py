@@ -95,3 +95,45 @@ class ReportListResponse(BaseModel):
     limit: int
     offset: int
     items: list[ReportPublicResponse]
+
+
+class AgentQueryRequest(BaseModel):
+    query: str = Field(min_length=3, max_length=1000)
+    max_iterations: int | None = Field(default=None, ge=1, le=10)
+    max_tokens_budget: int | None = Field(default=None, ge=50, le=20000)
+    tool_timeout_seconds: float | None = Field(default=None, gt=0.05, le=15.0)
+    total_timeout_seconds: float | None = Field(default=None, gt=0.1, le=30.0)
+
+
+class AgentToolCallPublic(BaseModel):
+    tool: str
+    args: dict
+    summary_result: dict
+
+
+class AgentQueryResponse(BaseModel):
+    answer: str
+    trace_group_id: str
+    tools_invoked: list[dict]
+    iterations_used: int
+    max_iterations: int
+    total_tokens_used: int
+    max_tokens_budget: int
+    latency_ms: int
+    guardrail_triggered: str | None = None
+    requires_human_approval: bool = False
+    pending_approval_id: str | None = None
+
+
+class ApprovalDecisionRequest(BaseModel):
+    approve: bool
+    decided_by: str = Field(default="operador-humano", min_length=2, max_length=120)
+
+
+class FaultInjectionRequest(BaseModel):
+    mode: str = Field(
+        default="NONE",
+        description="Modo de falla: NONE, 429, 503, TIMEOUT, INVALID_JSON, GROQ_FAIL, TOTAL",
+    )
+    reset_circuits: bool = True
+

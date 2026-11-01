@@ -9,8 +9,19 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
+from app.agent import decide_pending_approval, list_pending_approvals, run_civia_agent
+from app.ai_router import (
+    classify_evidence_with_router,
+    get_all_circuit_states,
+    get_effective_fault_mode,
+    get_provider_chain,
+    reset_all_circuits,
+    set_runtime_fault_override,
+    transcribe_audio_optional,
+)
 from app.config import settings
 from app.db import check_db_health, run_migrations
+from app.observability import get_observability_summary
 from app.repository import (
     confirm_report_category,
     create_report,
@@ -19,9 +30,14 @@ from app.repository import (
     get_reports_summary_stats,
     list_reports,
     row_to_public_dict,
+    update_report_ai_analysis,
     update_report_status,
 )
 from app.schemas import (
+    AgentQueryRequest,
+    AgentQueryResponse,
+    ApprovalDecisionRequest,
+    FaultInjectionRequest,
     ReportConfirmRequest,
     ReportListResponse,
     ReportPublicResponse,
@@ -139,6 +155,7 @@ async def create_citizen_report(
     comuna: str | None = Form(default=None),
     neighborhood: str | None = Form(default=None),
     address_hint: str | None = Form(default=None),
+    auto_analyze: bool = Form(default=True),
     photo: UploadFile = File(...),
     audio: UploadFile | None = File(default=None),
 ):
@@ -172,10 +189,15 @@ async def create_citizen_report(
     photo_meta = validate_and_store_photo(raw_photo, declared_filename=photo.filename)
 
     audio_meta = None
+    audio_transcript = None
     if audio is not None and audio.filename:
         raw_audio = await audio.read()
         if raw_audio:
             audio_meta = validate_and_store_audio(raw_audio, declared_filename=audio.filename)
+            if auto_analyze:
+                audio_transcript = transcribe_audio_optional(
+                    raw_audio, audio.filename, audio_meta["audio_mime"]
+                )
 
     row = create_report(
         title=clean_title,
@@ -188,7 +210,73 @@ async def create_citizen_report(
         address_hint=clean_address,
         photo_meta=photo_meta,
         audio_meta=audio_meta,
+        audio_transcript=audio_transcript,
     )
+
+    if auto_analyze:
+        safe_photo_file = settings.UPLOAD_DIR / Path(photo_meta["photo_path"]).name
+        stored_photo_bytes = safe_photo_file.read_bytes() if safe_photo_file.exists() else raw_photo
+        contract, _ = classify_evidence_with_router(
+            description=clean_desc,
+            latitude=lat,
+            longitude=lon,
+            image_bytes=stored_photo_bytes,
+            image_mime=photo_meta["photo_mime"],
+            address_hint=clean_address,
+            audio_transcript=audio_transcript,
+            report_id=row["id"],
+        )
+        if contract is not None:
+            updated = update_report_ai_analysis(
+                row["id"],
+                ai_category=contract.category,
+                ai_severity=contract.severity,
+                ai_confidence=contract.confidence,
+                ai_summary=contract.summary,
+                ai_keywords=contract.keywords,
+                auto_confirm=False,
+            )
+            if updated is not None:
+                row = updated
+
+    return row_to_public_dict(row)
+
+
+@app.post("/api/reports/{report_id}/analyze", response_model=ReportPublicResponse)
+def analyze_existing_report(report_id: UUID):
+    row = get_report_raw(report_id)
+    if not row:
+        raise CitizenValidationError(
+            "No se encontró el reporte solicitado para análisis.",
+            status_code=404,
+            code="REPORT_NOT_FOUND",
+        )
+    safe_name = Path(row["photo_path"]).name
+    photo_file = settings.UPLOAD_DIR / safe_name
+    img_bytes = photo_file.read_bytes() if photo_file.exists() else None
+
+    contract, _ = classify_evidence_with_router(
+        description=row["description"],
+        latitude=float(row["latitude"]),
+        longitude=float(row["longitude"]),
+        image_bytes=img_bytes,
+        image_mime=row["photo_mime"],
+        address_hint=row.get("address_hint"),
+        audio_transcript=row.get("audio_transcript"),
+        report_id=row["id"],
+    )
+    if contract is not None:
+        updated = update_report_ai_analysis(
+            row["id"],
+            ai_category=contract.category,
+            ai_severity=contract.severity,
+            ai_confidence=contract.confidence,
+            ai_summary=contract.summary,
+            ai_keywords=contract.keywords,
+            auto_confirm=False,
+        )
+        if updated is not None:
+            row = updated
     return row_to_public_dict(row)
 
 
@@ -322,6 +410,86 @@ def change_report_status(report_id: UUID, payload: ReportStatusUpdateRequest):
     updated = update_report_status(report_id, status=payload.status, note=clean_note)
     assert updated is not None
     return row_to_public_dict(updated)
+
+
+@app.post("/api/agent/query", response_model=AgentQueryResponse)
+def query_civia_agent(payload: AgentQueryRequest):
+    clean_q = sanitize_text(
+        payload.query,
+        field_name="consulta",
+        min_len=3,
+        max_len=1000,
+        required=True,
+    )
+    res = run_civia_agent(
+        clean_q,
+        max_iterations=payload.max_iterations,
+        max_tokens_budget=payload.max_tokens_budget,
+        tool_timeout_seconds=payload.tool_timeout_seconds or 4.0,
+        total_timeout_seconds=payload.total_timeout_seconds,
+    )
+    return {
+        "answer": res["answer"],
+        "trace_group_id": res["trace_group_id"],
+        "tools_invoked": res["tools_invoked"],
+        "iterations_used": res["iterations_used"],
+        "max_iterations": res["max_iterations"],
+        "total_tokens_used": res["total_tokens_used"],
+        "max_tokens_budget": res["max_tokens_budget"],
+        "latency_ms": res["latency_ms"],
+        "guardrail_triggered": res.get("guardrail_triggered"),
+        "requires_human_approval": res.get("requires_human_approval", False),
+        "pending_approval_id": res.get("pending_approval_id"),
+    }
+
+
+@app.get("/api/admin/observability", dependencies=[Depends(verify_admin_token)])
+def admin_get_observability(limit: int = Query(default=60, ge=1, le=300)) -> dict[str, Any]:
+    summary = get_observability_summary(limit=limit)
+    chain_public = [
+        {"tier": c["tier"], "provider": c["provider"], "model": c["model"], "configured": bool(c["api_key"])}
+        for c in get_provider_chain()
+    ]
+    return {
+        "provider_chain": chain_public,
+        "circuit_breakers": get_all_circuit_states(),
+        "effective_fault_mode": get_effective_fault_mode() or "NONE",
+        "observability": summary,
+    }
+
+
+@app.post("/api/admin/fault-injection", dependencies=[Depends(verify_admin_token)])
+def admin_set_fault_injection(payload: FaultInjectionRequest) -> dict[str, Any]:
+    active = set_runtime_fault_override(payload.mode)
+    if payload.reset_circuits:
+        reset_all_circuits()
+    return {
+        "effective_fault_mode": get_effective_fault_mode() or "NONE",
+        "runtime_override": active or "NONE",
+        "circuit_breakers": get_all_circuit_states(),
+    }
+
+
+@app.get("/api/admin/approvals", dependencies=[Depends(verify_admin_token)])
+def admin_list_approvals(status: str | None = Query(default=None)) -> dict[str, Any]:
+    items = list_pending_approvals(status=status)
+    return {"total": len(items), "items": items}
+
+
+@app.post("/api/admin/approvals/{approval_id}/decide", dependencies=[Depends(verify_admin_token)])
+def admin_decide_approval(approval_id: UUID, payload: ApprovalDecisionRequest) -> dict[str, Any]:
+    updated = decide_pending_approval(
+        approval_id,
+        approve=payload.approve,
+        decided_by=payload.decided_by,
+    )
+    if not updated:
+        raise CitizenValidationError(
+            "No se encontró la solicitud de aprobación indicada.",
+            status_code=404,
+            code="APPROVAL_NOT_FOUND",
+        )
+    return {"status": "ok", "approval": updated}
 
 
 @app.post("/api/admin/seed", dependencies=[Depends(verify_admin_token)])
