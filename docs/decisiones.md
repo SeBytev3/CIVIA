@@ -14,9 +14,14 @@
     - Nota sobre cuotas: dos claves Google en un mismo proyecto comparten cuota, por lo que el respaldo real ante `429` de cuota de proyecto recae en el proveedor independiente Groq (`qwen/qwen3.8-27b`), mientras que la clave secundaria / tercer modelo cubre fallos específicos de modelo (`503` en `gemini-3.8-flash` mientras `gemini-3.6-flash` está operativo).
 
 ## Datos (20 puntos)
-- Estrategia escogida: consulta SQL directa de datos relacionales de reportes, no RAG.
-- Justificación: filtros por categoría, fecha, estado e identificador requieren consulta exacta; RAG añade complejidad sin beneficio probado para ese problema.
-- Ausencia de datos: responder que no hay evidencia, jamás inventar.
+- Estrategia escogida: consulta SQL directa de datos relacionales de reportes en PostgreSQL 17 (`postgres:17-alpine`), **no RAG** y **sin PostGIS externo**.
+- Justificación de NO RAG:
+  - Los reportes ciudadanos y consultas operativas requieren agregaciones deterministas (`COUNT`, `GROUP BY`), filtros exactos por categoría (`HUECO`, `BASURAS`, `TALA`, `QUEMA`), estado (`PENDING_ANALYSIS`, `CONFIRMED`, `IN_REVIEW`, `RESOLVED`), comuna, fecha e identificador único (`UUID` y `tracking_code` tipo `CIV-2026-XXXX`).
+  - Un pipeline RAG con *embeddings* y búsqueda vectorial introduce errores de *recall* en conteos exactos, costo innecesario de indexación y riesgo de alucinación al responder preguntas cuantitativas sobre registros tabulares.
+- Justificación de SQL espacial nativo (B-Tree + Haversine) frente a PostGIS:
+  - Para búsquedas por radio en Cali y Valle del Cauca (`lat`, `lon`, `radius_km`), un pre-filtro de *bounding box* sobre el índice compuesto `idx_reports_coords (latitude, longitude)` combinado con la fórmula de distancia ortodrómica de Haversine en SQL directo logra precisión métrica en milisegundos conservando la imagen oficial ligera `postgres:17-alpine` sin dependencias adicionales de compilación.
+- Ausencia de datos: responder explícitamente que no existe evidencia registrada en la base de datos para ese criterio (demostrado con consulta sobre Comuna 99 / radiación nuclear / NDVI satelital), jamás inventar cifras.
+- Datos sintéticos identificados: se incluyeron 10 reportes sintéticos de demostración en Cali (`CIV-2026-DEMO0001` a `CIV-2026-DEMO0010`) marcados en BD con `is_synthetic = TRUE` y franja visual explícita `SINTETICO DEMO CIVIA (NO PRIVADO)` en sus imágenes generadas.
 
 ## Aplicación (20 puntos)
 - Prueba de otro equipo: pendiente, anotar 3 tareas y ajustes posteriores.

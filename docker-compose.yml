@@ -22,6 +22,14 @@ services:
       AI_PRIMARY_MODEL: ${AI_PRIMARY_MODEL:-gemini-3.8-flash}
       AI_FALLBACK_MODEL: ${AI_FALLBACK_MODEL:-qwen/qwen3.8-27b}
       AI_TERTIARY_MODEL: ${AI_TERTIARY_MODEL:-gemini-3.6-flash}
+      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-15}
+      AI_MAX_RETRIES: ${AI_MAX_RETRIES:-2}
+      AGENT_MAX_ITERATIONS: ${AGENT_MAX_ITERATIONS:-5}
+      AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-6000}
+      FALLA_FORZADA: ${FALLA_FORZADA:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-civia-admin-demo-2026}
+    volumes:
+      - civia_uploads:/app/data/uploads
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -34,3 +42,4 @@ services:
       retries: 8
 volumes:
   civia_postgres:
+  civia_uploads:
