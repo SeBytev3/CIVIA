@@ -60,6 +60,11 @@ def test_bounded_json_repair_and_schema_validation():
         parse_and_validate_analysis_json("Esto no contiene ningún objeto JSON válido")
     assert exc_info.value.code == "INVALID_JSON"
 
+    # 3. JSON vacío {} sin evidencia ni categoría debe lanzar INVALID_SCHEMA (no inventar éxito)
+    with pytest.raises(AIProviderError) as exc_empty:
+        parse_and_validate_analysis_json("{}")
+    assert exc_empty.value.code == "INVALID_SCHEMA"
+
 
 def test_secret_sanitization_never_leaks_keys():
     raw_err = "Error calling url?key=AIzaSyDummyKey12345678901234567890 with Bearer gsk_abcdef12345678901234567890"

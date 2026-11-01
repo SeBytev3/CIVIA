@@ -1,0 +1,139 @@
+{
+  "metadata": {
+    "proyecto": "CIVIA — Momento Evaluativo 2",
+    "autores": ["Stefania Córdoba", "Sebastian Espinosa"],
+    "fecha_verificacion_sql": "2026-11-01",
+    "origen_ground_truth": "Consultas SQL directas ejecutadas sobre PostgreSQL 17 (tabla reports, semilla determinista backend/app/seed.py)",
+    "distincion_datos": "Todos los registros base CIV-2026-DEMO0001..DEMO0010 están marcados explícitamente con is_synthetic=true en PostgreSQL.",
+    "estado_validacion_humana_cualitativa": "Ground truth SQL verificado técnicamente el 2026-11-01; revisión humana externa en prueba de usabilidad pendiente de ejecución presencial."
+  },
+  "casos_dorados": [
+    {
+      "id": "GD-01",
+      "tipo": "consulta_exacta_categoria",
+      "es_respondible": true,
+      "origen_datos": "SINTETICO_DEMO (is_synthetic=true)",
+      "fecha_verificacion": "2026-11-01",
+      "estado_verificacion": "VERIFICADO_POR_SQL",
+      "pregunta": "¿Cuántos reportes de la categoría HUECO están registrados en la base de datos y cuáles son sus códigos de radicado?",
+      "sql_comprobacion": "SELECT COUNT(*) AS total, ARRAY_AGG(tracking_code ORDER BY tracking_code) AS codigos FROM reports WHERE COALESCE(final_category, ai_category) = 'HUECO' AND is_synthetic = TRUE;",
+      "respuesta_esperada_sql": {
+        "total": 3,
+        "codigos": ["CIV-2026-DEMO0001", "CIV-2026-DEMO0005", "CIV-2026-DEMO0009"]
+      },
+      "criterios_aceptacion": {
+        "herramienta_esperada": "consultar_reportes",
+        "tokens_requeridos_al_menos_uno": ["3", "tres", "CIV-2026-DEMO0001"],
+        "codigos_esperados": ["CIV-2026-DEMO0001", "CIV-2026-DEMO0005", "CIV-2026-DEMO0009"]
+      }
+    },
+    {
+      "id": "GD-02",
+      "tipo": "consulta_por_radicado_y_estado",
+      "es_respondible": true,
+      "origen_datos": "SINTETICO_DEMO (is_synthetic=true)",
+      "fecha_verificacion": "2026-11-01",
+      "estado_verificacion": "VERIFICADO_POR_SQL",
+      "pregunta": "¿Cuál es la categoría, severidad, comuna y estado actual del reporte con código de radicado CIV-2026-DEMO0004?",
+      "sql_comprobacion": "SELECT tracking_code, COALESCE(final_category, ai_category) AS category, COALESCE(final_severity, ai_severity) AS severity, comuna, status FROM reports WHERE tracking_code = 'CIV-2026-DEMO0004';",
+      "respuesta_esperada_sql": {
+        "tracking_code": "CIV-2026-DEMO0004",
+        "category": "QUEMA",
+        "severity": "CRITICA",
+        "comuna": "Comuna 2",
+        "status": "IN_REVIEW"
+      },
+      "criterios_aceptacion": {
+        "herramienta_esperada": "obtener_reporte",
+        "tokens_requeridos_todos": ["QUEMA", "Comuna 2"],
+        "tokens_requeridos_al_menos_uno": ["CRITICA", "CRÍTICA", "IN_REVIEW", "revisión"]
+      }
+    },
+    {
+      "id": "GD-03",
+      "tipo": "consulta_geografica_comuna",
+      "es_respondible": true,
+      "origen_datos": "SINTETICO_DEMO (is_synthetic=true)",
+      "fecha_verificacion": "2026-11-01",
+      "estado_verificacion": "VERIFICADO_POR_SQL",
+      "pregunta": "¿Qué reportes existen registrados en la Comuna 2 de Cali y a qué categorías corresponden?",
+      "sql_comprobacion": "SELECT tracking_code, COALESCE(final_category, ai_category) AS category, title FROM reports WHERE UPPER(comuna) = 'COMUNA 2' AND is_synthetic = TRUE ORDER BY tracking_code;",
+      "respuesta_esperada_sql": {
+        "total": 2,
+        "reportes": [
+          {"tracking_code": "CIV-2026-DEMO0001", "category": "HUECO"},
+          {"tracking_code": "CIV-2026-DEMO0004", "category": "QUEMA"}
+        ]
+      },
+      "criterios_aceptacion": {
+        "herramienta_esperada": "consultar_reportes",
+        "tokens_requeridos_todos": ["CIV-2026-DEMO0001", "CIV-2026-DEMO0004"],
+        "tokens_requeridos_al_menos_uno": ["HUECO", "QUEMA", "2"]
+      }
+    },
+    {
+      "id": "GD-04",
+      "tipo": "consulta_espacial_coordenadas",
+      "es_respondible": true,
+      "origen_datos": "SINTETICO_DEMO (is_synthetic=true)",
+      "fecha_verificacion": "2026-11-01",
+      "estado_verificacion": "VERIFICADO_POR_SQL",
+      "pregunta": "¿Qué reporte se encuentra registrado en el sector de Pance cerca de las coordenadas latitud 3.3385 y longitud -76.5410 en un radio de 1.5 km?",
+      "sql_comprobacion": "SELECT tracking_code, COALESCE(final_category, ai_category) AS category, comuna, neighborhood FROM reports WHERE latitude BETWEEN 3.325 AND 3.352 AND longitude BETWEEN -76.555 AND -76.527;",
+      "respuesta_esperada_sql": {
+        "total": 1,
+        "tracking_code": "CIV-2026-DEMO0003",
+        "category": "TALA",
+        "comuna": "Comuna 22",
+        "neighborhood": "Pance"
+      },
+      "criterios_aceptacion": {
+        "herramienta_esperada": "consultar_reportes",
+        "tokens_requeridos_todos": ["CIV-2026-DEMO0003", "TALA"],
+        "tokens_requeridos_al_menos_uno": ["Pance", "Comuna 22"]
+      }
+    },
+    {
+      "id": "GD-05",
+      "tipo": "consulta_por_estado_confirmacion",
+      "es_respondible": true,
+      "origen_datos": "SINTETICO_DEMO (is_synthetic=true)",
+      "fecha_verificacion": "2026-11-01",
+      "estado_verificacion": "VERIFICADO_POR_SQL",
+      "pregunta": "¿Qué reporte está en estado ANALYZED_PENDING_CONFIRMATION pendiente de confirmación ciudadana y en qué barrio se ubica?",
+      "sql_comprobacion": "SELECT tracking_code, ai_category, neighborhood, comuna, human_confirmed FROM reports WHERE status = 'ANALYZED_PENDING_CONFIRMATION' AND is_synthetic = TRUE;",
+      "respuesta_esperada_sql": {
+        "total": 1,
+        "tracking_code": "CIV-2026-DEMO0008",
+        "ai_category": "TALA",
+        "neighborhood": "Capri",
+        "comuna": "Comuna 17",
+        "human_confirmed": false
+      },
+      "criterios_aceptacion": {
+        "herramienta_esperada": "consultar_reportes",
+        "tokens_requeridos_todos": ["CIV-2026-DEMO0008"],
+        "tokens_requeridos_al_menos_uno": ["Capri", "TALA", "Comuna 17"]
+      }
+    },
+    {
+      "id": "GD-06",
+      "tipo": "consulta_irresoluble_sin_evidencia",
+      "es_respondible": false,
+      "origen_datos": "AUSENCIA_VERIFICADA_EN_BD",
+      "fecha_verificacion": "2026-11-01",
+      "estado_verificacion": "VERIFICADO_POR_SQL",
+      "pregunta": "¿Cuántos reportes de radiación nuclear o índice satelital NDVI en tiempo real existen registrados en la Comuna 99 de Cali?",
+      "sql_comprobacion": "SELECT COUNT(*) AS total FROM reports WHERE UPPER(comuna) = 'COMUNA 99' OR description ILIKE '%NDVI%' OR description ILIKE '%radiación%';",
+      "respuesta_esperada_sql": {
+        "total": 0,
+        "evidencia_disponible": false
+      },
+      "criterios_aceptacion": {
+        "herramienta_esperada": "consultar_reportes",
+        "tokens_requeridos_al_menos_uno": ["no existe", "no hay", "0", "ningún", "ninguno", "sin evidencia"],
+        "tokens_prohibidos": ["CIV-2026-DEMO0099", "se registraron 5", "se encontraron 3"]
+      }
+    }
+  ]
+}

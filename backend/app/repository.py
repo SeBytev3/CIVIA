@@ -309,8 +309,14 @@ def list_reports(
         params.append(status.upper())
 
     if comuna:
-        conditions.append("UPPER(COALESCE(comuna, '')) = UPPER(%s)")
-        params.append(comuna.strip())
+        c_clean = comuna.strip()
+        if c_clean.isdigit():
+            c_clean = f"Comuna {c_clean}"
+        conditions.append(
+            "(UPPER(COALESCE(comuna, '')) = UPPER(%s) OR COALESCE(neighborhood, '') ILIKE %s OR COALESCE(address_hint, '') ILIKE %s)"
+        )
+        like_comuna = f"%{comuna.strip()}%"
+        params.extend([c_clean, like_comuna, like_comuna])
 
     if q:
         like_pat = f"%{q.strip()}%"

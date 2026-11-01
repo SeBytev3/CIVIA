@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import hmac
 import logging
 from pathlib import Path
 from typing import Any
@@ -122,7 +123,9 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 def verify_admin_token(x_admin_token: str | None = Header(default=None)) -> None:
-    if not x_admin_token or x_admin_token != settings.ADMIN_TOKEN:
+    expected = settings.ADMIN_TOKEN.strip()
+    provided = (x_admin_token or "").strip()
+    if not expected or not provided or not hmac.compare_digest(provided, expected):
         raise CitizenValidationError(
             "Acceso restringido a observabilidad y administración.",
             status_code=401,
@@ -193,7 +196,12 @@ async def create_citizen_report(
     if audio is not None and audio.filename:
         raw_audio = await audio.read()
         if raw_audio:
-            audio_meta = validate_and_store_audio(raw_audio, declared_filename=audio.filename)
+            try:
+                audio_meta = validate_and_store_audio(raw_audio, declared_filename=audio.filename)
+            except Exception:
+                orphan_photo = settings.UPLOAD_DIR / Path(photo_meta["photo_path"]).name
+                orphan_photo.unlink(missing_ok=True)
+                raise
             if auto_analyze:
                 audio_transcript = transcribe_audio_optional(
                     raw_audio, audio.filename, audio_meta["audio_mime"]
@@ -243,7 +251,9 @@ async def create_citizen_report(
 
 
 @app.post("/api/reports/{report_id}/analyze", response_model=ReportPublicResponse)
-def analyze_existing_report(report_id: UUID):
+def analyze_existing_report(request: Request, report_id: UUID):
+    client_ip = request.client.host if request.client else "unknown"
+    rate_limiter.check(f"analyze:{client_ip}")
     row = get_report_raw(report_id)
     if not row:
         raise CitizenValidationError(
@@ -357,7 +367,11 @@ def get_citizen_report_photo(report_id: UUID):
     return FileResponse(
         path=file_path,
         media_type=row["photo_mime"],
-        headers={"X-Content-Type-Options": "nosniff", "Cache-Control": "public, max-age=3600"},
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'",
+            "Cache-Control": "public, max-age=3600",
+        },
     )
 
 
@@ -413,7 +427,9 @@ def change_report_status(report_id: UUID, payload: ReportStatusUpdateRequest):
 
 
 @app.post("/api/agent/query", response_model=AgentQueryResponse)
-def query_civia_agent(payload: AgentQueryRequest):
+def query_civia_agent(request: Request, payload: AgentQueryRequest):
+    client_ip = request.client.host if request.client else "unknown"
+    rate_limiter.check(f"agent:{client_ip}")
     clean_q = sanitize_text(
         payload.query,
         field_name="consulta",

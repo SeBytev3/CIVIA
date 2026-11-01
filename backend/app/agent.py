@@ -13,12 +13,15 @@ from app.ai_router import (
     AIProviderError,
     _check_forced_fault,
     classify_evidence_with_router,
+    ensure_at_least_one_circuit_openable,
     get_circuit,
     get_provider_chain,
+    mark_gemini_model_exhausted,
+    resolve_effective_gemini_model,
 )
 from app.config import settings
 from app.db import get_conn
-from app.observability import record_ai_trace
+from app.observability import record_ai_trace, sanitize_secret_text
 from app.repository import (
     get_report_by_tracking_code,
     get_report_raw,
@@ -27,8 +30,24 @@ from app.repository import (
     row_to_public_dict,
     update_report_ai_analysis,
 )
+from app.security import _CO_PHONE_RE, _EMAIL_RE
 
 logger = logging.getLogger("civia.agent")
+
+
+def sanitize_citizen_agent_output(text: str) -> str:
+    """
+    Garantiza que la respuesta entregada al ciudadano no contenga secretos, PII,
+    nombres de proveedores internos ni códigos de error HTTP o tracebacks.
+    """
+    import re
+
+    cleaned = sanitize_secret_text(text) or ""
+    cleaned = _EMAIL_RE.sub("[CORREO_PROTEGIDO]", cleaned)
+    cleaned = _CO_PHONE_RE.sub("[TELEFONO_PROTEGIDO]", cleaned)
+    cleaned = re.sub(r"\b(?:gemini|groq|traceback)\b", "[SISTEMA_IA]", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\bHTTP[_\s-]*(?:429|500|502|503|504)\b", "[SERVICIO_OCUPADO]", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
 
 # Definición neutral de herramientas tipadas (se convierte al formato nativo de Gemini y de Groq)
 AGENT_TOOLS_SPEC: list[dict[str, Any]] = [
@@ -160,6 +179,8 @@ def tool_consultar_reportes(args: dict[str, Any]) -> dict[str, Any]:
     q = args.get("q")
     lat = float(args["lat"]) if args.get("lat") is not None else None
     lon = float(args["lon"]) if args.get("lon") is not None else None
+    if lon is not None and 70.0 <= lon <= 80.0:
+        lon = -abs(lon)
     radius_km = float(args["radius_km"]) if args.get("radius_km") is not None else None
 
     total, rows = list_reports(
@@ -350,12 +371,14 @@ def execute_tool_with_timeout(
     if fn is None:
         return {"error": f"Herramienta desconocida: {tool_name}"}
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(fn, tool_args)
-        try:
-            return future.result(timeout=timeout_sec)
-        except FuturesTimeoutError as exc:
-            raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s.") from exc
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn, tool_args)
+    try:
+        return future.result(timeout=timeout_sec)
+    except FuturesTimeoutError as exc:
+        raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s.") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _gemini_tools_declaration() -> list[dict[str, Any]]:
@@ -404,7 +427,8 @@ def _call_agent_turn_gemini(
     if not api_key:
         raise AIProviderError("MISSING_API_KEY", "Clave Google no disponible.", retryable=False)
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    eff_model = resolve_effective_gemini_model(model)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{eff_model}:generateContent?key={api_key}"
     contents: list[dict[str, Any]] = []
     for m in conversation_messages:
         role = m["role"]
@@ -457,6 +481,11 @@ def _call_agent_turn_gemini(
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout_sec, connect=min(4.0, timeout_sec))) as client:
             resp = client.post(url, json=payload)
+            if resp.status_code in (429, 503):
+                alt_model = mark_gemini_model_exhausted(model)
+                if alt_model != eff_model:
+                    alt_url = f"https://generativelanguage.googleapis.com/v1beta/models/{alt_model}:generateContent?key={api_key}"
+                    resp = client.post(alt_url, json=payload)
     except httpx.TimeoutException as exc:
         raise AIProviderError("TIMEOUT", "Timeout en llamada de agente a Gemini.", retryable=True) from exc
     except httpx.HTTPError as exc:
@@ -598,7 +627,23 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
         import re
 
         code_match = re.search(r"CIV-\d{4}-[A-Z0-9]+", q_up)
-        if code_match:
+        wants_status_change = any(
+            w in q_up for w in ("CAMBIA", "ACTUALIZA", "PROPON", "MARCAR COMO", "PASAR A", "CAMBIAR")
+        )
+        if code_match and wants_status_change:
+            new_st = "IN_REVIEW"
+            for candidate_st in ("RESOLVED", "IN_REVIEW", "CONFIRMED", "REJECTED"):
+                if candidate_st in q_up:
+                    new_st = candidate_st
+                    break
+            targs = {
+                "identificador": code_match.group(0),
+                "nuevo_estado": new_st,
+                "motivo": "Solicitud ciudadana procesada en modo determinista con aprobación humana obligatoria.",
+            }
+            res = tool_proponer_actualizacion_critica(targs)
+            tool_history.append({"tool": "proponer_actualizacion_critica", "args": targs, "result": res})
+        elif code_match:
             res = tool_obtener_reporte({"identificador": code_match.group(0)})
             tool_history.append({"tool": "obtener_reporte", "args": {"identificador": code_match.group(0)}, "result": res})
         else:
@@ -607,9 +652,24 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
                 if cat in q_up:
                     args["category"] = cat
                     break
+            if "ANALYZED_PENDING_CONFIRMATION" in q_up or "PENDIENTES DE CONFIRMACIÓN" in q_up or "PENDIENTE DE CONFIRMACIÓN" in q_up:
+                args["status"] = "ANALYZED_PENDING_CONFIRMATION"
+            elif "PENDING_ANALYSIS" in q_up:
+                args["status"] = "PENDING_ANALYSIS"
+            elif "IN_REVIEW" in q_up or "EN REVISIÓN" in q_up:
+                args["status"] = "IN_REVIEW"
+            elif "RESOLVED" in q_up or "RESUELTO" in q_up:
+                args["status"] = "RESOLVED"
             comuna_match = re.search(r"COMUNA\s+(\d+)", q_up)
             if comuna_match:
                 args["comuna"] = f"Comuna {comuna_match.group(1)}"
+            lat_match = re.search(r"LAT(?:ITUD)?\s*[:=]?\s*(-?\d+\.\d+)", q_up)
+            lon_match = re.search(r"LON(?:GITUD)?\s*[:=]?\s*(-?\d+\.\d+)", q_up)
+            rad_match = re.search(r"(\d+(?:\.\d+)?)\s*KM", q_up)
+            if lat_match and lon_match:
+                args["lat"] = float(lat_match.group(1))
+                args["lon"] = float(lon_match.group(1))
+                args["radius_km"] = float(rad_match.group(1)) if rad_match else 2.5
             if any(w in q_up for w in ("SATELITAL", "NDVI", "RADIACION", "RADIACIÓN", "NUCLEAR")):
                 args["q"] = "NDVI_INEXISTENTE_999"
             res = tool_consultar_reportes(args)
@@ -629,9 +689,12 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
     if "total_encontrados" in last:
         total = last["total_encontrados"]
         if total == 0:
-            return "No existe evidencia ni reportes registrados en la base de datos de CIVIA para los criterios consultados."
+            return "No existe evidencia ni reportes registrados en la base de datos de CIVIA para los criterios consultados (0 encontrados)."
         items = last.get("items") or []
-        codigos = ", ".join(f"{it['tracking_code']} ({it['effective_category']} en {it.get('comuna') or 'Cali'})" for it in items[:5])
+        codigos = ", ".join(
+            f"{it['tracking_code']} ({it['effective_category']}, {it.get('effective_severity')}, {it.get('comuna') or 'Cali'}, {it.get('neighborhood') or ''}, estado {it.get('status')})"
+            for it in items[:5]
+        )
         return f"Se encontraron {total} reporte(s) registrados en la base de datos: {codigos}."
     if last.get("requiere_aprobacion_humana"):
         return last.get("mensaje", "La solicitud de cambio de estado quedó registrada pendiente de aprobación humana.")
@@ -689,6 +752,7 @@ def run_civia_agent(
         turn_tool_calls: list[dict[str, Any]] = []
         turn_succeeded = False
 
+        ensure_at_least_one_circuit_openable(chain)
         for idx, node in enumerate(chain):
             provider = node["provider"]
             model = node["model"]
@@ -784,6 +848,12 @@ def run_civia_agent(
         if not turn_succeeded:
             # Caída total de proveedores IA: responder con respaldo SQL determinista sin error técnico
             answer = _deterministic_sql_fallback_answer(query, executed_tools)
+            for et in executed_tools:
+                res_obj = et.get("result") or {}
+                if res_obj.get("requiere_aprobacion_humana"):
+                    requires_human_approval = True
+                    pending_approval_id = res_obj.get("approval_id")
+                    guardrail_triggered = guardrail_triggered or "HUMAN_APPROVAL_REQUIRED"
             total_ms = int((time.perf_counter() - t_start) * 1000)
             return {
                 "answer": answer,
@@ -808,9 +878,26 @@ def run_civia_agent(
         # Si el modelo no pidió más herramientas y dio respuesta final
         if not turn_tool_calls:
             final_answer = turn_text or _deterministic_sql_fallback_answer(query, executed_tools)
+            # Garantizar trazabilidad de radicados verificados por SQL cuando la herramienta encontró <= 5 reportes
+            for et in executed_tools:
+                res_obj = et.get("result") or {}
+                if res_obj.get("encontrado") and isinstance(res_obj.get("reporte"), dict):
+                    rep = res_obj["reporte"]
+                    tcode = rep.get("tracking_code", "")
+                    if tcode and tcode not in final_answer:
+                        final_answer += f" [Radicado SQL: {tcode} · {rep.get('effective_category')} · {rep.get('effective_severity')} · {rep.get('comuna')} · {rep.get('status')}]"
+                elif 0 < int(res_obj.get("total_encontrados", 0)) <= 5:
+                    items = res_obj.get("items") or []
+                    missing_codes = [
+                        f"{it['tracking_code']} ({it.get('effective_category')}, {it.get('comuna')}, {it.get('neighborhood')}, {it.get('status')})"
+                        for it in items
+                        if it.get("tracking_code") and it["tracking_code"] not in final_answer
+                    ]
+                    if missing_codes:
+                        final_answer += " [Registros SQL verificados: " + "; ".join(missing_codes) + "]"
             total_ms = int((time.perf_counter() - t_start) * 1000)
             return {
-                "answer": final_answer,
+                "answer": sanitize_citizen_agent_output(final_answer),
                 "trace_group_id": str(trace_group_id),
                 "tools_invoked": executed_tools,
                 "iterations_used": iterations_used,
@@ -931,10 +1018,12 @@ def decide_pending_approval(
     new_decision = "APPROVED" if approve else "REJECTED"
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM pending_approvals WHERE id = %s;", (aid,))
+            cur.execute("SELECT * FROM pending_approvals WHERE id = %s FOR UPDATE;", (aid,))
             row = cur.fetchone()
             if not row:
                 return None
+            if row["status"] != "PENDING":
+                return row
 
             cur.execute(
                 """
@@ -942,12 +1031,14 @@ def decide_pending_approval(
                 SET status = %s,
                     decided_by = %s,
                     decided_at = NOW()
-                WHERE id = %s
+                WHERE id = %s AND status = 'PENDING'
                 RETURNING *;
                 """,
                 (new_decision, decided_by, aid),
             )
             updated_pa = cur.fetchone()
+            if not updated_pa:
+                return row
 
             if approve:
                 payload = row["proposed_payload"]

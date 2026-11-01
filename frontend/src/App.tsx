@@ -164,8 +164,8 @@ export function App() {
   const [agentBusy, setAgentBusy] = useState<boolean>(false);
   const [agentResponse, setAgentResponse] = useState<AgentQueryResponse | null>(null);
 
-  // Zona Admin protegida
-  const [adminToken, setAdminToken] = useState<string>('civia-admin-demo-2026');
+  // Zona Admin protegida (no hardcodear secretos en el bundle cliente)
+  const [adminToken, setAdminToken] = useState<string>('');
   const [obsData, setObsData] = useState<ObservabilityData | null>(null);
   const [approvals, setApprovals] = useState<PendingApprovalItem[]>([]);
   const [adminBusy, setAdminBusy] = useState<boolean>(false);
@@ -465,10 +465,10 @@ export function App() {
   }, [adminToken]);
 
   useEffect(() => {
-    if (activeTab === 'admin') {
+    if (activeTab === 'admin' && adminToken.trim().length > 0) {
       void loadAdminPanel();
     }
-  }, [activeTab, loadAdminPanel]);
+  }, [activeTab, adminToken, loadAdminPanel]);
 
   const handleToggleFaultMode = async (mode: string) => {
     setAdminBusy(true);
@@ -1376,6 +1376,7 @@ export function App() {
               <input
                 id="admin-token-input"
                 type="password"
+                placeholder="Ingrese ADMIN_TOKEN de .env"
                 value={adminToken}
                 onChange={(e) => setAdminToken(e.target.value)}
                 style={{ padding: '0.5rem 0.75rem', borderRadius: '8px', border: '1px solid #bfd0cd' }}

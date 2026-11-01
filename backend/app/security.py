@@ -181,14 +181,15 @@ def validate_and_store_photo(
 
 
 def _detect_audio_magic(raw_bytes: bytes) -> tuple[str, str] | None:
-    if len(raw_bytes) >= 12 and raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WAVE":
+    if len(raw_bytes) >= 44 and raw_bytes[:4] == b"RIFF" and raw_bytes[8:12] == b"WAVE":
         return ("audio/wav", "wav")
-    if raw_bytes.startswith(b"OggS"):
+    if len(raw_bytes) >= 64 and raw_bytes.startswith(b"OggS"):
         return ("audio/ogg", "ogg")
-    if raw_bytes.startswith(b"\x1a\x45\xdf\xa3"):
+    if len(raw_bytes) >= 64 and raw_bytes.startswith(b"\x1a\x45\xdf\xa3"):
         return ("audio/webm", "webm")
-    if raw_bytes.startswith(b"ID3") or (
-        len(raw_bytes) >= 2 and raw_bytes[0] == 0xFF and (raw_bytes[1] & 0xE0) == 0xE0
+    if len(raw_bytes) >= 64 and (
+        (raw_bytes.startswith(b"ID3") and raw_bytes[3] <= 4)
+        or (raw_bytes[0] == 0xFF and (raw_bytes[1] & 0xE0) == 0xE0)
     ):
         return ("audio/mpeg", "mp3")
     return None
@@ -234,7 +235,7 @@ def validate_and_store_audio(
             raise CitizenValidationError("El archivo WAV está corrupto o es inválido.", status_code=415) from exc
     else:
         # Estimación conservadora para audio comprimido (~16 KB/s a 128 kbps)
-        duration_seconds = round(max(1.0, min(60.0, len(raw_bytes) / 16000.0)), 2)
+        duration_seconds = round(max(1.0, len(raw_bytes) / 16000.0), 2)
 
     if duration_seconds > settings.MAX_AUDIO_DURATION_SECONDS:
         raise CitizenValidationError(

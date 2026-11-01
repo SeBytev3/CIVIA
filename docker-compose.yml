@@ -27,9 +27,11 @@ services:
       AGENT_MAX_ITERATIONS: ${AGENT_MAX_ITERATIONS:-5}
       AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-6000}
       FALLA_FORZADA: ${FALLA_FORZADA:-}
+      AUTO_SEED_SYNTHETIC: ${AUTO_SEED_SYNTHETIC:-true}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-civia-admin-demo-2026}
     volumes:
       - civia_uploads:/app/data/uploads
+      - ./eval:/app/eval
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:

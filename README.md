@@ -60,23 +60,49 @@ CIVIA es una aplicación web progresiva (PWA) conectada a una API FastAPI, Postg
 
 ---
 
-## Ejecución de pruebas automatizadas
+## Ejecución de pruebas automatizadas y suite de evaluación
 
-Con los contenedores en ejecución, ejecuta la suite completa de pruebas unitarias, de integración, seguridad, resiliencia (`429`, `503`, `TIMEOUT`, `INVALID_JSON`, `GROQ_FAIL`, `TOTAL`) y los 4 límites del agente:
+### 1. Pruebas automatizadas (`pytest`)
+Con los contenedores en ejecución, ejecuta la suite de 20 pruebas automatizadas (salud, CRUD, validación de archivos/EXIF/GPS/PII, *rate limiting*, resiliencia `429`/`503`/`TIMEOUT`/`INVALID_JSON`/`GROQ_FAIL`/`TOTAL`, los 4 límites del agente y prueba E2E entre contenedores):
 
 ```powershell
 docker compose exec -T api pytest -v
 ```
 
-Para comprobar el frontend servible desde otro contenedor dentro de la red de Docker:
+### 2. Suite de evaluación formal (6 casos dorados SQL + 15 consultas representativas)
+Para ejecutar la evaluación formal y regenerar `eval/resultados/reporte_evaluacion.json` y `eval/resultados/reporte_evaluacion.md`:
 
 ```powershell
-docker compose exec -T frontend wget -q -O - http://127.0.0.1:80/health
+# Verificación determinista rápida (SQL dorado + matriz de resiliencia y guardrails):
+docker compose exec -T api python eval/evaluar.py --mode deterministic
+
+# Suite completa de 15 consultas con llamadas en vivo al router Gemini -> Groq -> Gemini:
+docker compose exec -T api python eval/evaluar.py --mode all --pause 1.5
+```
+
+### 3.Cómo simular fallos de proveedores (`FALLA_FORZADA`)
+Puedes inyectar fallos controlados en caliente desde la **Consola de Observabilidad y Resiliencia** en http://localhost:5173 (autenticando con `ADMIN_TOKEN`), o mediante API:
+
+```powershell
+# Simular HTTP 429 en proveedor primario (conmuta automáticamente a Groq):
+Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injection" `
+  -Headers @{"X-Admin-Token"="civia-admin-demo-2026"; "Content-Type"="application/json"} `
+  -Body '{"mode":"429","reset_circuits":true}'
+
+# Simular caída total de los 3 proveedores (guarda reportes en PENDING_ANALYSIS):
+Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injection" `
+  -Headers @{"X-Admin-Token"="civia-admin-demo-2026"; "Content-Type"="application/json"} `
+  -Body '{"mode":"TOTAL","reset_circuits":true}'
+
+# Restaurar operación normal:
+Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injection" `
+  -Headers @{"X-Admin-Token"="civia-admin-demo-2026"; "Content-Type"="application/json"} `
+  -Body '{"mode":"NONE","reset_circuits":true}'
 ```
 
 ---
 
-## Reset de datos y mantenimiento
+## Reset de datos, mantenimiento y solución de problemas en Windows 11
 
 - **Detener conservando los datos**: `docker compose down`
 - **Reiniciar desde cero (elimina volúmenes de BD y fotos)**: `docker compose down -v`
@@ -84,10 +110,15 @@ docker compose exec -T frontend wget -q -O - http://127.0.0.1:80/health
   ```powershell
   Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/seed?force_reset=true" -Headers @{"X-Admin-Token"="civia-admin-demo-2026"}
   ```
+- **Solución de problemas frecuentes en Windows 11**:
+  1. *Docker Desktop no responde*: Asegúrate de que el motor WSL2 esté activo (`wsl --status`) y Docker Desktop muestre `Engine running`.
+  2. *Puerto `5173` o `8000` ocupado*: Comprueba con `netstat -ano | findstr :5173` o `:8000` que otra instancia previa no esté escuchando y ejecuta `docker compose down` antes de levantar.
+  3. *Política de ejecución de PowerShell al usar `.\scripts\run.ps1`*: Puedes ejecutar directamente `docker compose up --build -d` o `powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1`.
+  4. *Cuotas de capa gratuita (Google AI Studio / Groq)*: Si alguna clave gratuita alcanza su tope por minuto (RPM), espera 60 segundos o usa `--mode deterministic` en `eval/evaluar.py`.
 
 ---
 
-## Arquitectura de Resiliencia y Agente
+## Arquitectura de Resiliencia, Agente y Documentación del Proyecto
 
 1. **Flujo vertical ciudadano**:
    - Captura de descripción, fotografía (`JPEG`/`PNG`/`WEBP` <= 5 MB, >= 32x32 px, sin metadatos EXIF), nota de voz opcional (<= 60s / <= 5 MB) y coordenadas GPS o selección en mapa de Cali.
@@ -100,4 +131,10 @@ docker compose exec -T frontend wget -q -O - http://127.0.0.1:80/health
    - Herramientas: `consultar_reportes`, `obtener_reporte`, `clasificar_evidencia` y `proponer_actualizacion_critica`.
    - Cuatro límites: (1) máximo de iteraciones, (2) presupuesto de tokens, (3) *timeout* por herramienta y global, y (4) confirmación humana obligatoria en `pending_approvals` para cualquier escritura crítica (la IA jamás modifica la tabla `reports` directamente).
 
-Referencias adicionales: `docs/arquitectura.md`, `docs/decisiones.md`, `docs/estado.md`.
+### Documentación de referencia
+- [`docs/arquitectura.md`](docs/arquitectura.md): Arquitectura C4, flujo vertical y esquema de datos.
+- [`docs/decisiones.md`](docs/decisiones.md): Justificación de SQL vs. NO RAG, diseño del agente y métricas reales (`P50`, `P90`, tokens, costos y precisión).
+- [`docs/checklist_rubrica.md`](docs/checklist_rubrica.md): Mapeo verificable contra los 5 criterios de evaluación del Momento 2.
+- [`docs/guion_sustentacion.md`](docs/guion_sustentacion.md): Guion de sustentación en vivo (6 minutos de demo + 3 minutos de preguntas).
+- [`eval/plantilla_usabilidad.md`](eval/plantilla_usabilidad.md): Protocolo de evaluación de usabilidad con usuario externo (3 tareas).
+- [`docs/estado.md`](docs/estado.md): Registro de avance y pruebas por fase.

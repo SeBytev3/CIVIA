@@ -35,8 +35,8 @@ class CircuitBreakerState:
     state: str = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
     opened_at: float = 0.0
     last_error: str | None = None
-    cooldown_seconds: float = 45.0
-    failure_threshold: int = 1
+    cooldown_seconds: float = 10.0
+    failure_threshold: int = 2
 
     def allow_request(self) -> bool:
         if self.state == "CLOSED":
@@ -56,13 +56,32 @@ class CircuitBreakerState:
     def record_failure(self, error_code: str) -> None:
         self.failures += 1
         self.last_error = error_code
-        if self.failures >= self.failure_threshold:
+        # Si es 503 sostenido del modelo primario, abrir tras 1 fallo por 10s; para 429 transitorio exigir 2 fallos
+        threshold = 1 if error_code == "HTTP_503" else self.failure_threshold
+        if self.failures >= threshold:
             self.state = "OPEN"
             self.opened_at = time.monotonic()
 
 
 _CIRCUITS: dict[str, CircuitBreakerState] = {}
 _RUNTIME_FAULT_OVERRIDE: str | None = None
+_EXHAUSTED_GEMINI_MODELS: dict[str, float] = {}
+
+
+def resolve_effective_gemini_model(model: str) -> str:
+    exp = _EXHAUSTED_GEMINI_MODELS.get(model)
+    if exp and (time.monotonic() - exp) < 300.0:
+        if "lite" in model or "3.6" in model:
+            return "gemini-3.1-flash-lite"
+        return "gemini-3-flash-preview"
+    return model
+
+
+def mark_gemini_model_exhausted(model: str) -> str:
+    _EXHAUSTED_GEMINI_MODELS[model] = time.monotonic()
+    if "lite" in model or "3.6" in model:
+        return "gemini-3.1-flash-lite"
+    return "gemini-3-flash-preview"
 
 
 def set_runtime_fault_override(mode: str | None) -> str:
@@ -86,6 +105,19 @@ def get_circuit(provider: str, model: str) -> CircuitBreakerState:
     if key not in _CIRCUITS:
         _CIRCUITS[key] = CircuitBreakerState(provider=provider, model=model)
     return _CIRCUITS[key]
+
+
+def ensure_at_least_one_circuit_openable(chain: list[dict[str, str]]) -> None:
+    """
+    Si los 3 niveles tienen el circuit breaker en estado OPEN simultáneamente,
+    habilita en modo HALF_OPEN el circuito que lleve más tiempo abierto para evitar
+    bloqueo total sin intento de red.
+    """
+    cbs = [get_circuit(node["provider"], node["model"]) for node in chain]
+    if any(cb.allow_request() for cb in cbs):
+        return
+    oldest = min(cbs, key=lambda c: c.opened_at)
+    oldest.state = "HALF_OPEN"
 
 
 def reset_all_circuits() -> None:
@@ -161,6 +193,13 @@ def parse_and_validate_analysis_json(raw_text: str) -> AIAnalysisContract:
 
     # Normalización acotada de campos si el modelo usó mayúsculas/minúsculas o sinónimos cercanos
     cat_raw = str(data.get("category") or data.get("categoria") or "").strip().upper()
+    raw_summary = str(data.get("summary") or data.get("resumen") or "").strip()
+    if not cat_raw or not raw_summary:
+        raise AIProviderError(
+            "INVALID_SCHEMA",
+            "JSON incompleto: se requieren los campos obligatorios 'category' y 'summary'.",
+            retryable=False,
+        )
     cat_map = {
         "HUECOS": "HUECO",
         "BACHE": "HUECO",
@@ -283,7 +322,8 @@ def _call_gemini_multimodal(
     if not api_key:
         raise AIProviderError("MISSING_API_KEY", "Clave de Google no configurada.", retryable=False)
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    eff_model = resolve_effective_gemini_model(model)
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{eff_model}:generateContent?key={api_key}"
     parts: list[dict[str, Any]] = [{"text": prompt_text}]
     if image_bytes and image_mime:
         b64_img = base64.b64encode(image_bytes).decode("ascii")
@@ -301,6 +341,11 @@ def _call_gemini_multimodal(
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout_sec, connect=min(4.0, timeout_sec))) as client:
             resp = client.post(url, json=payload)
+            if resp.status_code in (429, 503):
+                alt_model = mark_gemini_model_exhausted(model)
+                if alt_model != eff_model:
+                    alt_url = f"https://generativelanguage.googleapis.com/v1beta/models/{alt_model}:generateContent?key={api_key}"
+                    resp = client.post(alt_url, json=payload)
     except httpx.TimeoutException as exc:
         raise AIProviderError("TIMEOUT", "Tiempo de espera agotado en llamada a Gemini.", retryable=True) from exc
     except httpx.HTTPError as exc:
@@ -449,6 +494,7 @@ def classify_evidence_with_router(
     )
 
     chain = get_provider_chain()
+    ensure_at_least_one_circuit_openable(chain)
     max_retries = max(0, min(settings.AI_MAX_RETRIES, 2))
     per_call_timeout = max(2.0, min(settings.AI_TIMEOUT_SECONDS, 6.0))
 
@@ -561,9 +607,14 @@ def classify_evidence_with_router(
                         "provider_switches": provider_switches,
                     },
                 )
-                # Si es el proveedor primario y hay proveedores de respaldo disponibles,
-                # o si el error no es reintentable, conmutar rápido tras 1 reintento corto
-                if not exc.retryable or node_try >= max_retries or (tier == "primary" and node_try >= 1):
+                # Si el proveedor devolvió 429 (límite de tasa), o es el primario tras 1 reintento,
+                # o el error no es reintentable, conmutar de inmediato al siguiente proveedor de la cadena
+                if (
+                    exc.code == "HTTP_429"
+                    or not exc.retryable
+                    or node_try >= max_retries
+                    or (tier == "primary" and node_try >= 1)
+                ):
                     break
                 backoff = min(0.6, 0.15 * (2**node_try) + random.uniform(0.01, 0.08))
                 time.sleep(backoff)
