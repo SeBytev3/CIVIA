@@ -28,5 +28,30 @@
   - Semilla automática de 10 reportes sintéticos identificados en Cali (`CIV-2026-DEMO0001` a `CIV-2026-DEMO0010`, `is_synthetic=True`).
 - **Pruebas ejecutadas (`backend/tests/test_reports_crud.py`)**: suite `pytest` ejecutada dentro del contenedor contra PostgreSQL 17 real.
 
+## Fase C — Frontend React + TypeScript + Vite PWA completada (2026-11-01)
+- **Interfaz ciudadana PWA (`frontend/`)**:
+  - Implementada en React 19 + TypeScript + Vite (`tsc -b && vite build` sin errores) y servida con `nginx:1.27-alpine` en `http://localhost:5173`.
+  - Incluye `manifest.webmanifest`, Service Worker (`sw.js`) e icono vectorial.
+  - Funcionalidades conectadas al backend real:
+    - Panel de estadísticas en vivo desde `GET /api/reports/stats`.
+    - Mapa interactivo de Cali con Leaflet (`CaliMap.tsx`), marcadores por categoría y filtro espacial por radio Haversine.
+    - Formulario de reporte ciudadano con captura de GPS del navegador, selección manual en mapa de Cali, carga de fotografía (o generador de foto sintética en `<canvas>`), y grabación o carga opcional de nota de voz (`<= 60s`, `<= 5 MB`).
+    - Vista de análisis asistido por IA separada de la confirmación/corrección humana (`PATCH /api/reports/{id}/confirm`).
+    - Seguimiento por código de radicado (`CIV-2026-...`) con línea de tiempo de estados reales.
+    - Asistente agéntico interactivo y panel protegido de Observabilidad/Aprobaciones/Inyección de fallas (`X-Admin-Token`).
+  - Verificación E2E entre contenedores (`test_e2e_frontend_proxy.py`): `api` -> `http://frontend:80` comprobando HTML, manifiesto PWA, Service Worker y proxy inverso Nginx hacia `/health` y `/api/reports/stats`.
+
+## Fase D — Sistema agéntico resiliente, herramientas y 4 límites completada (2026-11-01)
+- **Router IA desacoplado (`backend/app/ai_router.py`)**:
+  - Cadena configurada por entorno: `gemini-3.8-flash` (Google) → `qwen/qwen3.8-27b` (Groq) → `gemini-3.6-flash` (Google), más transcripción opcional de audio con `whisper-large-v3-turbo` (Groq).
+  - *Circuit breaker* por proveedor/modelo, *backoff* exponencial con *jitter*, reparación acotada de JSON y validación estricta `AIAnalysisContract`.
+  - Degradación elegante ante caída total (`FALLA_FORZADA=TOTAL`): el reporte se conserva en `PENDING_ANALYSIS` con cero errores técnicos hacia el ciudadano.
+- **Agente con herramientas tipadas y 4 límites (`backend/app/agent.py`)**:
+  - Herramientas: `consultar_reportes`, `obtener_reporte`, `clasificar_evidencia` y `proponer_actualizacion_critica`.
+  - Límites verificados con pruebas: `MAX_ITERATIONS`, `MAX_TOKENS`, `TIMEOUT` por herramienta y `HUMAN_APPROVAL_REQUIRED` en tabla `pending_approvals`.
+- **Observabilidad protegida (`backend/app/observability.py`)**:
+  - Registro en `ai_traces` con redacción automática de secretos (`sanitize_secret_text`), cálculo de latencias `P50`/`P90` y costo estimado en USD.
+- **Pruebas ejecutadas (`pytest -v` en contenedor `api`)**: `20 passed` (`test_health.py`, `test_reports_crud.py`, `test_ai_and_agent.py`, `test_e2e_frontend_proxy.py`).
+
 ## Próxima tarea para Antigravity
-- Ejecutar Fase C (Frontend React + TypeScript + Vite PWA, mapa interactivo, formulario multimodal, confirmación humana editable y estados honestos) y Fase D (Router IA resiliente Gemini -> Groq -> segundo Gemini, herramientas tipadas del agente, 4 límites efectivos y observabilidad protegida).
+- Ejecutar Fase E (Suite de evaluación formal `eval/casos_dorados.json` con 5 preguntas verificadas manualmente incluyendo 1 sin respuesta, script `eval/evaluar.py` con 15 consultas representativas, registro de métricas reales P50/P90/precisión/costo en `docs/decisiones.md`) y Fase F (Empaquetado final reproducible, checklist de rúbrica y guion de sustentación 6+3 min).

@@ -1,0 +1,459 @@
+:root {
+  --civia-teal: #0f4c5c;
+  --civia-teal-dark: #09323d;
+  --civia-mint: #2ec4b6;
+  --civia-amber: #e36414;
+  --civia-crimson: #d90429;
+  --civia-forest: #2d6a4f;
+  --civia-purple: #7b2cbf;
+  --civia-bg: #f4f7f6;
+  --civia-surface: #ffffff;
+  --civia-border: #dce4e2;
+  --civia-text: #14242b;
+  --civia-muted: #52666e;
+  --radius-lg: 14px;
+  --radius-md: 10px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background-color: var(--civia-bg);
+  color: var(--civia-text);
+  line-height: 1.5;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid var(--civia-mint);
+  outline-offset: 2px;
+}
+
+.civia-header {
+  background: linear-gradient(135deg, var(--civia-teal-dark) 0%, var(--civia-teal) 100%);
+  color: #ffffff;
+  padding: 1.25rem 1.5rem;
+  border-bottom: 4px solid var(--civia-mint);
+}
+
+.civia-header-inner {
+  max-width: 1240px;
+  margin: 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+}
+
+.civia-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+}
+
+.civia-logo-badge {
+  width: 46px;
+  height: 46px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.14);
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 1.2rem;
+  color: var(--civia-mint);
+  border: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.civia-brand h1 {
+  margin: 0;
+  font-size: 1.45rem;
+  letter-spacing: -0.02em;
+}
+
+.civia-brand p {
+  margin: 0.15rem 0 0;
+  font-size: 0.88rem;
+  opacity: 0.9;
+}
+
+.civia-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.civia-nav-btn {
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  padding: 0.55rem 0.95rem;
+  border-radius: 999px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+  transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.civia-nav-btn:hover {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.civia-nav-btn.active {
+  background: var(--civia-mint);
+  color: #062830;
+  border-color: var(--civia-mint);
+}
+
+.civia-container {
+  max-width: 1240px;
+  margin: 1.25rem auto 3rem;
+  padding: 0 1.25rem;
+}
+
+.civia-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
+  gap: 0.85rem;
+  margin-bottom: 1.25rem;
+}
+
+.civia-stat-card {
+  background: var(--civia-surface);
+  border: 1px solid var(--civia-border);
+  border-radius: var(--radius-md);
+  padding: 0.95rem 1.1rem;
+  box-shadow: 0 2px 6px rgba(15, 76, 92, 0.04);
+}
+
+.civia-stat-label {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--civia-muted);
+  font-weight: 700;
+}
+
+.civia-stat-value {
+  font-size: 1.65rem;
+  font-weight: 800;
+  color: var(--civia-teal-dark);
+  margin-top: 0.2rem;
+}
+
+.civia-stat-sub {
+  font-size: 0.8rem;
+  color: var(--civia-muted);
+}
+
+.civia-panel {
+  background: var(--civia-surface);
+  border: 1px solid var(--civia-border);
+  border-radius: var(--radius-lg);
+  padding: 1.35rem;
+  margin-bottom: 1.25rem;
+  box-shadow: 0 4px 14px rgba(15, 76, 92, 0.05);
+}
+
+.civia-panel h2 {
+  margin-top: 0;
+  margin-bottom: 0.5rem;
+  font-size: 1.25rem;
+  color: var(--civia-teal-dark);
+}
+
+.civia-filter-bar {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.civia-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.civia-field label {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: var(--civia-text);
+}
+
+.civia-field input,
+.civia-field select,
+.civia-field textarea {
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #bfd0cd;
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--civia-text);
+}
+
+.civia-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.65rem 1.15rem;
+  border-radius: 8px;
+  font-weight: 600;
+  border: none;
+  cursor: pointer;
+  background: var(--civia-teal);
+  color: #ffffff;
+}
+
+.civia-btn:hover:not(:disabled) {
+  background: var(--civia-teal-dark);
+}
+
+.civia-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.civia-btn.secondary {
+  background: #e7f0ef;
+  color: var(--civia-teal-dark);
+  border: 1px solid #bfd0cd;
+}
+
+.civia-btn.accent {
+  background: var(--civia-amber);
+  color: #ffffff;
+}
+
+.civia-map-shell {
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--civia-border);
+  margin-bottom: 1rem;
+}
+
+.civia-map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  padding: 0.6rem 0.9rem;
+  background: #eef4f3;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.civia-map-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.civia-map-legend i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.civia-reports-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 1rem;
+}
+
+.civia-report-card {
+  background: var(--civia-surface);
+  border: 1px solid var(--civia-border);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  transition: box-shadow 0.15s ease;
+}
+
+.civia-report-card:hover {
+  box-shadow: 0 6px 18px rgba(15, 76, 92, 0.1);
+}
+
+.civia-report-thumb {
+  width: 100%;
+  height: 165px;
+  object-fit: cover;
+  background: #e1e8e7;
+}
+
+.civia-report-body {
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  flex: 1;
+}
+
+.civia-badge-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.civia-badge {
+  font-size: 0.73rem;
+  font-weight: 700;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  text-transform: uppercase;
+}
+
+.civia-badge.cat-HUECO {
+  background: #fde8d7;
+  color: #9e3f04;
+}
+.civia-badge.cat-BASURAS {
+  background: #f1e4ff;
+  color: #5a189a;
+}
+.civia-badge.cat-TALA {
+  background: #d8f3dc;
+  color: #1b4332;
+}
+.civia-badge.cat-QUEMA {
+  background: #ffe0e6;
+  color: #a4031f;
+}
+.civia-badge.cat-OTRO {
+  background: #e0ecff;
+  color: #1d4ed8;
+}
+
+.civia-badge.synthetic {
+  background: #fff3cd;
+  color: #7a5200;
+  border: 1px solid #f0d48a;
+}
+
+.civia-badge.status {
+  background: #e6f4f1;
+  color: #0b4f4a;
+}
+
+.civia-alert {
+  padding: 0.85rem 1rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  font-weight: 500;
+}
+
+.civia-alert.error {
+  background: #fde8ec;
+  color: #8f0822;
+  border: 1px solid #f5b8c4;
+}
+
+.civia-alert.success {
+  background: #dcfce7;
+  color: #14532d;
+  border: 1px solid #86efac;
+}
+
+.civia-alert.info {
+  background: #e0f2fe;
+  color: #0c4a6e;
+  border: 1px solid #7dd3fc;
+}
+
+.civia-timeline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.85rem 0;
+}
+
+.civia-step {
+  flex: 1;
+  min-width: 130px;
+  padding: 0.55rem 0.7rem;
+  border-radius: 8px;
+  background: #eef3f2;
+  border-left: 4px solid #b5c6c3;
+  font-size: 0.8rem;
+}
+
+.civia-step.done {
+  background: #e2f7f3;
+  border-left-color: var(--civia-mint);
+  font-weight: 700;
+}
+
+.civia-two-col {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 1.25rem;
+}
+
+@media (max-width: 900px) {
+  .civia-two-col {
+    grid-template-columns: 1fr;
+  }
+}
+
+.civia-popup-card {
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.civia-popup-code {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--civia-teal);
+}
+
+.civia-popup-meta {
+  font-size: 0.78rem;
+  color: #445;
+}
+
+.civia-popup-btn {
+  margin-top: 0.3rem;
+  padding: 0.35rem 0.6rem;
+  border-radius: 6px;
+  border: none;
+  background: var(--civia-teal);
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.civia-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.84rem;
+}
+
+.civia-table th,
+.civia-table td {
+  text-align: left;
+  padding: 0.55rem 0.65rem;
+  border-bottom: 1px solid var(--civia-border);
+}
+
+.civia-table th {
+  background: #f0f5f4;
+  color: var(--civia-teal-dark);
+}

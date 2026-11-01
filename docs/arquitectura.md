@@ -1,24 +1,25 @@
-# Arquitectura propuesta — CIVIA
+# Arquitectura implementada — CIVIA
 
-**Estado:** diseño; no se ha implementado el flujo ciudadano.
+**Estado:** Fases A, B, C y D implementadas y verificadas mediante Docker Compose y suite de pruebas automatizadas.
 
-- Frontend: React + TypeScript + Vite, PWA de reportes ciudadanos, mapa y accesibilidad.
-- Backend: FastAPI (Python), API y agente; las decisiones de escritura quedan en código y requieren aprobación humana cuando corresponda.
-- Datos: PostgreSQL; considerar PostGIS si los criterios espaciales lo requieren, actualizando imagen Docker y migraciones (la imagen inicial NO incluye PostGIS).
-- IA: adaptadores Google Gemini y Groq con contrato de salida validado, fallback y trazas protegidas.
-- Entrada: texto + imagen + coordenadas; voz hasta 60s/5MB si las prioridades y pruebas permiten incluirla.
-- Fuera del MVP: predicción de hotspots, satélite en tiempo real y video; no fingir datos externos.
-- Integración: respuesta JSON estructurada con estados honestos por etapa, no animación falsa ni streaming simulado.
-- Seguridad: límites de tamaño/tipo de archivo, rate limit, sanitización y minimización de datos personales.
+## Componentes principales
+- **Frontend (`frontend/`, puerto `5173`)**:
+  - React 19 + TypeScript + Vite compilado en contenedor multi-stage (`node:22-alpine` -> `nginx:1.27-alpine`).
+  - PWA instalable con `manifest.webmanifest`, `sw.js` e icono vectorial.
+  - Mapa interactivo de Cali con Leaflet, filtros combinados y búsqueda espacial por radio Haversine.
+  - Nginx actúa como proxy inverso para `/api/*` y `/health` hacia `http://api:8000`, evitando rutas absolutas o problemas CORS en cualquier máquina.
+- **Backend (`backend/`, puerto `8000`)**:
+  - FastAPI (`Python 3.13-slim`) con migraciones SQL automáticas e idempotentes al arranque (`app/db.py` + `migrations/001_initial_schema.sql`).
+  - Validación de seguridad (`app/security.py`): verificación de firmas binarias (*magic bytes*) para imágenes y audio, dimensiones `32x32..8192x8192`, eliminación de metadatos EXIF, sanitización de HTML/PII y *rate limiting* por IP.
+  - Router de IA desacoplado (`app/ai_router.py`): orden `gemini-3.8-flash` (Google) → `qwen/qwen3.8-27b` (Groq) → `gemini-3.6-flash` (Google), con *circuit breaker*, *backoff* con *jitter*, reparación acotada de JSON y validación Pydantic (`AIAnalysisContract`).
+  - Agente con herramientas tipadas (`app/agent.py`): `consultar_reportes`, `obtener_reporte`, `clasificar_evidencia` y `proponer_actualizacion_critica`, gobernado por 4 límites efectivos (iteraciones, tokens, *timeout* por herramienta y aprobación humana en `pending_approvals`).
+  - Observabilidad protegida (`app/observability.py`): registro de trazas sanitizadas en tabla `ai_traces`, cálculo de latencias `P50`/`P90` y costo estimado en USD, accesible únicamente con cabecera `X-Admin-Token`.
+- **Base de datos (`db`, PostgreSQL 17 Alpine)**:
+  - Consultas SQL directas parametrizadas e índices B-Tree + fórmula Haversine espacial (sin RAG ni dependencia de PostGIS).
 
-## Flujo MVP
-1. Ciudadano ingresa descripción, foto y punto geográfico.
-2. Backend valida y persiste un reporte en estado pendiente.
-3. Servicio de IA clasifica la evidencia mediante contrato tipado; fallos tratados por router con 2 proveedores.
-4. Usuario revisa/edita categoría sugerida; sistema confirma registro.
-5. Admin consulta reportes, métricas y trazas protegidas; ciudadanía nunca ve errores internos.
-
-## Por confirmar con pruebas
-- Acceso a modelos y cuota en cada API key.
-- Métricas del dataset sintético y límites de latencia/costo.
-- Requisitos exactos de despliegue de cPanel; no depender de hosting compartido para entrega.
+## Flujo Vertical Ciudadano
+1. El ciudadano ingresa descripción, fotografía (y nota de voz opcional) y coordenadas GPS o punto en el mapa de Cali.
+2. El backend valida seguridad, elimina EXIF, persiste el reporte en PostgreSQL y ejecuta clasificación multimodal mediante el router resiliente.
+3. Si algún proveedor responde válidamente, el reporte pasa a `ANALYZED_PENDING_CONFIRMATION`; si todos fallan, permanece seguro en `PENDING_ANALYSIS` sin exponer fallos internos.
+4. El ciudadano revisa la sugerencia de la IA y confirma o edita la categoría/severidad (`PATCH /api/reports/{id}/confirm`), pasando a `CONFIRMED`.
+5. Cualquier ciudadano consulta el estado por código de radicado (`CIV-2026-...`), y los operadores gestionan trazas y aprobaciones humanas en la zona protegida.

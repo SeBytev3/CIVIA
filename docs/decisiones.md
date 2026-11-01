@@ -4,14 +4,20 @@
 **Estado:** pendiente de medición real; no registrar cifras inventadas.
 
 ## Agente (25 puntos)
-- Diseño de herramientas: `consultar_reportes`, `obtener_reporte`, `clasificar_evidencia` (pendiente de implementar en Fase D).
-- Guardrails: máximo vueltas, presupuesto tokens, timeout herramienta, confirmación humana (pendiente de demostrar en Fase D).
-- Proveedores desacoplados Gemini/Groq:
-  - Preflight de modelos verificado en Fase A contra APIs oficiales:
-    - Primario (`AI_PRIMARY_MODEL=gemini-3.8-flash`): disponible en catálogo `/v1beta/models`, pero propenso a picos `503/timeout` bajo alta demanda; se protegerá con timeout por intento y circuit breaker para conmutar rápido sin bloquear al ciudadano.
-    - Respaldo independiente (`AI_FALLBACK_MODEL=qwen/qwen3.8-27b` en Groq): verificado con soporte real de visión (imágenes >= 32x32 px), salida JSON (`json_object`) y *tool calling*.
-    - Alternativo (`AI_TERTIARY_MODEL=gemini-3.6-flash` en Google): verificado con soporte real de visión, salida JSON (`application/json`) y *tool calling* (~1.67s de latencia).
-    - Nota sobre cuotas: dos claves Google en un mismo proyecto comparten cuota, por lo que el respaldo real ante `429` de cuota de proyecto recae en el proveedor independiente Groq (`qwen/qwen3.8-27b`), mientras que la clave secundaria / tercer modelo cubre fallos específicos de modelo (`503` en `gemini-3.8-flash` mientras `gemini-3.6-flash` está operativo).
+- Diseño de herramientas tipadas implementadas en `backend/app/agent.py`:
+  - `consultar_reportes`: búsqueda SQL directa por categoría (`HUECO`, `BASURAS`, `TALA`, `QUEMA`, `OTRO`), severidad (`BAJA`, `MEDIA`, `ALTA`, `CRITICA`), estado, comuna, texto libre `q` y radio espacial Haversine (`lat`, `lon`, `radius_km`).
+  - `obtener_reporte`: consulta puntual por código de radicado (`CIV-2026-...`) o `UUID`.
+  - `clasificar_evidencia`: análisis multimodal de fotografía + descripción mediante `AIAnalysisContract` preservando la frontera de confirmación humana (`human_confirmed = False`).
+  - `proponer_actualizacion_critica`: registra propuestas de cambio de estado en `pending_approvals` (`status = 'PENDING'`) sin modificar jamás la tabla `reports` directamente.
+- Cuatro límites efectivos implementados y verificados con pruebas (`backend/tests/test_ai_and_agent.py`):
+  1. **Máximo de iteraciones (`AGENT_MAX_ITERATIONS=5`)**: corta el ciclo agéntico al alcanzar el tope de vueltas (`guardrail_triggered = "MAX_ITERATIONS"`).
+  2. **Presupuesto máximo de tokens (`AGENT_MAX_TOKENS=6000`)**: contabiliza `prompt_tokens + completion_tokens` por turno y detiene el ciclo si se alcanza el presupuesto (`guardrail_triggered = "MAX_TOKENS"`).
+  3. **Timeout por herramienta (`4.0s`) y presupuesto temporal global (`AI_TIMEOUT_SECONDS=15`)**: cada herramienta corre en un `ThreadPoolExecutor` con timeout estricto (`guardrail_triggered = "TIMEOUT"`).
+  4. **Confirmación humana obligatoria para escritura crítica (`HUMAN_APPROVAL_REQUIRED`)**: cualquier solicitud de cambio de estado crea un registro en `pending_approvals` que solo se aplica a `reports` cuando un humano invoca `POST /api/admin/approvals/{id}/decide`.
+- Proveedores desacoplados Gemini/Groq (`backend/app/ai_router.py`):
+  - Orden configurado por `.env`: 1) `gemini-3.8-flash` (Google) → 2) `qwen/qwen3.8-27b` (Groq) → 3) `gemini-3.6-flash` (Google).
+  - Resiliencia: reintentos acotados con *backoff* exponencial y *jitter*, *circuit breaker* por `(provider, model)` con enfriamiento, extracción y reparación acotada de JSON y validación Pydantic (`AIAnalysisContract`).
+  - Si todos los proveedores fallan (`FALLA_FORZADA=TOTAL`), el reporte se guarda con `status = 'PENDING_ANALYSIS'` y la interfaz muestra confirmación honesta con cero *tracebacks* y cero nombres de proveedores.
 
 ## Datos (20 puntos)
 - Estrategia escogida: consulta SQL directa de datos relacionales de reportes en PostgreSQL 17 (`postgres:17-alpine`), **no RAG** y **sin PostGIS externo**.
