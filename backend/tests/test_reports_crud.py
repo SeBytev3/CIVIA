@@ -7,7 +7,7 @@ from PIL import Image
 import pytest
 
 from app.config import settings
-from app.db import run_migrations
+from app.db import get_conn, run_migrations
 from app.main import app
 from app.security import rate_limiter
 from app.seed import seed_synthetic_reports
@@ -19,6 +19,10 @@ def setup_db_and_seed():
     run_migrations()
     seed_synthetic_reports(force_reset=False)
     yield
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM reports WHERE is_synthetic = FALSE;")
+            conn.commit()
 
 
 @pytest.fixture(autouse=True)
