@@ -3,6 +3,7 @@ import contextvars
 import logging
 from pathlib import Path
 import re
+import threading
 import time
 from typing import Any, Generator
 from urllib.parse import urlparse, urlunparse
@@ -17,6 +18,40 @@ logger = logging.getLogger("civia.db")
 
 _SAFE_DB_NAME_RE = re.compile(r"^[a-zA-Z0-9_]+$")
 _CURRENT_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("_CURRENT_DEADLINE", default=None)
+
+_ACTIVE_CONNS_BY_THREAD: dict[int, set[psycopg.Connection[Any]]] = {}
+_CONNS_LOCK = threading.Lock()
+
+
+def register_active_conn(conn: psycopg.Connection[Any]) -> None:
+    tid = threading.get_ident()
+    with _CONNS_LOCK:
+        if tid not in _ACTIVE_CONNS_BY_THREAD:
+            _ACTIVE_CONNS_BY_THREAD[tid] = set()
+        _ACTIVE_CONNS_BY_THREAD[tid].add(conn)
+
+
+def unregister_active_conn(conn: psycopg.Connection[Any]) -> None:
+    tid = threading.get_ident()
+    with _CONNS_LOCK:
+        conns = _ACTIVE_CONNS_BY_THREAD.get(tid)
+        if conns is not None:
+            conns.discard(conn)
+            if not conns:
+                _ACTIVE_CONNS_BY_THREAD.pop(tid, None)
+
+
+def cancel_active_conns_for_thread(tid: int) -> int:
+    with _CONNS_LOCK:
+        conns = list(_ACTIVE_CONNS_BY_THREAD.get(tid, set()))
+    canceled_count = 0
+    for c in conns:
+        try:
+            c.cancel()
+            canceled_count += 1
+        except Exception:
+            pass
+    return canceled_count
 
 
 def set_deadline_context(deadline: float | None) -> contextvars.Token[float | None]:
@@ -93,13 +128,29 @@ def ensure_isolated_database(target_db_name: str = "civia_test", base_url: str |
 
 def checked_commit(conn: psycopg.Connection[Any]) -> None:
     dl_check = get_deadline_context()
-    if dl_check is not None and time.monotonic() >= dl_check:
+    if dl_check is not None:
+        rem_sec = dl_check - time.monotonic()
+        if rem_sec <= 0:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
+        timer = threading.Timer(rem_sec, conn.cancel)
+        timer.daemon = True
+        timer.start()
         try:
-            conn.rollback()
-        except Exception:
-            pass
-        raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
-    conn.commit()
+            conn.commit()
+        except (psycopg.errors.QueryCanceled, psycopg.errors.AdminShutdown, psycopg.OperationalError) as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise TimeoutError("Operación abortada por expiración del deadline durante commit en base de datos.") from exc
+        finally:
+            timer.cancel()
+    else:
+        conn.commit()
 
 
 @contextmanager
@@ -113,17 +164,34 @@ def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Conne
             statement_timeout_ms = max(10, int(rem_sec * 1000))
 
     conn = psycopg.connect(settings.DATABASE_URL, row_factory=dict_row, connect_timeout=5)
+    register_active_conn(conn)
     orig_commit = conn.commit
 
     def _wrapped_commit() -> None:
         dl_check = get_deadline_context()
-        if dl_check is not None and time.monotonic() >= dl_check:
+        if dl_check is not None:
+            rem_sec_commit = dl_check - time.monotonic()
+            if rem_sec_commit <= 0:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
+            timer = threading.Timer(rem_sec_commit, conn.cancel)
+            timer.daemon = True
+            timer.start()
             try:
-                conn.rollback()
-            except Exception:
-                pass
-            raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
-        return orig_commit()
+                return orig_commit()
+            except (psycopg.errors.QueryCanceled, psycopg.errors.AdminShutdown, psycopg.OperationalError) as exc:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise TimeoutError("Operación abortada por expiración del deadline durante commit en base de datos.") from exc
+            finally:
+                timer.cancel()
+        else:
+            return orig_commit()
 
     conn.commit = _wrapped_commit  # type: ignore[assignment]
 
@@ -134,6 +202,7 @@ def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Conne
                 cur.execute(f"SET LOCAL lock_timeout = {int(statement_timeout_ms)};")
         yield conn
     finally:
+        unregister_active_conn(conn)
         conn.close()
 
 

@@ -140,3 +140,20 @@
 - **Verificación de la suite completa + suite adversarial G2 en PostgreSQL 17 real**:
   - `docker compose exec -T api pytest -v`: **`57 passed in 52.94s`** (`23/23` en `tests/test_audit_g2_resilience.py`, `14/14` en `tests/test_audit_g1_security.py`, `12/12` en `tests/test_ai_and_agent.py`, `7/7` en `test_reports_crud.py` y `test_health.py`, `1/1` en `test_e2e_frontend_proxy.py`).
   - Suite dorada (`eval/evaluar.py`): **`6/6` casos dorados verificados por SQL (`100%`)**, **`11/15` consultas representativas aprobadas (`73.33%`)**, Q13 superada.
+
+### Bloque G2.1 — Remediación obligatoria de los cuatro hallazgos prioritarios de auditoría completado (2026-11-02)
+- **Detalle completo por hallazgo, diagnóstico, corrección y contraejemplos**: documentado en [`docs/remediacion_g2_1.md`](remediacion_g2_1.md).
+- **Cierres aplicados**:
+  1. **`A-02` (Escrituras posteriores a TIMEOUT cerradas)**: Temporizador activo de cancelación `threading.Timer(rem_sec, conn.cancel)` durante la fase de commit en PostgreSQL, atrapando `QueryCanceled` y forzando rollback inmediato ante demoras por triggers diferidos (`pg_sleep(0.18)`). Cancelación activa out-of-band `cancel_active_conns_for_thread(tid)` y sincronización `shutdown(wait=True)` al abortar herramientas lentas.
+  2. **`M-03` (Deadline integral y degradación honesta sin HTTP 500)**: Acotamiento server-side irrevocable `eff_total_timeout = min(AI_TIMEOUT_SECONDS, ...)`. Eliminación del piso de 0.5 s en el router (`effective_timeout = min(per_call_timeout, remaining_for_call)`) y verificación post-llamada para rechazar contratos vencidos. Fallback determinista inmediato y honesto sin abrir conexiones SQL cuando el deadline está vencido, eliminando excepciones no manejadas y respondiendo HTTP 200 con `"guardrail_triggered": "TIMEOUT"`, nunca HTTP 500.
+  3. **`M-06` (Confianza en proxies y anti-spoofing en rate limiting)**: Eliminado `--forwarded-allow-ips=*` de Uvicorn en Dockerfile. Nginx configurado para fijar de borde `proxy_set_header X-Forwarded-For $remote_addr;`. `get_trusted_client_ip` verifica primero que el peer TCP pertenezca a la lista explícita de `TRUSTED_PROXIES` antes de evaluar cabeceras, impidiendo eludir el rate limit mediante cabeceras manipuladas (429 verificado en la 3ra solicitud bajo Uvicorn `ProxyHeadersMiddleware`).
+  4. **`M-02` (Presupuesto de tokens dinámico y contabilidad multimodal anidada)**: Implementada la clase `TokenBudgetTracker` compartida por contexto entre turnos del agente y herramientas. Estimación dinámica de tokens de entrada (`estimate_prompt_tokens()`) sobre el payload real (sistema + herramientas + historial), activando `MAX_TOKENS` antes de llamar al modelo si el presupuesto restante es insuficiente (< `est_prompt + 20`), impidiendo gastar 1020 tokens con presupuesto 100. Contabilidad y control de presupuesto en `tool_clasificar_evidencia` (1600 tokens multimodal deducidos del presupuesto compartido).
+- **Verificación de suites en PostgreSQL 17 real (`civia-db-1`)**:
+  - `docker compose exec -T api pytest -v`: **`65 passed in 67.01s`** (100% aprobadas, 0 fallos):
+    - `tests/test_audit_g1_security.py`: 14 passed.
+    - `tests/test_audit_g2_resilience.py`: 23 passed.
+    - `tests/test_audit_g2_1_remediation.py`: 9 passed.
+    - `tests/test_ai_and_agent.py`: 12 passed.
+    - `tests/test_reports_crud.py`: 6 passed.
+    - `tests/test_health.py`: 1 passed.
+  - Evaluación E2 (`eval/evaluar.py`): completada con éxito (P50 = 2767.0 ms, P90 = 6380.4 ms). Cero regresiones en N-02 ni mitigaciones G1.

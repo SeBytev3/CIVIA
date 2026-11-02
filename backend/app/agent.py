@@ -1,7 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import contextvars
 import json
 import logging
+import math
 from pathlib import Path
+import re
+import threading
 import time
 from typing import Any, Callable
 from uuid import UUID
@@ -19,6 +23,7 @@ from app.ai_router import (
 )
 from app.config import settings
 from app.db import (
+    cancel_active_conns_for_thread,
     get_conn,
     get_deadline_context,
     reset_deadline_context,
@@ -38,6 +43,56 @@ from app.security import _CO_PHONE_RE, _EMAIL_RE
 logger = logging.getLogger("civia.agent")
 
 _ON_APPROVAL_CREATED_HOOK: Callable[[UUID], None] | None = None
+
+
+class TokenBudgetTracker:
+    def __init__(self, max_budget: int) -> None:
+        self.max_budget = max_budget
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.total_tokens = 0
+        self.tokens_estimated = False
+        self._lock = threading.Lock()
+
+    def record_usage(self, prompt: int, completion: int, estimated: bool = False) -> None:
+        with self._lock:
+            self.prompt_tokens += max(0, prompt)
+            self.completion_tokens += max(0, completion)
+            self.total_tokens += max(0, prompt + completion)
+            if estimated:
+                self.tokens_estimated = True
+
+    def remaining(self) -> int:
+        with self._lock:
+            return max(0, self.max_budget - self.total_tokens)
+
+    def is_exhausted(self) -> bool:
+        with self._lock:
+            return self.total_tokens >= self.max_budget
+
+
+_ACTIVE_TOKEN_TRACKER: contextvars.ContextVar[TokenBudgetTracker | None] = contextvars.ContextVar(
+    "_ACTIVE_TOKEN_TRACKER", default=None
+)
+
+
+def estimate_prompt_tokens(conversation: list[dict[str, Any]], tools_spec: list[dict[str, Any]]) -> int:
+    system_chars = len(AGENT_SYSTEM_PROMPT)
+    tools_chars = len(json.dumps(tools_spec))
+    history_chars = 0
+    for msg in conversation:
+        content = msg.get("content") or ""
+        if isinstance(content, str):
+            history_chars += len(content)
+        elif isinstance(content, list):
+            history_chars += len(json.dumps(content))
+        if "args" in msg:
+            history_chars += len(json.dumps(msg["args"]))
+        if "result" in msg:
+            history_chars += len(json.dumps(msg["result"]))
+    total_chars = system_chars + tools_chars + history_chars
+    # Estimación conservadora en español y estructuras JSON: 3.0 caracteres por token
+    return max(60, int(math.ceil(total_chars / 3.0)))
 
 
 def set_approval_created_hook(hook: Callable[[UUID], None] | None) -> None:
@@ -284,6 +339,17 @@ def tool_clasificar_evidencia(args: dict[str, Any]) -> dict[str, Any]:
             "mensaje": "No se encontró el reporte para analizar su evidencia.",
         }
 
+    tracker = _ACTIVE_TOKEN_TRACKER.get()
+    if tracker is not None and tracker.remaining() < 150:
+        return {
+            "encontrado": True,
+            "tracking_code": row["tracking_code"],
+            "analisis_completado": False,
+            "status": row["status"],
+            "mensaje": "Presupuesto de tokens del agente agotado; no es posible ejecutar clasificación multimodal.",
+            "guardrail_triggered": "MAX_TOKENS",
+        }
+
     safe_name = Path(row["photo_path"]).name
     photo_file = settings.UPLOAD_DIR / safe_name
     img_bytes = photo_file.read_bytes() if photo_file.exists() else None
@@ -298,6 +364,15 @@ def tool_clasificar_evidencia(args: dict[str, Any]) -> dict[str, Any]:
         audio_transcript=row.get("audio_transcript"),
         report_id=row["id"],
     )
+
+    if tracker is not None:
+        p_tok = int(meta.get("prompt_tokens") or 0)
+        c_tok = int(meta.get("completion_tokens") or 0)
+        if p_tok <= 0 and c_tok <= 0:
+            tracker.record_usage(1200, 80, estimated=True)
+        else:
+            tracker.record_usage(p_tok, c_tok, estimated=False)
+
     if contract is None:
         return {
             "encontrado": True,
@@ -405,8 +480,10 @@ def execute_tool_with_timeout(
         return {"error": f"Herramienta desconocida: {tool_name}"}
 
     eff_deadline = deadline if deadline is not None else (time.monotonic() + timeout_sec)
+    worker_tid: list[int] = []
 
     def _worker() -> dict[str, Any]:
+        worker_tid.append(threading.get_ident())
         tok = set_deadline_context(eff_deadline)
         try:
             res = fn(tool_args)
@@ -421,9 +498,17 @@ def execute_tool_with_timeout(
     try:
         return future.result(timeout=timeout_sec)
     except FuturesTimeoutError as exc:
+        if worker_tid:
+            cancel_active_conns_for_thread(worker_tid[0])
+        try:
+            future.exception(timeout=0.15)
+        except Exception:
+            pass
         raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s.") from exc
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        if worker_tid:
+            cancel_active_conns_for_thread(worker_tid[0])
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _gemini_tools_declaration() -> list[dict[str, Any]]:
@@ -663,58 +748,67 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
     construye una respuesta honesta y verificable a partir de PostgreSQL sin exponer errores técnicos.
     """
     q_up = query.upper()
-    # Si aún no se ejecutó ninguna herramienta, ejecutar consulta directa según intención
+    # Si aún no se ejecutó ninguna herramienta, ejecutar consulta directa según intención siempre que haya tiempo
     if not tool_history:
-        import re
+        dl = get_deadline_context()
+        if dl is not None and (dl - time.monotonic()) <= 0.05:
+            return "El agente no pudo completar el procesamiento dentro del límite de tiempo asignado (deadline agotado)."
 
-        code_match = re.search(r"CIV-\d{4}-[A-Z0-9]+", q_up)
-        wants_status_change = any(
-            w in q_up for w in ("CAMBIA", "ACTUALIZA", "PROPON", "MARCAR COMO", "PASAR A", "CAMBIAR")
-        )
-        if code_match and wants_status_change:
-            new_st = "IN_REVIEW"
-            for candidate_st in ("RESOLVED", "IN_REVIEW", "CONFIRMED", "REJECTED"):
-                if candidate_st in q_up:
-                    new_st = candidate_st
-                    break
-            targs = {
-                "identificador": code_match.group(0),
-                "nuevo_estado": new_st,
-                "motivo": "Solicitud ciudadana procesada en modo determinista con aprobación humana obligatoria.",
-            }
-            res = tool_proponer_actualizacion_critica(targs)
-            tool_history.append({"tool": "proponer_actualizacion_critica", "args": targs, "result": res})
-        elif code_match:
-            res = tool_obtener_reporte({"identificador": code_match.group(0)})
-            tool_history.append({"tool": "obtener_reporte", "args": {"identificador": code_match.group(0)}, "result": res})
-        else:
-            args: dict[str, Any] = {}
-            for cat in ("HUECO", "BASURAS", "TALA", "QUEMA"):
-                if cat in q_up:
-                    args["category"] = cat
-                    break
-            if "ANALYZED_PENDING_CONFIRMATION" in q_up or "PENDIENTES DE CONFIRMACIÓN" in q_up or "PENDIENTE DE CONFIRMACIÓN" in q_up:
-                args["status"] = "ANALYZED_PENDING_CONFIRMATION"
-            elif "PENDING_ANALYSIS" in q_up:
-                args["status"] = "PENDING_ANALYSIS"
-            elif "IN_REVIEW" in q_up or "EN REVISIÓN" in q_up:
-                args["status"] = "IN_REVIEW"
-            elif "RESOLVED" in q_up or "RESUELTO" in q_up:
-                args["status"] = "RESOLVED"
-            comuna_match = re.search(r"COMUNA\s+(\d+)", q_up)
-            if comuna_match:
-                args["comuna"] = f"Comuna {comuna_match.group(1)}"
-            lat_match = re.search(r"LAT(?:ITUD)?\s*[:=]?\s*(-?\d+\.\d+)", q_up)
-            lon_match = re.search(r"LON(?:GITUD)?\s*[:=]?\s*(-?\d+\.\d+)", q_up)
-            rad_match = re.search(r"(\d+(?:\.\d+)?)\s*KM", q_up)
-            if lat_match and lon_match:
-                args["lat"] = float(lat_match.group(1))
-                args["lon"] = float(lon_match.group(1))
-                args["radius_km"] = float(rad_match.group(1)) if rad_match else 2.5
-            if any(w in q_up for w in ("SATELITAL", "NDVI", "RADIACION", "RADIACIÓN", "NUCLEAR")):
-                args["q"] = "NDVI_INEXISTENTE_999"
-            res = tool_consultar_reportes(args)
-            tool_history.append({"tool": "consultar_reportes", "args": args, "result": res})
+        try:
+            code_match = re.search(r"CIV-\d{4}-[A-Z0-9]+", q_up)
+            wants_status_change = any(
+                w in q_up for w in ("CAMBIA", "ACTUALIZA", "PROPON", "MARCAR COMO", "PASAR A", "CAMBIAR")
+            )
+            if code_match and wants_status_change:
+                new_st = "IN_REVIEW"
+                for candidate_st in ("RESOLVED", "IN_REVIEW", "CONFIRMED", "REJECTED"):
+                    if candidate_st in q_up:
+                        new_st = candidate_st
+                        break
+                targs = {
+                    "identificador": code_match.group(0),
+                    "nuevo_estado": new_st,
+                    "motivo": "Solicitud ciudadana procesada en modo determinista con aprobación humana obligatoria.",
+                }
+                res = tool_proponer_actualizacion_critica(targs)
+                tool_history.append({"tool": "proponer_actualizacion_critica", "args": targs, "result": res})
+            elif code_match:
+                res = tool_obtener_reporte({"identificador": code_match.group(0)})
+                tool_history.append({"tool": "obtener_reporte", "args": {"identificador": code_match.group(0)}, "result": res})
+            else:
+                args: dict[str, Any] = {}
+                for cat in ("HUECO", "BASURAS", "TALA", "QUEMA"):
+                    if cat in q_up:
+                        args["category"] = cat
+                        break
+                if "ANALYZED_PENDING_CONFIRMATION" in q_up or "PENDIENTES DE CONFIRMACIÓN" in q_up or "PENDIENTE DE CONFIRMACIÓN" in q_up:
+                    args["status"] = "ANALYZED_PENDING_CONFIRMATION"
+                elif "PENDING_ANALYSIS" in q_up:
+                    args["status"] = "PENDING_ANALYSIS"
+                elif "IN_REVIEW" in q_up or "EN REVISIÓN" in q_up:
+                    args["status"] = "IN_REVIEW"
+                elif "RESOLVED" in q_up or "RESUELTO" in q_up:
+                    args["status"] = "RESOLVED"
+                comuna_match = re.search(r"COMUNA\s+(\d+)", q_up)
+                if comuna_match:
+                    args["comuna"] = f"Comuna {comuna_match.group(1)}"
+                lat_match = re.search(r"LAT(?:ITUD)?\s*[:=]?\s*(-?\d+\.\d+)", q_up)
+                lon_match = re.search(r"LON(?:GITUD)?\s*[:=]?\s*(-?\d+\.\d+)", q_up)
+                rad_match = re.search(r"(\d+(?:\.\d+)?)\s*KM", q_up)
+                if lat_match and lon_match:
+                    args["lat"] = float(lat_match.group(1))
+                    args["lon"] = float(lon_match.group(1))
+                    args["radius_km"] = float(rad_match.group(1)) if rad_match else 2.5
+                if any(w in q_up for w in ("SATELITAL", "NDVI", "RADIACION", "RADIACIÓN", "NUCLEAR")):
+                    args["q"] = "NDVI_INEXISTENTE_999"
+                res = tool_consultar_reportes(args)
+                tool_history.append({"tool": "consultar_reportes", "args": args, "result": res})
+        except Exception as exc:
+            logger.warning("Fallo en fallback SQL determinista: %s", exc)
+            return "El agente no pudo completar el procesamiento dentro del límite de tiempo asignado."
+
+    if not tool_history:
+        return "El agente no pudo completar el procesamiento dentro del límite de tiempo asignado."
 
     last = tool_history[-1]["result"]
     if "encontrado" in last:
@@ -769,18 +863,20 @@ def run_civia_agent(
     trace_group_id = uuid.uuid4()
     eff_max_iter = min(settings.AGENT_MAX_ITERATIONS, max(1, int(max_iterations if max_iterations is not None else settings.AGENT_MAX_ITERATIONS)))
     eff_max_tokens = min(settings.AGENT_MAX_TOKENS, max(50, int(max_tokens_budget if max_tokens_budget is not None else settings.AGENT_MAX_TOKENS)))
-    eff_total_timeout = float(total_timeout_seconds if total_timeout_seconds is not None else settings.AI_TIMEOUT_SECONDS)
+    eff_total_timeout = min(
+        float(settings.AI_TIMEOUT_SECONDS),
+        max(0.1, float(total_timeout_seconds if total_timeout_seconds is not None else settings.AI_TIMEOUT_SECONDS)),
+    )
 
     deadline_monotonic = time.monotonic() + eff_total_timeout
     token_context = set_deadline_context(deadline_monotonic)
+    tracker = TokenBudgetTracker(max_budget=eff_max_tokens)
+    token_tracker_ctx = _ACTIVE_TOKEN_TRACKER.set(tracker)
 
     t_start = time.perf_counter()
     conversation: list[dict[str, Any]] = [{"role": "user", "content": query}]
     executed_tools: list[dict[str, Any]] = []
     iterations_used = 0
-    total_tokens_used = 0
-    prompt_tokens_used = 0
-    completion_tokens_used = 0
     guardrail_triggered: str | None = None
     requires_human_approval = False
     pending_approval_id: str | None = None
@@ -796,9 +892,15 @@ def run_civia_agent(
                 guardrail_triggered = "TIMEOUT"
                 break
 
-            remaining_tokens = eff_max_tokens - total_tokens_used
-            MIN_ESTIMATED_TOKENS = 60
-            if remaining_tokens < MIN_ESTIMATED_TOKENS:
+            rem_tokens = tracker.remaining()
+            est_prompt_tokens = estimate_prompt_tokens(conversation, AGENT_TOOLS_SPEC)
+            # Reserva dinámica de tokens de entrada + margen mínimo de respuesta (20 tokens)
+            if rem_tokens < (est_prompt_tokens + 20):
+                guardrail_triggered = "MAX_TOKENS"
+                break
+
+            call_max_tokens = min(700, max(1, rem_tokens - est_prompt_tokens))
+            if call_max_tokens < 10:
                 guardrail_triggered = "MAX_TOKENS"
                 break
 
@@ -826,7 +928,6 @@ def run_civia_agent(
 
                 t_call = time.perf_counter()
                 call_timeout = min(remaining_sec, 6.0)
-                call_max_tokens = min(700, max(1, remaining_tokens - MIN_ESTIMATED_TOKENS))
 
                 try:
                     forced = _check_forced_fault(tier, provider)
@@ -852,9 +953,14 @@ def run_civia_agent(
 
                     dt_ms = int((time.perf_counter() - t_call) * 1000)
                     cb.record_success()
-                    prompt_tokens_used += in_tok
-                    completion_tokens_used += out_tok
-                    total_tokens_used += in_tok + out_tok
+
+                    est = False
+                    if in_tok <= 0 and out_tok <= 0:
+                        in_tok = est_prompt_tokens
+                        out_tok = max(10, int(math.ceil(len(turn_text or "") / 3.0)))
+                        est = True
+
+                    tracker.record_usage(in_tok, out_tok, estimated=est)
                     active_provider = provider
                     active_model = model
                     if idx > 0:
@@ -872,7 +978,12 @@ def run_civia_agent(
                         prompt_tokens=in_tok,
                         completion_tokens=out_tok,
                         tool_calls=[{"name": tc["name"], "args": tc.get("args") or {}} for tc in turn_tool_calls],
-                        metadata={"turn": turn, "tier": tier, "fallback_used": fallback_used},
+                        metadata={
+                            "turn": turn,
+                            "tier": tier,
+                            "fallback_used": fallback_used,
+                            "tokens_estimated": est,
+                        },
                     )
                     break
                 except AIProviderError as exc:
@@ -926,7 +1037,10 @@ def run_civia_agent(
                     "tools_invoked": executed_tools,
                     "iterations_used": iterations_used,
                     "max_iterations": eff_max_iter,
-                    "total_tokens_used": total_tokens_used,
+                    "total_tokens_used": tracker.total_tokens,
+                    "prompt_tokens_used": tracker.prompt_tokens,
+                    "completion_tokens_used": tracker.completion_tokens,
+                    "tokens_estimated": tracker.tokens_estimated,
                     "max_tokens_budget": eff_max_tokens,
                     "latency_ms": total_ms,
                     "guardrail_triggered": guardrail_triggered,
@@ -940,7 +1054,7 @@ def run_civia_agent(
                 guardrail_triggered = "TIMEOUT"
                 break
 
-            if total_tokens_used >= eff_max_tokens:
+            if tracker.is_exhausted():
                 guardrail_triggered = "MAX_TOKENS"
                 break
 
@@ -970,7 +1084,10 @@ def run_civia_agent(
                     "tools_invoked": executed_tools,
                     "iterations_used": iterations_used,
                     "max_iterations": eff_max_iter,
-                    "total_tokens_used": total_tokens_used,
+                    "total_tokens_used": tracker.total_tokens,
+                    "prompt_tokens_used": tracker.prompt_tokens,
+                    "completion_tokens_used": tracker.completion_tokens,
+                    "tokens_estimated": tracker.tokens_estimated,
                     "max_tokens_budget": eff_max_tokens,
                     "latency_ms": total_ms,
                     "guardrail_triggered": guardrail_triggered,
@@ -1049,7 +1166,11 @@ def run_civia_agent(
                 break
 
         # Si salimos del bucle por alcanzar un guardrail (MAX_ITERATIONS, MAX_TOKENS, TIMEOUT o HUMAN_APPROVAL_REQUIRED)
-        answer = _deterministic_sql_fallback_answer(query, executed_tools)
+        if guardrail_triggered == "TIMEOUT" and not executed_tools:
+            answer = "El agente no pudo completar el procesamiento dentro del límite de tiempo asignado (deadline agotado)."
+        else:
+            answer = _deterministic_sql_fallback_answer(query, executed_tools)
+
         total_ms = int((time.perf_counter() - t_start) * 1000)
         return {
             "answer": sanitize_citizen_agent_output(answer),
@@ -1057,7 +1178,10 @@ def run_civia_agent(
             "tools_invoked": executed_tools,
             "iterations_used": iterations_used,
             "max_iterations": eff_max_iter,
-            "total_tokens_used": total_tokens_used,
+            "total_tokens_used": tracker.total_tokens,
+            "prompt_tokens_used": tracker.prompt_tokens,
+            "completion_tokens_used": tracker.completion_tokens,
+            "tokens_estimated": tracker.tokens_estimated,
             "max_tokens_budget": eff_max_tokens,
             "latency_ms": total_ms,
             "guardrail_triggered": guardrail_triggered,
@@ -1065,7 +1189,28 @@ def run_civia_agent(
             "pending_approval_id": pending_approval_id,
             "degraded_sql_mode": False,
         }
+    except TimeoutError:
+        guardrail_triggered = "TIMEOUT"
+        total_ms = int((time.perf_counter() - t_start) * 1000)
+        return {
+            "answer": "El agente no pudo completar el procesamiento dentro del límite de tiempo asignado (deadline agotado).",
+            "trace_group_id": str(trace_group_id),
+            "tools_invoked": executed_tools,
+            "iterations_used": iterations_used or 1,
+            "max_iterations": eff_max_iter,
+            "total_tokens_used": tracker.total_tokens,
+            "prompt_tokens_used": tracker.prompt_tokens,
+            "completion_tokens_used": tracker.completion_tokens,
+            "tokens_estimated": tracker.tokens_estimated,
+            "max_tokens_budget": eff_max_tokens,
+            "latency_ms": total_ms,
+            "guardrail_triggered": "TIMEOUT",
+            "requires_human_approval": requires_human_approval,
+            "pending_approval_id": pending_approval_id,
+            "degraded_sql_mode": False,
+        }
     finally:
+        _ACTIVE_TOKEN_TRACKER.reset(token_tracker_ctx)
         reset_deadline_context(token_context)
 
 

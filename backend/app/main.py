@@ -534,13 +534,28 @@ def query_civia_agent(request: Request, payload: AgentQueryRequest):
         max_len=1000,
         required=True,
     )
-    res = run_civia_agent(
-        clean_q,
-        max_iterations=payload.max_iterations,
-        max_tokens_budget=payload.max_tokens_budget,
-        tool_timeout_seconds=payload.tool_timeout_seconds or 4.0,
-        total_timeout_seconds=payload.total_timeout_seconds,
-    )
+    try:
+        res = run_civia_agent(
+            clean_q,
+            max_iterations=payload.max_iterations,
+            max_tokens_budget=payload.max_tokens_budget,
+            tool_timeout_seconds=payload.tool_timeout_seconds or 4.0,
+            total_timeout_seconds=payload.total_timeout_seconds,
+        )
+    except TimeoutError:
+        return {
+            "answer": "El agente no pudo completar el procesamiento dentro del límite de tiempo asignado (deadline agotado).",
+            "trace_group_id": str(uuid.uuid4()),
+            "tools_invoked": [],
+            "iterations_used": 1,
+            "max_iterations": payload.max_iterations or settings.AGENT_MAX_ITERATIONS,
+            "total_tokens_used": 0,
+            "max_tokens_budget": payload.max_tokens_budget or settings.AGENT_MAX_TOKENS,
+            "latency_ms": int((payload.total_timeout_seconds or settings.AI_TIMEOUT_SECONDS) * 1000),
+            "guardrail_triggered": "TIMEOUT",
+            "requires_human_approval": False,
+            "pending_approval_id": None,
+        }
     return {
         "answer": res["answer"],
         "trace_group_id": res["trace_group_id"],

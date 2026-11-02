@@ -14,6 +14,7 @@ import httpx
 from pydantic import ValidationError
 
 from app.config import settings
+from app.db import get_deadline_context
 from app.observability import record_ai_trace, sanitize_secret_text
 from app.schemas import AIAnalysisContract
 
@@ -411,6 +412,9 @@ def _call_gemini_multimodal(
         },
     }
 
+    if timeout_sec <= 0.005:
+        raise AIProviderError("TIMEOUT", "Tiempo de espera agotado antes de llamar a Gemini.", retryable=False)
+
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout_sec, connect=min(4.0, timeout_sec))) as client:
             resp = client.post(url, json=payload)
@@ -479,6 +483,9 @@ def _call_groq_multimodal(
         "max_tokens": 500,
     }
 
+    if timeout_sec <= 0.005:
+        raise AIProviderError("TIMEOUT", "Tiempo de espera agotado antes de llamar a Groq.", retryable=False)
+
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout_sec, connect=min(4.0, timeout_sec))) as client:
             resp = client.post(url, headers=headers, json=payload)
@@ -541,18 +548,20 @@ def classify_evidence_with_router(
     description: str,
     latitude: float,
     longitude: float,
-    image_bytes: bytes | None,
-    image_mime: str | None,
+    image_bytes: bytes | None = None,
+    image_mime: str | None = None,
     address_hint: str | None = None,
     audio_transcript: str | None = None,
     report_id: UUID | str | None = None,
+    trace_group_id: UUID | None = None,
+    total_timeout_override: float | None = None,
 ) -> tuple[AIAnalysisContract | None, dict[str, Any]]:
     """
     Ejecuta clasificación multimodal a través del router Gemini -> Groq -> Gemini.
     Nunca lanza excepción hacia el ciudadano; si todos los proveedores fallan,
     retorna (None, metadata_de_traza) para conservar el reporte en PENDING_ANALYSIS.
     """
-    trace_group_id = uuid.uuid4()
+    eff_trace_group_id = trace_group_id or uuid.uuid4()
     prompt_text = build_classification_prompt(
         description=description,
         latitude=latitude,
@@ -566,14 +575,18 @@ def classify_evidence_with_router(
     max_retries = max(0, min(settings.AI_MAX_RETRIES, 2))
     per_call_timeout = max(1.0, min(settings.AI_TIMEOUT_SECONDS, 6.0))
     t_start = time.perf_counter()
-    total_timeout = float(settings.AI_TIMEOUT_SECONDS)
+    total_timeout = float(total_timeout_override if total_timeout_override is not None else settings.AI_TIMEOUT_SECONDS)
+    dl = get_deadline_context()
+    if dl is not None:
+        rem_dl = dl - time.monotonic()
+        total_timeout = min(total_timeout, max(0.0, rem_dl))
 
     attempt_global = 0
     provider_switches = 0
 
     for idx, node in enumerate(chain):
         elapsed_router = time.perf_counter() - t_start
-        if elapsed_router >= total_timeout:
+        if elapsed_router >= total_timeout or (dl is not None and time.monotonic() >= dl):
             break
 
         provider = node["provider"]
@@ -585,7 +598,7 @@ def classify_evidence_with_router(
         if not cb.allow_request():
             attempt_global += 1
             _safe_record_trace(
-                trace_group_id=trace_group_id,
+                trace_group_id=eff_trace_group_id,
                 operation="classify_evidence",
                 provider=provider,
                 model=model,
@@ -603,11 +616,17 @@ def classify_evidence_with_router(
         # Si falla por error no reintentable (ej. INVALID_JSON o 400), pasamos directo al siguiente proveedor
         max_node_attempts = 1 + max_retries
         for node_try in range(max_node_attempts):
-            remaining_for_call = total_timeout - (time.perf_counter() - t_start)
-            if remaining_for_call <= 0.1:
+            elapsed_now = time.perf_counter() - t_start
+            remaining_for_call = total_timeout - elapsed_now
+            if dl is not None:
+                rem_ctx = dl - time.monotonic()
+                remaining_for_call = min(remaining_for_call, rem_ctx)
+            if remaining_for_call <= 0.01:
                 break
 
-            effective_timeout = max(0.5, min(per_call_timeout, remaining_for_call))
+            effective_timeout = min(per_call_timeout, remaining_for_call)
+            if effective_timeout <= 0.005:
+                break
             attempt_global += 1
             t0 = time.perf_counter()
             try:
@@ -633,12 +652,21 @@ def classify_evidence_with_router(
                         timeout_sec=effective_timeout,
                     )
 
+                # Post-call deadline verification: reject if call finished outside deadline
+                post_elapsed = time.perf_counter() - t_start
+                if post_elapsed > total_timeout or (dl is not None and time.monotonic() >= dl):
+                    raise AIProviderError(
+                        "TIMEOUT",
+                        f"Llamada a {provider}:{model} finalizó fuera del plazo permitido ({post_elapsed:.3f}s > {total_timeout:.3f}s).",
+                        retryable=False,
+                    )
+
                 contract = parse_and_validate_analysis_json(raw_text)
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_success()
 
                 _safe_record_trace(
-                    trace_group_id=trace_group_id,
+                    trace_group_id=eff_trace_group_id,
                     operation="classify_evidence",
                     provider=provider,
                     model=model,
@@ -657,20 +685,23 @@ def classify_evidence_with_router(
                     },
                 )
                 return contract, {
-                    "trace_group_id": str(trace_group_id),
+                    "trace_group_id": str(eff_trace_group_id),
                     "provider": provider,
                     "model": model,
                     "tier": tier,
                     "fallback_used": idx > 0,
                     "attempts": attempt_global,
                     "latency_ms": dt_ms,
+                    "prompt_tokens": in_tok,
+                    "completion_tokens": out_tok,
+                    "total_tokens": in_tok + out_tok,
                 }
 
             except AIProviderError as exc:
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_failure(exc.code)
                 _safe_record_trace(
-                    trace_group_id=trace_group_id,
+                    trace_group_id=eff_trace_group_id,
                     operation="classify_evidence",
                     provider=provider,
                     model=model,
@@ -686,13 +717,13 @@ def classify_evidence_with_router(
                         "provider_switches": provider_switches,
                     },
                 )
-                # Si el proveedor devolvió 429 (límite de tasa), o es el primario tras 1 reintento,
-                # o el error no es reintentable, conmutar de inmediato al siguiente proveedor de la cadena
                 if (
-                    exc.code == "HTTP_429"
+                    exc.code == "TIMEOUT"
+                    or exc.code == "HTTP_429"
                     or not exc.retryable
                     or node_try >= max_retries
                     or (tier == "primary" and node_try >= 1)
+                    or (time.perf_counter() - t_start) >= total_timeout
                 ):
                     break
                 backoff = min(0.6, 0.15 * (2**node_try) + random.uniform(0.01, 0.08))
@@ -701,7 +732,7 @@ def classify_evidence_with_router(
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_failure("UNEXPECTED_ERROR")
                 _safe_record_trace(
-                    trace_group_id=trace_group_id,
+                    trace_group_id=eff_trace_group_id,
                     operation="classify_evidence",
                     provider=provider,
                     model=model,
@@ -717,13 +748,18 @@ def classify_evidence_with_router(
 
         provider_switches += 1
 
+    dt_total = int((time.perf_counter() - t_start) * 1000)
     return None, {
-        "trace_group_id": str(trace_group_id),
+        "trace_group_id": str(eff_trace_group_id),
         "provider": "none",
         "model": "none",
         "fallback_used": True,
         "attempts": attempt_global,
         "all_failed": True,
+        "latency_ms": dt_total,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
     }
 
 

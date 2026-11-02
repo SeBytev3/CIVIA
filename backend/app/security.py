@@ -338,19 +338,28 @@ def validate_and_store_audio(
     }
 
 
-_TRUSTED_PROXY_NETWORKS = [
-    ipaddress.ip_network("127.0.0.0/8"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-]
+def get_trusted_proxy_networks() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
+    nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    raw = getattr(settings, "TRUSTED_PROXIES", "127.0.0.1,::1") or "127.0.0.1,::1"
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            if "/" in item:
+                nets.append(ipaddress.ip_network(item, strict=False))
+            else:
+                addr = ipaddress.ip_address(item)
+                nets.append(ipaddress.ip_network(f"{addr}/32" if addr.version == 4 else f"{addr}/128"))
+        except ValueError:
+            pass
+    return nets or [ipaddress.ip_network("127.0.0.1/32"), ipaddress.ip_network("::1/128")]
 
 
 def is_trusted_proxy_ip(ip_str: str) -> bool:
     try:
         ip = ipaddress.ip_address(ip_str.strip())
-        return any(ip in net for net in _TRUSTED_PROXY_NETWORKS)
+        return any(ip in net for net in get_trusted_proxy_networks())
     except ValueError:
         return False
 
@@ -358,13 +367,19 @@ def is_trusted_proxy_ip(ip_str: str) -> bool:
 def get_trusted_client_ip(request: Request) -> str:
     """
     Resuelve de forma segura la IP real del cliente evitando spoofing (M-06).
-    Si la conexión proviene de un proxy inverso confiable (Nginx local o red de Docker),
-    extrae la IP del cliente de la cabecera X-Forwarded-For o X-Real-IP.
-    Si la conexión no proviene de un proxy confiable, usa la IP del peer directamente.
+    Si la conexión no proviene de un proxy inverso confiable explícito, usa la IP del peer directamente
+    e ignora por completo cualquier cabecera X-Forwarded-For o X-Real-IP enviada por el cliente.
+    Si proviene de un proxy confiable, extrae la IP real verificando la cadena de confianza.
     """
     peer_ip = request.client.host if request.client else "unknown"
     if not is_trusted_proxy_ip(peer_ip):
         return peer_ip
+
+    x_real = request.headers.get("x-real-ip")
+    if x_real and x_real.strip():
+        cand = x_real.strip()
+        if not is_trusted_proxy_ip(cand):
+            return cand
 
     xff = request.headers.get("x-forwarded-for")
     if xff:
@@ -374,10 +389,6 @@ def get_trusted_client_ip(request: Request) -> str:
                 return cand
         if parts:
             return parts[0]
-
-    x_real = request.headers.get("x-real-ip")
-    if x_real and x_real.strip():
-        return x_real.strip()
 
     return peer_ip
 
