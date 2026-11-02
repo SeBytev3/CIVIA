@@ -1,0 +1,17 @@
+{
+  "agy_binary": "agy",
+  "codex_binary": "codex",
+  "developer_model": "gemini-3.8-flash-high",
+  "auditor_model": "o3",
+  "git_branch": "fix/auditoria-final",
+  "base_commit": "5b36fb55f87dc49e3256f9814cddb47e3cb3b800",
+  "max_cycles_per_finding": 5,
+  "max_infrastructure_retries": 3,
+  "agent_timeout_seconds": 300,
+  "test_timeout_seconds": 180,
+  "simulation_mode": false,
+  "disposable_db_prefix": "civia_test_",
+  "require_human_approval_for_destructive": true,
+  "auto_push": false,
+  "auto_merge_main": false
+}

@@ -106,6 +106,61 @@ Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injec
 
 ---
 
+## Orquestador Autónomo de Desarrollo y Auditoría (CIVIA Autopilot)
+
+CIVIA incluye un sistema de orquestación autónomo que elimina la intermediación manual del desarrollador entre **Antigravity CLI (`agy`)** con Gemini 3.8 Flash High como desarrollador y **Codex CLI (`codex exec`)** como auditor independiente.
+
+### 1. Iniciar con un único comando
+El usuario puede lanzar el flujo autónomo con una sola línea en PowerShell 7:
+
+```powershell
+pwsh -File scripts/civia-autopilot.ps1
+```
+
+El orquestador coordina automáticamente el ciclo:
+1. Lectura de memoria persistente (`PROJECT_SPEC.md`, `DEVELOPER.md`, `AUDITOR.md`, `ACCEPTANCE.md`).
+2. Entrega de contexto y prompts a Antigravity CLI.
+3. Ejecución de pruebas automatizadas deterministas (`pytest`).
+4. Generación de checkpoint commit en Git si las pruebas básicas pasan.
+5. Creación de un **Git worktree congelado y aislado** para auditoría.
+6. Invocación de Codex CLI en modo no interactivo de solo lectura (`--sandbox read-only`).
+7. Validación de informe estructurado JSON (`PASS`, `FAIL`, `PARCIAL`).
+8. Cierre de hallazgos y avance o reintento de ciclo con realimentación contextual.
+
+### 2. Opciones y Modos de Ejecución
+- **Modo Simulación determinista (sin consumir tokens ni requerir CLIs externos):**
+  ```powershell
+  pwsh -File scripts/civia-autopilot.ps1 -Simulate
+  ```
+- **Diagnóstico de Preflight del entorno:**
+  ```powershell
+  pwsh -File scripts/civia-autopilot.ps1 -PreflightOnly
+  ```
+- **Fijar bloque, hallazgo o límite de ciclos:**
+  ```powershell
+  pwsh -File scripts/civia-autopilot.ps1 -Block G2.1 -Finding M-03 -MaxCycles 3
+  ```
+- **Reiniciar memoria de estado:**
+  ```powershell
+  pwsh -File scripts/civia-autopilot.ps1 -ResetState
+  ```
+
+### 3. Suite de Verificación del Orquestador (11 escenarios)
+Para comprobar los 11 escenarios de fallo, recuperación, límites de ciclos, detección de estancamiento y guardrails de seguridad del orquestador:
+
+```powershell
+python -m pytest orchestrator/tests/test_orchestrator_scenarios.py -v
+```
+
+### 4. Políticas de Seguridad y Guardrails
+- **Bases de datos desechables:** Ninguna prueba se ejecuta sobre la base habitual (`civia`).
+- **Aislamiento en Git Worktrees:** Codex jamás muta el código del árbol de trabajo de desarrollo.
+- **Sin credenciales en logs:** Sanitización y redacción automática de tokens, llaves API y contraseñas.
+- **Límites de autonomía:** Bloqueo terminante de `git push`, merge hacia `main` y sentencias destructivas. Máximo de 5 ciclos por hallazgo y detección de ciclos sin progreso (*zero diff*).
+- **Reportes:** Registro persistente en `orchestrator/state.json`, `orchestrator/reports/execution_report.md` y `execution_report.json`.
+
+---
+
 ## Reset de datos, mantenimiento y solución de problemas en Windows 11
 
 - **Detener conservando los datos**: `docker compose down`

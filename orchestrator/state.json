@@ -1,0 +1,133 @@
+{
+  "active_block": "G2.1",
+  "current_finding": "A-04",
+  "iteration": 1,
+  "status": "IN_PROGRESS",
+  "current_commit": "5b36fb55f87dc49e3256f9814cddb47e3cb3b800",
+  "closed_findings": [
+    "C-01",
+    "A-01",
+    "M-07",
+    "N-03",
+    "A-06",
+    "A-07",
+    "B-03",
+    "N-02",
+    "A-02",
+    "M-03",
+    "M-06",
+    "M-02",
+    "A-03"
+  ],
+  "open_findings": [
+    "A-04",
+    "A-05",
+    "M-01",
+    "M-04",
+    "G3"
+  ],
+  "pending_blocks": [
+    "G2.1",
+    "G2.2",
+    "G3",
+    "AUDIT_GENERAL",
+    "PUBLICATION"
+  ],
+  "history": [
+    {
+      "iteration": 1,
+      "timestamp": "2026-11-02T16:47:07.617237+00:00",
+      "finding": "M-03",
+      "commit_sha": "5b36fb55f87dc49e3256f9814cddb47e3cb3b800",
+      "developer_status": "PASS",
+      "tests_passed": true,
+      "auditor_status": "PASS",
+      "findings_reported": [
+        {
+          "id": "M-03",
+          "status": "PASS",
+          "summary": "Hallazgo M-03 remediado satisfactoriamente.",
+          "evidence": "Contraejemplos ejecutados con resultado limpio.",
+          "blocking_issue": null
+        }
+      ],
+      "summary": "Dictamen PASS para M-03."
+    },
+    {
+      "iteration": 1,
+      "timestamp": "2026-11-02T16:48:09.112662+00:00",
+      "finding": "M-06",
+      "commit_sha": "5b36fb55f87dc49e3256f9814cddb47e3cb3b800",
+      "developer_status": "PASS",
+      "tests_passed": true,
+      "auditor_status": "PASS",
+      "findings_reported": [
+        {
+          "id": "M-06",
+          "status": "PASS",
+          "summary": "Hallazgo M-06 remediado satisfactoriamente.",
+          "evidence": "Contraejemplos ejecutados con resultado limpio.",
+          "blocking_issue": null
+        }
+      ],
+      "summary": "Dictamen PASS para M-06."
+    },
+    {
+      "iteration": 1,
+      "timestamp": "2026-11-02T16:49:09.316494+00:00",
+      "finding": "M-02",
+      "commit_sha": "5b36fb55f87dc49e3256f9814cddb47e3cb3b800",
+      "developer_status": "PASS",
+      "tests_passed": true,
+      "auditor_status": "PASS",
+      "findings_reported": [
+        {
+          "id": "M-02",
+          "status": "PASS",
+          "summary": "Hallazgo M-02 remediado satisfactoriamente.",
+          "evidence": "Contraejemplos ejecutados con resultado limpio.",
+          "blocking_issue": null
+        }
+      ],
+      "summary": "Dictamen PASS para M-02."
+    },
+    {
+      "iteration": 1,
+      "timestamp": "2026-11-02T16:50:08.004680+00:00",
+      "finding": "A-03",
+      "commit_sha": "5b36fb55f87dc49e3256f9814cddb47e3cb3b800",
+      "developer_status": "PASS",
+      "tests_passed": true,
+      "auditor_status": "PASS",
+      "findings_reported": [
+        {
+          "id": "A-03",
+          "status": "PASS",
+          "summary": "Hallazgo A-03 remediado satisfactoriamente.",
+          "evidence": "Contraejemplos ejecutados con resultado limpio.",
+          "blocking_issue": null
+        }
+      ],
+      "summary": "Dictamen PASS para A-03."
+    }
+  ],
+  "last_audit_report": {
+    "status": "PASS",
+    "findings": [
+      {
+        "id": "A-03",
+        "status": "PASS",
+        "summary": "Hallazgo A-03 remediado satisfactoriamente.",
+        "evidence": "Contraejemplos ejecutados con resultado limpio.",
+        "blocking_issue": null
+      }
+    ],
+    "evidence": [
+      "Pruebas adversariales aprobadas sin escrituras posteriores."
+    ],
+    "summary": "Dictamen PASS para A-03.",
+    "tests_executed": 3,
+    "clean_tree": true
+  },
+  "last_run_timestamp": "2026-11-02T16:50:08.007164+00:00"
+}

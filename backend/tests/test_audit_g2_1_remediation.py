@@ -179,16 +179,12 @@ def test_g2_1_a02_active_conn_cancellation_on_slow_worker():
         executed = True
         return {"status": "ok"}
 
-    from app import agent as agent_mod
+    from unittest.mock import patch
 
-    old_dispatch = dict(agent_mod.TOOL_DISPATCH)
-    agent_mod.TOOL_DISPATCH["mock_slow"] = mock_slow_tool
-    try:
+    with patch.dict("app.agent.TOOL_DISPATCH", {"mock_slow": mock_slow_tool}):
         with pytest.raises(TimeoutError):
             execute_tool_with_timeout("mock_slow", {}, timeout_sec=0.15)
         assert not executed, "La herramienta lenta no debió completarse con éxito"
-    finally:
-        agent_mod.TOOL_DISPATCH = old_dispatch
 
 
 # ==============================================================================

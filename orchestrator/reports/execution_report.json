@@ -1,0 +1,53 @@
+{
+  "timestamp": "2026-11-02T16:49:49.974300+00:00",
+  "status": "MAX_CYCLES_REACHED",
+  "active_block": "G2.1",
+  "current_commit": "5b36fb55f87dc49e3256f9814cddb47e3cb3b800",
+  "summary": "Se alcanzó el límite máximo de 2 ciclos para el hallazgo 'M-03'.",
+  "closed_findings": [
+    "A-02"
+  ],
+  "open_findings": [
+    "M-03"
+  ],
+  "history": [
+    {
+      "iteration": 1,
+      "timestamp": "2026-11-02T16:49:49.965278+00:00",
+      "finding": "M-03",
+      "commit_sha": "5b36fb55f87dc49e3256f9814cddb47e3cb3b800",
+      "developer_status": "PASS",
+      "tests_passed": true,
+      "auditor_status": "FAIL",
+      "findings_reported": [
+        {
+          "id": "M-03",
+          "status": "FAIL",
+          "summary": "Contraejemplo reproducido en M-03.",
+          "evidence": "Fallo observado con trigger tardío.",
+          "blocking_issue": "El worker no fue cancelado a tiempo."
+        }
+      ],
+      "summary": "Auditoría rechazada para M-03."
+    },
+    {
+      "iteration": 2,
+      "timestamp": "2026-11-02T16:49:49.969150+00:00",
+      "finding": "M-03",
+      "commit_sha": "5b36fb55f87dc49e3256f9814cddb47e3cb3b800",
+      "developer_status": "PASS",
+      "tests_passed": true,
+      "auditor_status": "FAIL",
+      "findings_reported": [
+        {
+          "id": "M-03",
+          "status": "FAIL",
+          "summary": "Contraejemplo reproducido en M-03.",
+          "evidence": "Fallo observado con trigger tardío.",
+          "blocking_issue": "El worker no fue cancelado a tiempo."
+        }
+      ],
+      "summary": "Auditoría rechazada para M-03."
+    }
+  ]
+}
