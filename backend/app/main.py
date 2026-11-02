@@ -5,6 +5,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Any
+import uuid
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile

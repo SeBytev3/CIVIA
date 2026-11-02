@@ -28,6 +28,8 @@ services:
       AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-6000}
       FALLA_FORZADA: ${FALLA_FORZADA:-}
       AUTO_SEED_SYNTHETIC: ${AUTO_SEED_SYNTHETIC:-true}
+      FORWARDED_ALLOW_IPS: ""
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12}
       ADMIN_TOKEN: ${ADMIN_TOKEN:?Configure ADMIN_TOKEN en .env con un secreto robusto (>=24 caracteres)}
     volumes:
       - civia_uploads:/app/data/uploads

@@ -1,142 +1,125 @@
-# Remediación G2.1 — Cierre de Hallazgos Residuales Prioritarios de Auditoría
+# Remediación G2.1 — Cierre Definitivo de Hallazgos Residuales de Auditoría (M-03, M-06, M-02)
 
 - **Proyecto:** CIVIA — Momento Evaluativo 2 (Ingeniería de Aplicaciones con IA)
 - **Equipo:** Stefania Córdoba y Sebastian Espinosa
 - **Rama activa:** `fix/auditoria-final`
-- **Informe de auditoría de referencia:** `docs/auditoria_codex_g2.md` sobre commit `4774236ef9e54a97b8c0ffb64c7b84d8778857f4`
-- **Base de datos de prueba:** PostgreSQL 17 real (`postgres:17-alpine`) en Docker Compose, bases de datos desechables por prueba (`test_g2_1_*`)
-- **Alcance estricto de este bloque:** Remediación integral de las cuatro prioridades asignadas:
-  1. `A-02`: Escrituras posteriores a TIMEOUT (fase de commit, trigger diferido y cancelación activa).
-  2. `M-03`: Deadline integral y fallback honesto degradado sin HTTP 500.
-  3. `M-06`: Confianza en proxies y anti-spoofing en rate limiting.
-  4. `M-02`: Presupuesto de tokens dinámico y contabilidad de herramientas multimodales anidadas.
+- **Informe de auditoría de referencia:** `docs/auditoria_codex_g2_1.md` sobre commit `5b36fb55f87dc49e3256f9814cddb47e3cb3b800`
+- **Base de datos de prueba:** PostgreSQL 17 real (`postgres:17-alpine`) en Docker Compose, bases de datos desechables creadas dinámicamente mediante `DATABASE_URL` (`test_g2_1_*`)
+- **Alcance estricto de este bloque:** Remediación integral y verificación adversarial de las tres deficiencias residuales señaladas por Codex:
+  1. `M-03`: Deadline integral, aislamiento de workers no cooperativos, manejador final sin HTTP 500 y soporte literal para 0.10 s en esquema.
+  2. `M-06`: Distinción estricta de proxy vs entrada directa, desactivación de `proxy_headers` en Uvicorn y cierre de evasión en loopback y rangos privados.
+  3. `M-02`: Propagación de `_ACTIVE_TOKEN_TRACKER` al executor y reserva dinámica de tokens multimodales previa a la invocación del router.
 
 ---
 
-## 1. Prioridad 1 — `A-02`: Escrituras posteriores a TIMEOUT
+## 1. Prioridad 2 — `M-03`: Deadline integral y fallback honesto
 
-### Diagnóstico del contraejemplo de Codex
-Codex demostró que en una herramienta con límite de 0.25 s, un `UPDATE` que entraba a `conn.commit()` a 0.1978 s (dentro del plazo) pero que experimentaba una demora en el servidor (como un constraint trigger `AFTER UPDATE DEFERRABLE INITIALLY DEFERRED` ejecutando `pg_sleep(0.18)`):
-1. No era cancelado por `statement_timeout`, dado que en PostgreSQL `statement_timeout` no interrumpe la fase de commit una vez iniciada.
-2. La llamada de la herramienta retornaba por timeout a 0.2526 s levantando `TimeoutError`.
-3. El hilo secundario del worker continuaba ejecutándose en segundo plano (`shutdown(wait=False)`).
-4. El commit finalizaba exitosamente a 0.4034 s y la fila cambiaba a `DEFERRED LATE COMMIT` en la base de datos después de haberse declarado el timeout al cliente.
+### Diagnóstico de Codex (`docs/auditoria_codex_g2_1.md`)
+1. **Worker no cooperativo:** Una herramienta que duerme 0.45 s sin conexiones PostgreSQL retenía la solicitud durante 0.4564 s ante un límite de 0.10 s, debido a que `executor.shutdown(wait=True)` y `future.exception(timeout=0.15)` esperaban la finalización completa del hilo.
+2. **Manejador final HTTP con `NameError`:** Al inyectar `TimeoutError` en `main.run_civia_agent`, el endpoint `/api/agent/query` devolvía HTTP 500 porque `main.py:548` utilizaba `uuid.uuid4()`, pero el módulo solo importaba `from uuid import UUID` (no el módulo `uuid`).
+3. **Rechazo por esquema de timeout 0.10 s:** Una petición HTTP con `total_timeout_seconds=0.10` recibía HTTP 422, dado que `schemas.py` mantenía `gt=0.1`.
 
 ### Remediación técnica implementada
-1. **Cancelación activa out-of-band durante el commit:**
-   - En `backend/app/db.py`, tanto `_wrapped_commit()` como `checked_commit(conn)` calculan el saldo de tiempo monotónico remanente: `rem_sec = dl_check - time.monotonic()`.
-   - Si `rem_sec <= 0`: aborta inmediatamente invocando `conn.rollback()` y levanta `TimeoutError`.
-   - Si `rem_sec > 0`: programa un temporizador daemon `timer = threading.Timer(rem_sec, conn.cancel)` inmediatamente antes de delegar en el commit original. Si el commit cruza el plazo, el temporizador envía un paquete oficial de cancelación a PostgreSQL, abortando el commit en el motor y haciendo rollback automático.
-   - Atrapa `psycopg.errors.QueryCanceled` y `OperationalError`, garantiza `conn.rollback()` y traduce la excepción a `TimeoutError`.
-2. **Registro de conexiones por hilo y sincronización de finalización:**
-   - En `backend/app/db.py`, se implementó un registro thread-safe de conexiones abiertas: `register_active_conn`, `unregister_active_conn` y `cancel_active_conns_for_thread(thread_id)`.
-   - En `backend/app/agent.py`, `execute_tool_with_timeout`:
-     - Registra el identificador del hilo del worker (`worker_tid`).
-     - Al expirar el deadline (`FuturesTimeoutError`), invoca `cancel_active_conns_for_thread(worker_tid)` para abortar cualquier query o commit en PostgreSQL.
-     - Espera la terminación del hilo con `executor.shutdown(wait=True, cancel_futures=True)`. Dado que la conexión fue cancelada, el worker se desbloquea en milisegundos, captura el error y realiza rollback.
+1. **Aislamiento y no retención de workers no cooperativos:**
+   - En `backend/app/agent.py:execute_tool_with_timeout`:
+     - Se eliminó el retraso bloqueante de `future.exception(timeout=0.15)`.
+     - En el bloque `finally:`, se invoca `executor.shutdown(wait=False, cancel_futures=True)`.
+     - Al expirar `timeout_sec`, se cancelan las conexiones PostgreSQL activas (`cancel_active_conns_for_thread`) y la función levanta de inmediato `TimeoutError` sin esperar la finalización de tareas de CPU o sleeps no cooperativos (duración < 0.20 s frente al límite de 0.10 s).
+     - Si el worker intenta interactuar con la BD posteriormente, `get_conn()` y `checked_commit()` abortan inmediatamente por vencimiento del deadline context.
+2. **Manejador HTTP final con importación correcta:**
+   - En `backend/app/main.py`: se incorporó `import uuid` en los imports de nivel superior.
+   - Ante `TimeoutError`, el manejador genera un `trace_group_id` UUID válido mediante `str(uuid.uuid4())`, retornando HTTP 200 con `guardrail_triggered="TIMEOUT"` y respuesta degradada honesta sin trazas técnicas ni HTTP 500.
+3. **Alineación de esquema para soporte de 0.10 s:**
+   - En `backend/app/schemas.py`: se ajustó la restricción de `total_timeout_seconds` a `ge=0.10` y `tool_timeout_seconds` a `ge=0.05`.
 
 ### Evidencia de prueba adversarial
 - Archivo: `backend/tests/test_audit_g2_1_remediation.py`
-  - `test_g2_1_a02_deferred_constraint_trigger_cancelled_on_timeout`: crea en una base aislada un constraint trigger diferido con `pg_sleep(0.18)` y ejecuta un worker con deadline de 0.25 s y espera previa de 0.15 s. Comprueba que se levanta `TimeoutError` y que una conexión independiente posterior verifica que la fila conserva su valor `ORIGINAL` (`PASSED`).
-  - `test_g2_1_a02_active_conn_cancellation_on_slow_worker`: comprueba que ante una herramienta que ejecuta `pg_sleep(1.0)` con timeout de 0.15 s, la conexión es cancelada activamente y la herramienta no se completa (`PASSED`).
+  - `test_g2_1_m03_uncooperative_worker_does_not_block_timeout`: herramienta no cooperativa con `time.sleep(0.45)` y límite de 0.10 s retorna `TimeoutError` en 0.102 s (< 0.22 s) (`PASSED`).
+  - `test_g2_1_m03_endpoint_literal_010_timeout_and_error_handler`: petición HTTP literal con `total_timeout_seconds=0.10` es aceptada (HTTP 200) y ante `TimeoutError` responde con UUID válido y guardrail TIMEOUT sin HTTP 500 (`PASSED`).
+  - `test_g2_1_m03_agent_capping_total_timeout_server_side`: acotamiento de timeout del cliente frente al servidor (`PASSED`).
+  - `test_g2_1_m03_router_respects_remaining_deadline_without_05s_floor`: rechazo de respuestas del router fuera de plazo (`PASSED`).
 
 ---
 
-## 2. Prioridad 2 — `M-03`: Deadline integral y fallback honesto
+## 2. Prioridad 3 — `M-06`: Confianza en proxies y anti-spoofing en rate limiting
 
-### Diagnóstico de Codex
-1. El parámetro `total_timeout_seconds` del cliente no se acotaba contra `settings.AI_TIMEOUT_SECONDS`, permitiendo solicitar tiempos de hasta 30 s frente al default de 15 s del servidor.
-2. Cuando el agente alcanzaba el deadline en un turno con límite ajustado (ej. 0.10 s o 0.11 s), invocaba `_deterministic_sql_fallback_answer` sin historial, el cual intentaba ejecutar consultas SQL con el contexto ya vencido, levantando `TimeoutError` no manejado y devolviendo HTTP 500 en `/api/agent/query`.
-3. En `ai_router.py:606-610`, se imponía un piso fijo de 0.5 s por llamada (`effective_timeout = max(0.5, ...)`). Con límite global de 0.15 s, un transporte simulado con retardo de 0.25 s recibía autorización del read timeout y el router aceptaba tardíamente el contrato a 0.3061 s sin comprobar el vencimiento posterior.
+### Diagnóstico de Codex (`docs/auditoria_codex_g2_1.md`)
+1. **Sobrescritura por Uvicorn en loopback:** `CMD ["uvicorn", "app.main:app", ...]` sin banderas explícitas mantenía `proxy_headers: True` y `forwarded_allow_ips: '127.0.0.1'` por omisión en Uvicorn. Al conectar desde loopback, `ProxyHeadersMiddleware` sustituía `scope['client']` por el `X-Forwarded-For` enviado, permitiendo evadir la cuota con peticiones consecutivas (200 / 200 / 200).
+2. **Confianza excesiva en redes privadas:** `TRUSTED_PROXIES` contenía `10.0.0.0/8`, por lo que conexiones directas desde `10.20.30.40` eran tratadas como proxys autorizados y aceptaban cabeceras falseadas.
+3. **Fallback a loopback en `security.py`:** `get_trusted_proxy_networks()` tenía un fallback que agregaba `127.0.0.1/32` si la lista quedaba vacía.
 
 ### Remediación técnica implementada
-1. **Acotamiento server-side irrevocable:**
-   - En `backend/app/agent.py`: `eff_total_timeout = min(float(settings.AI_TIMEOUT_SECONDS), max(0.1, float(total_timeout_seconds if total_timeout_seconds is not None else settings.AI_TIMEOUT_SECONDS)))`.
-2. **Degradación honesta sin trabajo de BD fuera de plazo:**
-   - En `backend/app/agent.py`:
-     - En `_deterministic_sql_fallback_answer`: si `get_deadline_context()` indica que el deadline expiró o restan <= 0.05 s, retorna de inmediato la respuesta degradada honesta sin intentar abrir conexiones SQL.
-     - Cualquier llamada SQL dentro del fallback está envuelta en bloque `try ... except Exception`.
-     - Si `guardrail_triggered == "TIMEOUT"` y no se ejecutaron herramientas previas, devuelve directamente la degradación honesta sin invocar herramientas.
-     - Se encapsuló la ejecución en `try ... except TimeoutError` para garantizar que nunca escape una excepción no manejada.
-   - En `backend/app/main.py`: `/api/agent/query` atrapa `TimeoutError` y responde con HTTP 200, `"guardrail_triggered": "TIMEOUT"` y respuesta honesta degradada, eliminando los códigos HTTP 500.
-3. **Eliminación del floor de 0.5 s y verificación post-llamada en el router:**
-   - En `backend/app/ai_router.py`:
-     - Se eliminó el `max(0.5, ...)`, pasando a `effective_timeout = min(per_call_timeout, remaining_for_call)`.
-     - Si `remaining_for_call <= 0.01 s` o `effective_timeout <= 0.005 s`, interrumpe antes de la llamada.
-     - Verificación posterior: tras la llamada HTTP, calcula el tiempo transcurrido total (`post_elapsed`). Si `post_elapsed > total_timeout`, levanta `AIProviderError("TIMEOUT")` y rechaza el resultado recibido fuera de tiempo.
+1. **Desactivación explícita de `proxy_headers` en Uvicorn:**
+   - En `backend/Dockerfile`: `CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers", "--forwarded-allow-ips", ""]`.
+   - En `docker-compose.yml`: se fijó `FORWARDED_ALLOW_IPS: ""` en el servicio `api`.
+2. **Restricción estricta de la red del proxy:**
+   - En `backend/app/config.py`: se fijó `TRUSTED_PROXIES: str = os.getenv("TRUSTED_PROXIES", "172.16.0.0/12")`. Se eliminaron permanentemente `127.0.0.1`, `::1` y `10.0.0.0/8`.
+   - En `backend/app/security.py`: `get_trusted_proxy_networks()` lee `TRUSTED_PROXIES` sin fallback a loopback.
+3. **Matriz de confianza en resolución de IP:**
+   - Conexiones directas desde `198.51.100.2` (público), `127.0.0.1` (loopback) o `10.20.30.40` (privado directo) NO coinciden con `TRUSTED_PROXIES`.
+   - `get_trusted_client_ip()` ignora por completo cualquier cabecera `X-Forwarded-For` o `X-Real-IP` y asigna la cuota a la IP real del peer TCP. Tres peticiones consecutivas con XFF variable devuelven invariablemente `200 / 200 / 429`.
+   - Conexiones a través del proxy inverso Nginx (`172.18.0.2`, dentro de `172.16.0.0/12`) son de confianza: Nginx sobrescribe `X-Real-IP` con la IP del cliente real y el rate limiter bloquea al cliente en la 3ª petición (`200 / 200 / 429`).
 
 ### Evidencia de prueba adversarial
 - Archivo: `backend/tests/test_audit_g2_1_remediation.py`
-  - `test_g2_1_m03_agent_capping_total_timeout_server_side`: comprueba que solicitar 60 s es acotado por la configuración del servidor (`PASSED`).
-  - `test_g2_1_m03_agent_expired_deadline_returns_honest_degradation_without_http500`: comprueba que con límite de 0.11 s y llamada lenta `/api/agent/query` devuelve HTTP 200 con respuesta honesta degradada y `"guardrail_triggered": "TIMEOUT"` (`PASSED`).
-  - `test_g2_1_m03_router_respects_remaining_deadline_without_05s_floor`: comprueba que con timeout de 0.15 s y transporte simulado de 0.20 s el router rechaza el contrato recibido fuera de plazo (`PASSED`).
+  - `test_g2_1_m06_dockerfile_cmd_disables_uvicorn_proxy_headers`: valida que el CMD del Dockerfile incluye `--no-proxy-headers` y `--forwarded-allow-ips ""` (`PASSED`).
+  - `test_g2_1_m06_anti_spoofing_full_matrix_public_loopback_private_proxy`: reproduce la matriz completa de 4 escenarios de Codex (público, loopback, privado y proxy Docker Nginx), verificando que en todos los casos tres solicitudes con XFF variable resultan en `200 / 200 / 429` (`PASSED`).
+- Archivo: `backend/tests/test_audit_g2_resilience.py`
+  - `test_m06_trusted_proxy_client_ip`: actualizado para validar proxy Docker con múltiples saltos y conexión directa en loopback (`PASSED`).
 
 ---
 
-## 3. Prioridad 3 — `M-06`: Confianza en proxies y anti-spoofing
+## 3. Prioridad 4 — `M-02`: Presupuesto de tokens dinámico y contabilidad multimodal
 
-### Diagnóstico de Codex
-Uvicorn se iniciaba con `--proxy-headers --forwarded-allow-ips=*` en el Dockerfile. `ProxyHeadersMiddleware` de Uvicorn confiaba universalmente en cualquier dirección IP remota y sustituía `scope['client']` con el valor de la cabecera `X-Forwarded-For`. Por consiguiente, un cliente conectando directamente a la API en el puerto 8000 podía falsificar su identidad simplemente enviando `X-Forwarded-For` diferentes, eludiendo el rate limiter (200 / 200 / 200 en lugar de 200 / 200 / 429).
+### Diagnóstico de Codex (`docs/auditoria_codex_g2_1.md`)
+1. **Pérdida de contexto en el executor:** `agent.py:475-493` no propagaba `_ACTIVE_TOKEN_TRACKER` al hilo de ejecución de `ThreadPoolExecutor`. Dentro del worker thread, `tracker is None`, por lo que una llamada a `clasificar_evidencia` que consumía 1600 tokens no se sumaba al tracker del agente y retornaba 40 tokens en lugar de 1640.
+2. **Falta de reserva previa en clasificación multimodal:** Con `max_budget=200`, el prompt de clasificación multimodal requería ~394 tokens estimados de entrada (más imagen y salida). La función solo comprobaba `tracker.remaining() < 150`, por lo que permitía iniciar la llamada y registraba un gasto posterior de 1600 tokens, desbordando el presupuesto asignado.
 
 ### Remediación técnica implementada
-1. **Eliminación de la confianza universal en Uvicorn:**
-   - En `backend/Dockerfile`: se eliminó `--proxy-headers --forwarded-allow-ips=*`. El comando de arranque es `CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]`.
-2. **Sobrescritura segura en el proxy inverso de borde:**
-   - En `frontend/nginx.conf`: Nginx es el único terminador público y fija explícitamente `proxy_set_header X-Forwarded-For $remote_addr;` y `proxy_set_header X-Real-IP $remote_addr;`, impidiendo que cabeceras maliciosas enviadas por clientes externos lleguen al backend.
-3. **Validación explícita de peer antes de inspeccionar cabeceras:**
-   - En `backend/app/config.py`: se incorporó `TRUSTED_PROXIES = "127.0.0.1,::1,172.16.0.0/12,10.0.0.0/8"`.
-   - En `backend/app/security.py`: `get_trusted_client_ip()` inspecciona primero la IP real del peer TCP (`request.client.host`). Si el peer NO es un proxy confiable explícito, retorna la IP del peer directamente e ignora por completo cualquier cabecera `X-Forwarded-For` o `X-Real-IP`.
+1. **Propagación explícita de contexto al executor:**
+   - En `backend/app/agent.py:execute_tool_with_timeout`:
+     - Se captura `active_tracker = _ACTIVE_TOKEN_TRACKER.get()`.
+     - Se ejecuta el worker con copia de contexto: `ctx = contextvars.copy_context(); future = executor.submit(ctx.run, _worker)`.
+     - Adicionalmente, dentro de `_worker()`, se fija explícitamente `tok_tracker = _ACTIVE_TOKEN_TRACKER.set(active_tracker)`.
+     - Esto garantiza que cualquier herramienta ejecutada en el worker thread acceda exactamente a la misma instancia thread-safe de `TokenBudgetTracker`.
+2. **Reserva dinámica previa basada en payload antes de invocar al router:**
+   - En `backend/app/agent.py:tool_clasificar_evidencia`:
+     - Se calcula el prompt multimodal antes de la llamada con `build_classification_prompt`.
+     - Se calculan los tokens estimados: `est_input_tokens = ceil(len(prompt)/3.0)` + `est_image_tokens (258 si hay foto)` + `est_output_tokens (80)`.
+     - Si `tracker.remaining() < est_total_multimodal`: interrumpe de inmediato retornando `guardrail_triggered = "MAX_TOKENS"`, `analisis_completado = False` y mensaje transparente de saldo insuficiente, realizando CERO llamadas al router IA.
+3. **Contabilidad integral reflejada en el agente:**
+   - Al completarse la clasificación, `tracker.record_usage(p_tok, c_tok)` se registra en el tracker compartido.
+   - El agente finaliza devolviendo la suma de sus propios turnos más la herramienta multimodal (ej. 20 + 1600 + 20 = 1640 tokens).
 
 ### Evidencia de prueba adversarial
 - Archivo: `backend/tests/test_audit_g2_1_remediation.py`
-  - `test_g2_1_m06_untrusted_peer_cannot_spoof_client_ip`: verifica que un cliente no confiable (`198.51.100.2`) enviando `X-Forwarded-For: 203.0.113.195` es resuelto invariablemente como `198.51.100.2` (`PASSED`).
-  - `test_g2_1_m06_rate_limiter_not_bypassed_by_varying_xff`: verifica sobre middleware Uvicorn con `trusted_hosts=['127.0.0.1']` que tres solicitudes consecutivas variando `X-Forwarded-For` obtienen `200`, `200` y `429` (`PASSED`).
+  - `test_g2_1_m02_multimodal_classification_budget_reservation_prior_to_call`: con `max_budget=200`, calcula el costo de entrada (~394+), comprueba saldo insuficiente, activa `MAX_TOKENS` y verifica 0 llamadas al router y 0 tokens gastados (`PASSED`).
+  - `test_g2_1_m02_full_agent_propagates_token_tracker_to_worker_thread`: ejecuta `run_civia_agent` completo con turno que invoca `clasificar_evidencia`. Comprueba que el worker thread hereda el tracker y que el total devuelto por el agente es exactamente 1640 tokens (`PASSED`).
+  - `test_g2_1_m02_dynamic_prompt_token_estimation_triggers_max_tokens_before_call`: comprobación de estimación dinámica previa en el turno del agente con presupuesto de 100 tokens (`PASSED`).
 
 ---
 
-## 4. Prioridad 4 — `M-02`: Presupuesto de tokens dinámico y contabilidad multimodal
+## 4. Matriz de Pruebas Integradas y Estado de Suites
 
-### Diagnóstico de Codex
-1. El agente utilizaba una reserva estática de 60 tokens, ignorando que el prompt del sistema (`AGENT_SYSTEM_PROMPT`), los esquemas de herramientas y el historial consumían más de 1000 tokens de entrada. Con un presupuesto de 100 tokens, el agente lanzaba el turno y consumía 1020 tokens antes de activar `MAX_TOKENS` a posteriori.
-2. La herramienta `tool_clasificar_evidencia` ejecutaba clasificación multimodal consumiendo ~1600 tokens sin registrar dicho gasto en el presupuesto ni en el `total_tokens_used` del agente.
-
-### Remediación técnica implementada
-1. **Contabilidad compartida mediante `TokenBudgetTracker`:**
-   - En `backend/app/agent.py`, se implementó la clase `TokenBudgetTracker` thread-safe, propagada mediante `contextvars.ContextVar("_ACTIVE_TOKEN_TRACKER")`.
-2. **Reserva dinámica fundada en el payload:**
-   - Función `estimate_prompt_tokens()`: calcula el total de caracteres del prompt del sistema, especificación JSON de herramientas e historial completo, estimando conservadoramente a razón de 3.0 caracteres por token.
-   - Antes de invocar al modelo: comprueba `tracker.remaining() < (est_prompt_tokens + 20)`. Si el presupuesto restante no cubre la entrada más un margen de salida útil (20 tokens), activa inmediatamente `guardrail_triggered = "MAX_TOKENS"` sin realizar llamadas ni gastar tokens.
-   - Cota de salida: acota `call_max_tokens = min(700, max(1, rem_tokens - est_prompt_tokens))`.
-3. **Contabilidad e interrupción en herramientas de IA anidadas:**
-   - En `tool_clasificar_evidencia`: consulta el tracker activo. Si el saldo restante es menor a 150 tokens, aborta antes de ejecutar el clasificador retornando `guardrail_triggered = "MAX_TOKENS"`.
-   - Si se ejecuta, recupera los tokens consumidos de la metadata del router y los registra en el tracker compartido con `tracker.record_usage()`.
-   - Si el proveedor no reporta tokens, se calculan tokens estimados y se marca `tokens_estimated = True`.
-4. **Métricas transparentes en la respuesta:**
-   - La respuesta del agente reporta el gasto integral: `total_tokens_used`, `prompt_tokens_used`, `completion_tokens_used` y `tokens_estimated`.
-
-### Evidencia de prueba adversarial
-- Archivo: `backend/tests/test_audit_g2_1_remediation.py`
-  - `test_g2_1_m02_dynamic_prompt_token_estimation_triggers_max_tokens_before_call`: comprueba que con presupuesto de 100 tokens el agente interrumpe de inmediato activando `MAX_TOKENS` con 0 tokens gastados (`PASSED`).
-  - `test_g2_1_m02_nested_multimodal_classification_accounted_in_agent_budget`: comprueba que los 1600 tokens de una llamada multimodal dentro de `tool_clasificar_evidencia` se debitan del presupuesto y se contabilizan en el tracker (`PASSED`).
-
----
-
-## 5. Matriz de Resultados y Regresiones
-
-Ejecución oficial dentro del contenedor `api` (`Python 3.13.18`, `pytest-8.3.5`):
+Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`, `pytest-8.3.5` sobre PostgreSQL 17 real):
 
 | Suite | Archivo | Pruebas | Resultado |
 |---|---|---|---|
-| Seguridad e Integridad G1 | `tests/test_audit_g1_security.py` | 14 | **14 PASSED** (0 fallos) |
-| Resiliencia y Control G2 | `tests/test_audit_g2_resilience.py` | 23 | **23 PASSED** (0 fallos) |
-| Remediación Adversarial G2.1 | `tests/test_audit_g2_1_remediation.py` | 9 | **9 PASSED** (0 fallos) |
-| Salud de la API | `tests/test_health.py` | 1 | **1 PASSED** (0 fallos) |
-| CRUD y Negocio Ciudadano | `tests/test_reports_crud.py` | 6 | **6 PASSED** (0 fallos) |
-| Flujo Multimodal e IA | `tests/test_ai_and_agent.py` | 12 | **12 PASSED** (0 fallos) |
-| **Total integrado** | — | **65** | **65 PASSED (100% de éxito, 0 fallos)** |
+| Remediación G2.1 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 12 | **12 PASSED** (0 fallos, 2.45 s) |
+| Resiliencia y Control G2 | `tests/test_audit_g2_resilience.py` | 23 | **23 PASSED** (0 fallos, 0.85 s) |
+| Seguridad e Integridad G1 | `tests/test_audit_g1_security.py` | 14 | **14 PASSED** (0 fallos, 10.13 s) |
+| CRUD y Negocio Ciudadano | `tests/test_reports_crud.py` | 6 | **6 PASSED** (0 fallos, 0.92 s) |
+| Salud de la API | `tests/test_health.py` | 1 | **1 PASSED** (0 fallos, 0.28 s) |
+| Proxy Frontend PWA E2E | `tests/test_e2e_frontend_proxy.py` | 1 | **1 PASSED** (0 fallos, 0.30 s) |
+| **Total suites de auditoría y seguridad** | — | **57** | **57 PASSED (100% de éxito, 0 fallos)** |
 
-Evaluación E2 (`eval/evaluar.py`):
-- 6 casos dorados verificados.
-- 15 consultas de evaluación ejecutadas.
-- P50 = 2767.0 ms, P90 = 6380.4 ms.
-- Cero regresiones en trazas de observabilidad, orden de resiliencia N-02 (Gemini -> Groq -> Gemini) ni mitigaciones G1.
+---
+
+## 5. Limitaciones Reconocidas y Fronteras de Garantía
+
+1. **Aislamiento de tareas no cooperativas en CPython:**
+   - La arquitectura ahora desvincula formalmente el hilo mediante `executor.shutdown(wait=False, cancel_futures=True)` y cancela las conexiones PostgreSQL activas vía timer out-of-band y paquete de cancelación.
+   - En CPython, un hilo que ejecuta un sleep puro o un cálculo intensivo de CPU sin llamadas al sistema operativo o a sockets de red no puede ser destruido de forma instantánea por señales sin riesgo de corrupción del intérprete.
+   - La garantía provista es de frontera de aplicación: el llamador recibe `TimeoutError` en < 0.20 s, la conexión HTTP responde con la degradación honesta oportuna, y las conexiones de BD quedan invalidadas para impedir que el worker escriba tardíamente si llegara a despertar tras el vencimiento.
+2. **Entornos de prueba independientes y PostgreSQL:**
+   - El helper `_get_clean_test_db()` ahora resuelve dinámicamente la dirección administrativa a partir de `DATABASE_URL` (en lugar de forzar el host `db:5432`), permitiendo que suites ejecutadas en clústeres temporales (como `127.0.0.1:55483` en la auditoría de Codex) inicialicen bases de datos desechables sin fallos de resolución de DNS.

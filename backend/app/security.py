@@ -340,7 +340,7 @@ def validate_and_store_audio(
 
 def get_trusted_proxy_networks() -> list[ipaddress.IPv4Network | ipaddress.IPv6Network]:
     nets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
-    raw = getattr(settings, "TRUSTED_PROXIES", "127.0.0.1,::1") or "127.0.0.1,::1"
+    raw = getattr(settings, "TRUSTED_PROXIES", "") or ""
     for item in raw.split(","):
         item = item.strip()
         if not item:
@@ -353,7 +353,7 @@ def get_trusted_proxy_networks() -> list[ipaddress.IPv4Network | ipaddress.IPv6N
                 nets.append(ipaddress.ip_network(f"{addr}/32" if addr.version == 4 else f"{addr}/128"))
         except ValueError:
             pass
-    return nets or [ipaddress.ip_network("127.0.0.1/32"), ipaddress.ip_network("::1/128")]
+    return nets
 
 
 def is_trusted_proxy_ip(ip_str: str) -> bool:

@@ -16,6 +16,7 @@ import httpx
 from app.ai_router import (
     AIProviderError,
     _check_forced_fault,
+    build_classification_prompt,
     classify_evidence_with_router,
     ensure_at_least_one_circuit_openable,
     get_circuit,
@@ -339,20 +340,33 @@ def tool_clasificar_evidencia(args: dict[str, Any]) -> dict[str, Any]:
             "mensaje": "No se encontró el reporte para analizar su evidencia.",
         }
 
+    safe_name = Path(row["photo_path"]).name
+    photo_file = settings.UPLOAD_DIR / safe_name
+    img_bytes = photo_file.read_bytes() if photo_file.exists() else None
+
+    # Estimación previa y reserva obligatoria de tokens para clasificación multimodal (M-02)
+    est_prompt_str = build_classification_prompt(
+        description=row.get("description") or "",
+        latitude=float(row.get("latitude") or 3.45),
+        longitude=float(row.get("longitude") or -76.53),
+        address_hint=row.get("address_hint"),
+        audio_transcript=row.get("audio_transcript"),
+    )
+    est_input_tokens = int(math.ceil(len(est_prompt_str) / 3.0))
+    est_image_tokens = 258 if img_bytes else 0
+    est_output_tokens = 80
+    est_total_multimodal = est_input_tokens + est_image_tokens + est_output_tokens
+
     tracker = _ACTIVE_TOKEN_TRACKER.get()
-    if tracker is not None and tracker.remaining() < 150:
+    if tracker is not None and tracker.remaining() < est_total_multimodal:
         return {
             "encontrado": True,
             "tracking_code": row["tracking_code"],
             "analisis_completado": False,
             "status": row["status"],
-            "mensaje": "Presupuesto de tokens del agente agotado; no es posible ejecutar clasificación multimodal.",
+            "mensaje": f"Presupuesto de tokens del agente insuficiente para clasificación multimodal (requiere ~{est_total_multimodal} tokens, saldo restante {tracker.remaining()}).",
             "guardrail_triggered": "MAX_TOKENS",
         }
-
-    safe_name = Path(row["photo_path"]).name
-    photo_file = settings.UPLOAD_DIR / safe_name
-    img_bytes = photo_file.read_bytes() if photo_file.exists() else None
 
     contract, meta = classify_evidence_with_router(
         description=row["description"],
@@ -480,35 +494,39 @@ def execute_tool_with_timeout(
         return {"error": f"Herramienta desconocida: {tool_name}"}
 
     eff_deadline = deadline if deadline is not None else (time.monotonic() + timeout_sec)
+    active_tracker = _ACTIVE_TOKEN_TRACKER.get()
     worker_tid: list[int] = []
 
     def _worker() -> dict[str, Any]:
         worker_tid.append(threading.get_ident())
         tok = set_deadline_context(eff_deadline)
+        tok_tracker = _ACTIVE_TOKEN_TRACKER.set(active_tracker) if active_tracker is not None else None
         try:
             res = fn(tool_args)
             if time.monotonic() >= eff_deadline:
                 raise TimeoutError(f"La herramienta '{tool_name}' superó el deadline de ejecución ({timeout_sec}s).")
             return res
         finally:
+            if tok_tracker is not None:
+                try:
+                    _ACTIVE_TOKEN_TRACKER.reset(tok_tracker)
+                except Exception:
+                    pass
             reset_deadline_context(tok)
 
+    ctx = contextvars.copy_context()
     executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(_worker)
+    future = executor.submit(ctx.run, _worker)
     try:
         return future.result(timeout=timeout_sec)
     except FuturesTimeoutError as exc:
         if worker_tid:
             cancel_active_conns_for_thread(worker_tid[0])
-        try:
-            future.exception(timeout=0.15)
-        except Exception:
-            pass
         raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s.") from exc
     finally:
         if worker_tid:
             cancel_active_conns_for_thread(worker_tid[0])
-        executor.shutdown(wait=True, cancel_futures=True)
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _gemini_tools_declaration() -> list[dict[str, Any]]:

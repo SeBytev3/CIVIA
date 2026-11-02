@@ -305,14 +305,23 @@ def test_m06_trusted_proxy_client_ip():
     req_trusted = Request(scope_trusted_docker)
     assert get_trusted_client_ip(req_trusted) == "203.0.113.195"
 
-    # Trusted proxy with multiple hops in X-Forwarded-For
+    # Trusted proxy with multiple hops in X-Forwarded-For (from 172.18.0.2)
     scope_trusted_hops = {
         "type": "http",
-        "client": ("127.0.0.1", 54321),
-        "headers": [(b"x-forwarded-for", b"190.85.12.34, 10.0.0.1")],
+        "client": ("172.18.0.2", 54321),
+        "headers": [(b"x-forwarded-for", b"190.85.12.34, 172.18.0.1")],
     }
     req_hops = Request(scope_trusted_hops)
     assert get_trusted_client_ip(req_hops) == "190.85.12.34"
+
+    # Direct loopback connection (127.0.0.1) cannot spoof IP via headers
+    scope_loopback = {
+        "type": "http",
+        "client": ("127.0.0.1", 54321),
+        "headers": [(b"x-forwarded-for", b"190.85.12.34")],
+    }
+    req_loopback = Request(scope_loopback)
+    assert get_trusted_client_ip(req_loopback) == "127.0.0.1"
 
 
 # -------------------------------------------------------------------------
