@@ -163,3 +163,31 @@
     - **`57 PASSED`** (100% de éxito, 0 fallos en 13.47 s).
     - `test_audit_g2_1_remediation.py`: 12/12 passed (A-02, M-03 worker no cooperativo, M-03 HTTP final, M-03 literal 0.10s, M-06 anti-spoofing completo, M-02 reserva previa y M-02 propagación a hilo).
     - Cero regresiones en controles aprobados G1, A-02 o N-02. Cero commits en `main` ni push remoto.
+
+### Bloque G2.1.1 — Cierre Definitivo de Contraejemplos Residuales M-03, M-06 y M-02 (`docs/auditoria_codex_g2_1_8162a12.md`) completado (2026-11-02)
+- **Detalle completo por hallazgo, diagnóstico, corrección, pruebas adversariales y límites**: documentado en [`docs/remediacion_g2_1.md`](remediacion_g2_1.md).
+- **Cierres aplicados**:
+  1. **`M-03` (Capacidad revocable de ejecución, cursor proxy y protección de almacenamiento)**:
+     - `backend/app/db.py`: Se implementó `ExecutionCapability` con deadline monotónico y estado atómico `_revoked`. Se vincula a contextvars (`_CURRENT_CAPABILITY`) y a la conexión (`conn._execution_capability`).
+     - `backend/app/db.py`: Se incorporó `_CapabilityCursorProxy` sobre los cursores de `psycopg 3`, interceptando llamadas `execute` y `executemany` para levantar inmediatamente `TimeoutError` si la capacidad fue revocada o expiró el plazo, impidiendo que una conexión retenida ejecute SQL tras el deadline.
+     - `backend/app/security.py`: `_atomic_write_bytes` valida la capacidad antes de escribir en staging y antes de promover con `os.replace`. Si venció o fue revocada, levanta `TimeoutError` y desvincula cualquier archivo parcial, eliminando escrituras tardías.
+     - `backend/app/agent.py`: `execute_tool_with_timeout` revoca la capacidad inmediatamente y delega la cancelación de conexiones PostgreSQL a un hilo daemon de fondo (`cancel_active_conns_for_thread`), permitiendo que el llamador retorne en < 0.20s sin bloqueos síncronos. Se preservan estrictamente los controles de rollback de commit diferido de A-02.
+  2. **`M-06` (Identidad exacta del proxy Nginx en red Compose y rechazo de spoofing desde otros contenedores)**:
+     - `docker-compose.yml`: Se configuró una red dedicada `civia_net` (`172.28.0.0/16`) con IP estática asignada al frontend `172.28.0.2`.
+     - `backend/app/config.py`: `TRUSTED_PROXIES` restringido a `"172.28.0.2,172.18.0.2"`, eliminando la confianza abierta en toda la subred `/12`.
+     - Conexiones directas desde otros contenedores (como `172.19.0.9`) o clientes de la misma red son tratadas como directas: cualquier cabecera `X-Forwarded-For` es descartada y la cuota se aplica sobre su IP real de red (`201 / 201 / 429`). Clientes legítimos detrás de Nginx en `172.28.0.2` conservan cuotas independientes.
+  3. **`M-02` (Presupuesto atómico de tokens, acumulación en fallos e identificación de consumo desconocido)**:
+     - `backend/app/agent.py`: `TokenBudgetTracker` implementa reserva atómica `try_reserve(requested)` con lock de exclusión mutua y conciliación con `reconcile_usage`, impidiendo sobreconsumo por concurrencia.
+     - `backend/app/ai_router.py`: `classify_evidence_with_router` acumula el uso de tokens de todos los intentos (`accumulated_prompt_tokens`, `accumulated_completion_tokens`), incluso ante esquemas inválidos (`INVALID_SCHEMA`), registrando la totalidad de tokens conocidos consumidos en la cadena de reintentos (ej. 600 + 800 = 1400 tokens; 3 inválidos = 1800 tokens).
+     - `backend/app/schemas.py` y `agent.py`: Se añadieron `tokens_estimated` y `unknown_consumption`. Si los intentos fallan por error de red o remoto sin metadatos, se imputa una estimación conservadora identificada y se señala el consumo como desconocido/estimado, sin reportar cero ficticio.
+  4. **Hermeticidad de la suite de pruebas**:
+     - `backend/tests/test_ai_and_agent.py`: Incorporado transporte simulado hermético para asegurar que las 12 pruebas de integración del agente y router se ejecuten exitosamente y de forma determinista en entornos de auditoría sin claves API externas ni acceso a internet.
+- **Verificación oficial de la suite completa en PostgreSQL 17 real (`civia-api-1`)**:
+  - `docker exec civia-api-1 pytest -v`:
+    - **`77 PASSED`** (100% de éxito, 0 fallos, 1 warning en 25.35 s).
+    - `test_audit_g2_1_remediation.py`: 20/20 passed (12 de G2.1 + 8 de G2.1.1).
+    - `test_audit_g2_resilience.py`: 23/23 passed.
+    - `test_audit_g1_security.py`: 14/14 passed.
+    - `test_ai_and_agent.py`: 12/12 passed.
+    - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
+    - Cero regresiones en controles aprobados G1, A-02 o N-02. Cero commits en `main` ni push remoto.

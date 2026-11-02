@@ -109,7 +109,11 @@ def _atomic_write_bytes(target_dir: Path, final_name: str, data: bytes) -> Path:
     el tamaño escrito coincida exactamente con len(data) y lo promueve atómicamente
     al destino final. Si ocurre cualquier fallo o escritura parcial, elimina tanto
     el archivo temporal como el archivo destino antes de propagar la excepción.
+    Valida la capacidad revocable de ejecución antes de escribir y de promover (M-03).
     """
+    from app.db import check_execution_capability_or_raise
+
+    check_execution_capability_or_raise("escritura en almacenamiento")
     target_dir.mkdir(parents=True, exist_ok=True)
     final_path = target_dir / final_name
     staging_path = target_dir / f".tmp_{uuid.uuid4().hex}_{final_name}"
@@ -117,6 +121,7 @@ def _atomic_write_bytes(target_dir: Path, final_name: str, data: bytes) -> Path:
         staging_path.write_bytes(data)
         if not staging_path.exists() or staging_path.stat().st_size != len(data):
             raise OSError("Escritura parcial o incompleta detectada en archivo temporal.")
+        check_execution_capability_or_raise("promoción de archivo en almacenamiento")
         os.replace(staging_path, final_path)
         return final_path
     except BaseException:

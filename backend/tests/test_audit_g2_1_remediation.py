@@ -630,3 +630,425 @@ def test_g2_1_m02_full_agent_propagates_token_tracker_to_worker_thread():
         f"Violación M-02: total_tokens_used fue {res['total_tokens_used']}, se esperaban 1640. "
         f"El worker thread no sumó los tokens multimodales al tracker del agente."
     )
+
+
+# ==============================================================================
+# G2.1.1 Remediaciones Específicas: M-03, M-06, M-02 (Docs: auditoria_codex_g2_1_8162a12.md)
+# ==============================================================================
+
+
+def test_g2_1_1_m03_late_storage_write_rejected_by_execution_capability(tmp_path):
+    """
+    Reproduce el contraejemplo adversarial M-03 de Codex:
+    Un worker no cooperativo supera el deadline de 0.10s.
+    El llamador recibe TimeoutError oportunamente (<0.16s).
+    Al despertar el worker (a 0.30s), intenta persistir un archivo mediante
+    el helper real 'security._atomic_write_bytes(upload_dir, "late_file.txt", ...)'.
+    Verificación:
+    La capacidad revocada rechaza la escritura / promoción y lanza TimeoutError.
+    El archivo NUNCA se crea en disco (cero efectos secundarios posteriores a TIMEOUT).
+    """
+    from app.agent import TOOL_DISPATCH
+    from app.security import _atomic_write_bytes
+
+    late_file_name = f"late_side_effect_{uuid.uuid4().hex[:8]}.txt"
+    late_file_path = tmp_path / late_file_name
+    worker_error: list[Exception] = []
+    worker_done = threading.Event()
+
+    def slow_uncooperative_tool(args):
+        # Duerme pasando el deadline asignado de 0.10 s
+        time.sleep(0.30)
+        try:
+            _atomic_write_bytes(tmp_path, late_file_name, b"SYNTHETIC AFTER DEADLINE")
+        except Exception as e:
+            worker_error.append(e)
+        finally:
+            worker_done.set()
+        return {"status": "ok"}
+
+    TOOL_DISPATCH["_test_uncooperative_tool"] = slow_uncooperative_tool
+    t_start = time.perf_counter()
+    try:
+        with pytest.raises(TimeoutError):
+            execute_tool_with_timeout("_test_uncooperative_tool", {}, timeout_sec=0.10)
+        elapsed_caller = time.perf_counter() - t_start
+        assert elapsed_caller < 0.16, f"El llamador demoró demasiado en retornar: {elapsed_caller:.4f}s"
+
+        # Esperar a que el worker despierte y termine su intento de escritura
+        worker_done.wait(timeout=1.0)
+        assert len(worker_error) == 1, "El worker debió capturar una excepción al intentar escribir tras deadline"
+        assert isinstance(worker_error[0], TimeoutError), f"Tipo de error inesperado: {type(worker_error[0])}"
+        assert "Capacidad de ejecución" in str(worker_error[0])
+
+        # Verificación crítica: el archivo NO debe existir en el directorio destino
+        assert not late_file_path.exists(), "Fallo M-03: el helper real de archivos creó el archivo después de TIMEOUT!"
+    finally:
+        TOOL_DISPATCH.pop("_test_uncooperative_tool", None)
+
+
+def test_g2_1_1_m03_retained_connection_late_sql_rejected_by_execution_capability():
+    """
+    Reproduce el contraejemplo M-03 de conexión retenida de Codex:
+    Una herramienta obtiene db.get_conn() ANTES del deadline, duerme superando
+    el deadline (0.30s con límite 0.10s) y luego intenta ejecutar:
+    conn.execute('SELECT 8675309 AS marker')
+    Verificación:
+    La sentencia SQL posterior al deadline es rechazada con TimeoutError;
+    la conexión retenida no puede enviar nuevas consultas una vez revocada la capacidad.
+    """
+    from app.agent import TOOL_DISPATCH
+
+    marker_result: list[Any] = []
+    worker_error: list[Exception] = []
+    worker_done = threading.Event()
+
+    def tool_with_retained_conn(args):
+        # Obtener conexión ANTES de vencer el deadline
+        with get_conn() as conn:
+            time.sleep(0.30)
+            try:
+                res = conn.execute("SELECT 8675309 AS marker").fetchone()
+                marker_result.append(res)
+            except Exception as e:
+                worker_error.append(e)
+            finally:
+                worker_done.set()
+        return {"done": True}
+
+    TOOL_DISPATCH["_test_retained_conn_tool"] = tool_with_retained_conn
+    t_start = time.perf_counter()
+    try:
+        with pytest.raises(TimeoutError):
+            execute_tool_with_timeout("_test_retained_conn_tool", {}, timeout_sec=0.10)
+        elapsed_caller = time.perf_counter() - t_start
+        assert elapsed_caller < 0.16, f"El llamador demoró demasiado: {elapsed_caller:.4f}s"
+
+        worker_done.wait(timeout=1.0)
+        assert len(marker_result) == 0, f"Violación M-03: SELECT 8675309 fue ejecutado tras deadline! Resultado: {marker_result}"
+        assert len(worker_error) == 1, "La conexión retenida debió lanzar TimeoutError al intentar ejecutar SQL tras deadline"
+        assert isinstance(worker_error[0], TimeoutError)
+        assert "Capacidad de ejecución" in str(worker_error[0])
+    finally:
+        TOOL_DISPATCH.pop("_test_retained_conn_tool", None)
+
+
+def test_g2_1_1_m06_direct_container_ip_spoofing_rejected_200_200_429(monkeypatch):
+    """
+    Reproduce el ataque directo desde contenedor Docker no proxy (172.19.0.9):
+    El atacante envía X-Forwarded-For variable desde la misma IP peer.
+    Verificación:
+    172.19.0.9 NO pertenece a TRUSTED_PROXIES ("172.28.0.2,172.18.0.2").
+    Por tanto, sus cabeceras XFF se descartan y la cuota aplica sobre su IP real.
+    Resultado exacto: 200, 200, 429 (evasión bloqueada).
+    """
+    from app.seed import generate_synthetic_evidence_png
+    valid_png = generate_synthetic_evidence_png("HUECO", "M06-DIRECT")
+
+    rate_limiter.reset()
+    monkeypatch.setattr(settings, "RATE_LIMIT_MAX_REQUESTS", 2)
+    monkeypatch.setattr(settings, "RATE_LIMIT_WINDOW_SECONDS", 60)
+    monkeypatch.setattr(settings, "TRUSTED_PROXIES", "172.28.0.2,172.18.0.2")
+
+    fake_client = TestClient(app, client=("172.19.0.9", 45678))
+
+    statuses: list[int] = []
+    fake_ips = ["203.0.113.1", "203.0.113.2", "203.0.113.3"]
+
+    for spoofed_ip in fake_ips:
+        headers = {
+            "X-Forwarded-For": spoofed_ip,
+            "X-Real-IP": spoofed_ip,
+        }
+        res = fake_client.post(
+            "/api/reports",
+            data={
+                "description": "Reporte de prueba para spoofing de IP",
+                "latitude": "3.45",
+                "longitude": "-76.53",
+                "comuna": "Comuna 1",
+                "neighborhood": "San Fernando",
+                "address_hint": "Calle 1 # 2-3",
+                "auto_analyze": "false",
+            },
+            files={"photo": ("photo.png", valid_png, "image/png")},
+            headers=headers,
+        )
+        statuses.append(res.status_code)
+
+    assert statuses == [201, 201, 429], (
+        f"Violación M-06: El contenedor 172.19.0.9 logró evadir el rate limiter enviando XFF variable. "
+        f"Códigos obtenidos: {statuses}, esperados [201, 201, 429]"
+    )
+
+
+def test_g2_1_1_m06_trusted_proxy_separate_client_quotas(monkeypatch):
+    """
+    Verifica que las peticiones que sí provienen del proxy inverso legítimo
+    (172.28.0.2 o 172.18.0.2) preservan cuotas independientes para clientes distintos.
+    """
+    from app.seed import generate_synthetic_evidence_png
+    valid_png = generate_synthetic_evidence_png("HUECO", "M06-PROXY")
+
+    rate_limiter.reset()
+    monkeypatch.setattr(settings, "RATE_LIMIT_MAX_REQUESTS", 2)
+    monkeypatch.setattr(settings, "RATE_LIMIT_WINDOW_SECONDS", 60)
+    monkeypatch.setattr(settings, "TRUSTED_PROXIES", "172.28.0.2,172.18.0.2")
+
+    proxy_client = TestClient(app, client=("172.28.0.2", 80))
+
+    # Cliente A (198.51.100.10): realiza 3 peticiones -> 201, 201, 429
+    statuses_a: list[int] = []
+    for _ in range(3):
+        res = proxy_client.post(
+            "/api/reports",
+            data={
+                "description": "Reporte de prueba cliente A",
+                "latitude": "3.45",
+                "longitude": "-76.53",
+                "comuna": "Comuna 1",
+                "neighborhood": "San Fernando",
+                "address_hint": "Calle 1 # 2-3",
+                "auto_analyze": "false",
+            },
+            files={"photo": ("photo.png", valid_png, "image/png")},
+            headers={"X-Forwarded-For": "198.51.100.10", "X-Real-IP": "198.51.100.10"},
+        )
+        statuses_a.append(res.status_code)
+    assert statuses_a == [201, 201, 429]
+
+    # Cliente B (198.51.100.11): cuota independiente -> 201, 201, 429
+    statuses_b: list[int] = []
+    for _ in range(3):
+        res = proxy_client.post(
+            "/api/reports",
+            data={
+                "description": "Reporte de prueba cliente B",
+                "latitude": "3.45",
+                "longitude": "-76.53",
+                "comuna": "Comuna 1",
+                "neighborhood": "San Fernando",
+                "address_hint": "Calle 1 # 2-3",
+                "auto_analyze": "false",
+            },
+            files={"photo": ("photo.png", valid_png, "image/png")},
+            headers={"X-Forwarded-For": "198.51.100.11", "X-Real-IP": "198.51.100.11"},
+        )
+        statuses_b.append(res.status_code)
+    assert statuses_b == [201, 201, 429]
+
+
+def test_g2_1_1_m02_concurrent_token_reservation_prevents_overconsumption():
+    """
+    Reproduce el contraejemplo M-02 de concurrencia de Codex:
+    Se comparte un tracker con presupuesto de 1000 tokens entre dos llamadas de clasificación.
+    Cada llamada requiere una reserva estimada de ~700 tokens y consume 600+100=700.
+    Ambas llamadas se inician concurrentemente mediante una barrera de sincronización.
+    Verificación:
+    La reserva atómica (try_reserve) impide que ambas llamadas procedan;
+    una procede y la otra es rechazada inmediatamente con MAX_TOKENS;
+    el consumo total nunca supera el presupuesto de 1000 tokens.
+    """
+    from unittest.mock import patch
+    import app.agent as ag_mod
+
+    tracker = TokenBudgetTracker(max_budget=1000)
+    barrier = threading.Barrier(2)
+
+    settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    (settings.UPLOAD_DIR / "c1.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    (settings.UPLOAD_DIR / "c2.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+
+    rep1 = create_report(
+        title="Reporte Concurrente 1",
+        description="Prueba de reserva atómica 1",
+        latitude=3.45,
+        longitude=-76.53,
+        in_service_area=True,
+        comuna="Comuna 1",
+        neighborhood="San Fernando",
+        address_hint="Calle 1 # 2-3",
+        photo_meta={"photo_path": "c1.png", "photo_mime": "image/png", "photo_size_bytes": 100, "photo_width": 100, "photo_height": 100, "photo_sha256": "0"*64},
+    )
+    rep2 = create_report(
+        title="Reporte Concurrente 2",
+        description="Prueba de reserva atómica 2",
+        latitude=3.45,
+        longitude=-76.53,
+        in_service_area=True,
+        comuna="Comuna 1",
+        neighborhood="San Fernando",
+        address_hint="Calle 1 # 2-3",
+        photo_meta={"photo_path": "c2.png", "photo_mime": "image/png", "photo_size_bytes": 100, "photo_width": 100, "photo_height": 100, "photo_sha256": "0"*64},
+    )
+
+    fake_contract = type(
+        "Contract",
+        (),
+        {
+            "category": "HUECO",
+            "severity": "ALTA",
+            "confidence": 0.9,
+            "summary": "Hueco vial",
+            "keywords": [],
+            "model_dump": lambda self: {
+                "category": "HUECO",
+                "severity": "ALTA",
+                "confidence": 0.9,
+                "summary": "Hueco vial",
+                "keywords": [],
+            },
+        },
+    )()
+
+    def fake_classify_with_barrier(**kwargs):
+        try:
+            barrier.wait(timeout=0.5)
+        except threading.BrokenBarrierError:
+            pass
+        return fake_contract, {
+            "prompt_tokens": 600,
+            "completion_tokens": 100,
+            "total_tokens": 700,
+            "provider": "google",
+            "model": "gemini-3.8-flash",
+            "tier": "primary",
+            "attempts": 1,
+            "latency_ms": 50,
+        }
+
+    results: list[dict[str, Any]] = []
+
+    def call_tool(tcode: str):
+        tok = ag_mod._ACTIVE_TOKEN_TRACKER.set(tracker)
+        try:
+            res = ag_mod.tool_clasificar_evidencia({"identificador": tcode})
+            results.append(res)
+        finally:
+            ag_mod._ACTIVE_TOKEN_TRACKER.reset(tok)
+
+    with patch("app.agent.classify_evidence_with_router", side_effect=fake_classify_with_barrier):
+        t1 = threading.Thread(target=call_tool, args=(rep1["tracking_code"],))
+        t2 = threading.Thread(target=call_tool, args=(rep2["tracking_code"],))
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+    assert len(results) == 2
+    guardrails = [r.get("guardrail_triggered") for r in results]
+    assert "MAX_TOKENS" in guardrails, (
+        f"Violación M-02: Ninguna de las llamadas concurrentes fue bloqueada por MAX_TOKENS. "
+        f"Resultados: {guardrails}, tokens consumidos: {tracker.total_tokens}"
+    )
+    # Solo una llamada debió completarse
+    completed_count = sum(1 for r in results if r.get("analisis_completado") is True)
+    assert completed_count == 1, f"Debió completarse exactamente 1 análisis, pero se completaron {completed_count}"
+    assert tracker.total_tokens <= 1000, f"Sobreconsumo de tokens detectado: {tracker.total_tokens} > 1000"
+
+
+def test_g2_1_1_m02_token_accumulation_invalid_json_fallback(monkeypatch):
+    """
+    Reproduce el contraejemplo M-02 de pérdida de tokens en JSON inválido:
+    - Gemini devuelve JSON inválido '{}' con 500 prompt + 100 completion = 600 tokens.
+    - Router conmuta a Groq (fallback).
+    - Groq devuelve contrato válido con 700 prompt + 100 completion = 800 tokens.
+    Verificación:
+    El router reporta total_tokens = 1400 conocidos (600 + 800), en lugar de perder
+    los tokens de Gemini y reportar solo 800.
+    """
+    from app import ai_router as ai_r
+    ai_r.reset_all_circuits()
+
+    def mock_gemini(**kwargs):
+        return "{}", 500, 100
+
+    def mock_groq(**kwargs):
+        valid_json = json.dumps({
+            "category": "HUECO",
+            "severity": "ALTA",
+            "confidence": 0.88,
+            "summary": "Hueco detectado en calzada principal.",
+            "keywords": ["hueco", "calzada"],
+        })
+        return valid_json, 700, 100
+
+    monkeypatch.setattr(ai_r, "_call_gemini_multimodal", mock_gemini)
+    monkeypatch.setattr(ai_r, "_call_groq_multimodal", mock_groq)
+
+    contract, meta = ai_r.classify_evidence_with_router(
+        description="Prueba de acumulación de tokens con fallback",
+        latitude=3.45,
+        longitude=-76.53,
+    )
+
+    assert contract is not None, "El contrato debió ser exitoso tras el fallback a Groq"
+    assert meta["fallback_used"] is True
+    # Acumulación exacta obligatoria: 600 (Gemini inválido) + 800 (Groq válido) = 1400 conocidos
+    assert meta["prompt_tokens"] == 1200, f"prompt_tokens fue {meta['prompt_tokens']}, esperado 1200"
+    assert meta["completion_tokens"] == 200, f"completion_tokens fue {meta['completion_tokens']}, esperado 200"
+    assert meta["total_tokens"] == 1400, (
+        f"Violación M-02: total_tokens fue {meta['total_tokens']}, esperado 1400 (600 Gemini + 800 Groq)."
+    )
+
+
+def test_g2_1_1_m02_token_accumulation_three_invalid_responses(monkeypatch):
+    """
+    Reproduce el contraejemplo M-02 de acumulación ante fallo total con tokens conocidos:
+    Tres proveedores devuelven '{}', cada uno con 500 prompt + 100 completion = 600 tokens.
+    Verificación:
+    El router reporta total_tokens = 1800 conocidos (3 x 600), en lugar de sustituir
+    los tokens conocidos por 1280 estimados o cero.
+    """
+    from app import ai_router as ai_r
+    ai_r.reset_all_circuits()
+
+    def mock_invalid_adapter(**kwargs):
+        return "{}", 500, 100
+
+    monkeypatch.setattr(ai_r, "_call_gemini_multimodal", mock_invalid_adapter)
+    monkeypatch.setattr(ai_r, "_call_groq_multimodal", mock_invalid_adapter)
+
+    contract, meta = ai_r.classify_evidence_with_router(
+        description="Prueba de tres respuestas inválidas con tokens conocidos",
+        latitude=3.45,
+        longitude=-76.53,
+    )
+
+    assert contract is None, "Debió fallar la clasificación al no haber esquema válido"
+    assert meta["all_failed"] is True
+    # Tres intentos con 600 tokens cada uno = 1800 tokens conocidos
+    assert meta["total_tokens"] == 1800, (
+        f"Violación M-02: total_tokens fue {meta['total_tokens']}, esperado 1800 conocidos (3 x 600)"
+    )
+
+
+def test_g2_1_1_m02_agent_unknown_consumption_reported_as_estimated_not_zero(monkeypatch):
+    """
+    Reproduce el contraejemplo M-02 de consumo desconocido en agente completo:
+    Los adaptadores de turno lanzan AIProviderError NETWORK_ERROR en los tres nodos.
+    Verificación:
+    El agente no puede determinar el consumo remoto exacto, por lo que reporta:
+    total_tokens_used > 0 (estimación conservadora del prompt enviado),
+    tokens_estimated=True, y unknown_consumption=True.
+    Bajo ninguna circunstancia se reporta 0 exacto sin marca estimada.
+    """
+    def mock_network_error(**kwargs):
+        raise AIProviderError("NETWORK_ERROR", "Error de red simulado", retryable=False)
+
+    monkeypatch.setattr("app.agent._call_agent_turn_gemini", mock_network_error)
+    monkeypatch.setattr("app.agent._call_agent_turn_groq", mock_network_error)
+
+    res = run_civia_agent(
+        "Consulta de prueba con caída de red total",
+        max_iterations=1,
+        max_tokens_budget=6000,
+    )
+
+    assert res["degraded_sql_mode"] is True
+    assert res["tokens_estimated"] is True, "Violación M-02: tokens_estimated debió ser True ante consumo desconocido"
+    assert res["unknown_consumption"] is True, "Violación M-02: unknown_consumption debió ser True"
+    assert res["total_tokens_used"] > 0, (
+        f"Violación M-02: total_tokens_used fue {res['total_tokens_used']}. "
+        f"El agente reportó 0 exacto para un consumo desconocido."
+    )

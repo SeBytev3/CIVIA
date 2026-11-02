@@ -105,21 +105,79 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
 
 | Suite | Archivo | Pruebas | Resultado |
 |---|---|---|---|
-| Remediación G2.1 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 12 | **12 PASSED** (0 fallos, 2.45 s) |
+| Remediación G2.1 y G2.1.1 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 20 | **20 PASSED** (0 fallos, 3.36 s) |
 | Resiliencia y Control G2 | `tests/test_audit_g2_resilience.py` | 23 | **23 PASSED** (0 fallos, 0.85 s) |
 | Seguridad e Integridad G1 | `tests/test_audit_g1_security.py` | 14 | **14 PASSED** (0 fallos, 10.13 s) |
+| Integración IA y Agente (Hermética) | `tests/test_ai_and_agent.py` | 12 | **12 PASSED** (0 fallos, 7.82 s) |
 | CRUD y Negocio Ciudadano | `tests/test_reports_crud.py` | 6 | **6 PASSED** (0 fallos, 0.92 s) |
 | Salud de la API | `tests/test_health.py` | 1 | **1 PASSED** (0 fallos, 0.28 s) |
 | Proxy Frontend PWA E2E | `tests/test_e2e_frontend_proxy.py` | 1 | **1 PASSED** (0 fallos, 0.30 s) |
-| **Total suites de auditoría y seguridad** | — | **57** | **57 PASSED (100% de éxito, 0 fallos)** |
+| **Total suites backend CIVIA** | — | **77** | **77 PASSED (100% de éxito, 0 fallos, 25.35 s)** |
 
 ---
 
 ## 5. Limitaciones Reconocidas y Fronteras de Garantía
 
 1. **Aislamiento de tareas no cooperativas en CPython:**
-   - La arquitectura ahora desvincula formalmente el hilo mediante `executor.shutdown(wait=False, cancel_futures=True)` y cancela las conexiones PostgreSQL activas vía timer out-of-band y paquete de cancelación.
-   - En CPython, un hilo que ejecuta un sleep puro o un cálculo intensivo de CPU sin llamadas al sistema operativo o a sockets de red no puede ser destruido de forma instantánea por señales sin riesgo de corrupción del intérprete.
-   - La garantía provista es de frontera de aplicación: el llamador recibe `TimeoutError` en < 0.20 s, la conexión HTTP responde con la degradación honesta oportuna, y las conexiones de BD quedan invalidadas para impedir que el worker escriba tardíamente si llegara a despertar tras el vencimiento.
+   - La arquitectura ahora desvincula formalmente el hilo mediante `executor.shutdown(wait=False, cancel_futures=True)`, invalida cualquier `ExecutionCapability` activa y cancela conexiones PostgreSQL en segundo plano sin bloquear el retorno HTTP.
+   - En CPython, un hilo que ejecuta un cálculo intensivo de CPU o un `sleep` puro sin I/O no puede ser terminado forzosamente por señales del sistema operativo sin arriesgar la estabilidad del proceso de la aplicación.
+   - La frontera de garantía provista se aplica estrictamente a los efectos secundarios: las conexiones PostgreSQL retenidas rechazan cualquier nueva sentencia SQL a través del `_CapabilityCursorProxy`, las transacciones pendientes se revierten antes de cualquier commit diferido, y el helper de almacenamiento `_atomic_write_bytes` rechaza la escritura y promoción de archivos temporales al comprobar la revocación de la capacidad.
 2. **Entornos de prueba independientes y PostgreSQL:**
-   - El helper `_get_clean_test_db()` ahora resuelve dinámicamente la dirección administrativa a partir de `DATABASE_URL` (en lugar de forzar el host `db:5432`), permitiendo que suites ejecutadas en clústeres temporales (como `127.0.0.1:55483` en la auditoría de Codex) inicialicen bases de datos desechables sin fallos de resolución de DNS.
+   - El helper `_get_clean_test_db()` ahora resuelve dinámicamente la dirección administrativa a partir de `DATABASE_URL` (en lugar de forzar el host `db:5432`), permitiendo que suites ejecutadas en clústeres temporales (como `127.0.0.1:55485` en la auditoría de Codex) inicialicen bases de datos desechables sin fallos de resolución de DNS.
+3. **Hermeticidad de pruebas sin API keys externas:**
+   - Se incorporó un transporte simulado reproducible en `test_ai_and_agent.py` para asegurar que las pruebas de integración se ejecuten limpiamente en entornos de auditoría sin acceso a Internet o sin cuotas en APIs de Google/Groq.
+
+---
+
+## 6. Adenda G2.1.1 — Cierre de Contraejemplos de Reauditoría (`docs/auditoria_codex_g2_1_8162a12.md`)
+
+- **Informe de auditoría de referencia:** `docs/auditoria_codex_g2_1_8162a12.md` sobre commit `8162a12f8e278fa58e65db7d6ad06c124948ce4a`.
+- **Alcance específico:**
+  1. `M-03`: Revocación efectiva de efectos tardíos tras `TIMEOUT` (almacenamiento de archivos y sentencias SQL sobre conexiones retenidas) y cancelación no bloqueante de conexiones activas.
+  2. `M-06`: Identidad exacta del proxy inverso Nginx (`172.28.0.2, 172.18.0.2`), eliminando la confianza abierta en toda la subred `/12` y rechazando spoofing desde otros contenedores como `172.19.0.9`.
+  3. `M-02`: Presupuesto atómico de tokens concurrente (`try_reserve` + `reconcile_usage`), acumulación obligatoria de tokens en respuestas JSON inválidas y de error, y representación explícita de consumo desconocido sin reportar ceros ficticios.
+  4. **Hermeticidad de la suite de pruebas:** Adaptación de `backend/tests/test_ai_and_agent.py` para ejecutarse con transporte simulado hermético sin requerir conectividad de red externa.
+
+### 6.1. `M-03`: Revocación por capacidad de ejecución y protección en cada frontera de efectos
+- **Diagnóstico de Codex:**
+  - Un worker superviviente tras el vencimiento podía crear archivos tardíos mediante el helper real `security._atomic_write_bytes()`.
+  - Una conexión retenida antes del deadline (`db.get_conn()`) permitía ejecutar nuevas sentencias `SELECT` tras el vencimiento, pues `conn.cancel()` solo cancelaba la sentencia activa y `statement_timeout` no limitaba el inicio de nuevas operaciones.
+  - La cancelación síncrona en `agent.py` demoraba la respuesta al cliente (0.57s y 0.40s frente a deadline de 0.25s).
+- **Remediación técnica implementada:**
+  - **`ExecutionCapability` en `backend/app/db.py`:** Objeto de capacidad con `deadline` monotónico estricto, estado atómico `_revoked`, método `revoke()` y verificación `check_or_raise(op)`.
+  - **Vinculación a contexto y conexiones:** Se propaga vía contextvars (`_CURRENT_CAPABILITY`) y se vincula a la instancia de conexión PostgreSQL (`conn._execution_capability`).
+  - **`_CapabilityCursorProxy`:** Proxy transparente que envuelve los cursores de `psycopg 3` e intercepta `execute` y `executemany`. Si la capacidad fue revocada o el deadline expiró, aborta inmediatamente con `TimeoutError` antes de enviar el comando a PostgreSQL.
+  - **Protección de almacenamiento en `backend/app/security.py`:** `_atomic_write_bytes()` valida la capacidad antes de escribir en staging (`.tmp_...`) y antes de promover con `os.replace`. Si fue revocada o venció, lanza `TimeoutError` y desvincula (`unlink`) cualquier archivo parcial, garantizando cero efectos posteriores.
+  - **Cancelación asíncrona no bloqueante:** En `agent.py:execute_tool_with_timeout`, la revocación de la capacidad es instantánea (`capability.revoke()`), y la cancelación out-of-band de conexiones PostgreSQL activas se delega a un hilo daemon en background (`cancel_active_conns_for_thread`), permitiendo que el llamador reciba `TimeoutError` y responda al cliente en < 0.20s sin bloqueos.
+  - **Preservación estricta de A-02:** Se mantiene intacta la protección de commit diferido con trigger (`checked_commit` y `_wrapped_commit` con temporizador de cancelación e invalidación de transacciones pendientes).
+- **Pruebas adversariales permanentes:**
+  - `test_g2_1_1_m03_late_storage_write_rejected_by_execution_capability`: Worker que duerme 0.25s tras timeout de 0.10s e intenta `_atomic_write_bytes`; la operación es rechazada con `TimeoutError` y ningún archivo se crea (`PASSED`).
+  - `test_g2_1_1_m03_retained_connection_late_sql_rejected_by_execution_capability`: Conexión obtenida antes del plazo; tras el vencimiento, `cur.execute("SELECT 8675309")` es rechazado de inmediato con `TimeoutError` (`PASSED`).
+
+### 6.2. `M-06`: Identidad exacta del proxy inverso y rechazo a contenedores de la misma red
+- **Diagnóstico de Codex:**
+  - Confiar en `172.16.0.0/12` permitía que cualquier contenedor de la red Docker (como `172.19.0.9`) falseara cabeceras `X-Forwarded-For` y evadiera el rate limiting (`200 / 200 / 200`).
+- **Remediación técnica implementada:**
+  - **Identidad exacta en Compose:** En `docker-compose.yml`, se definió una red dedicada con subred estática `civia_net` (`172.28.0.0/16`) y se asignó la IP fija `172.28.0.2` al contenedor `frontend` (Nginx).
+  - **Configuración de proxies confiables:** En `backend/app/config.py`, `TRUSTED_PROXIES` se fijó por omisión a `"172.28.0.2,172.18.0.2"`, restringiendo la confianza exclusivamente a la IP conocida de Nginx.
+  - **Rechazo a peers directos:** Conexiones directas desde cualquier otra IP (incluyendo otros contenedores como `172.19.0.9`) son tratadas como clientes directos: cualquier cabecera `X-Forwarded-For` es ignorada y la cuota se aplica sobre su IP real de red, produciendo invariablemente `201 / 201 / 429`.
+- **Pruebas adversariales permanentes:**
+  - `test_g2_1_1_m06_direct_container_ip_spoofing_rejected_200_200_429`: Conexión desde `172.19.0.9` con XFF variable devuelve `201 / 201 / 429` (`PASSED`).
+  - `test_g2_1_1_m06_trusted_proxy_separate_client_quotas`: Dos clientes detrás del proxy Nginx en `172.28.0.2` reciben cuotas separadas de 201/201/429 cada uno (`PASSED`).
+
+### 6.3. `M-02`: Presupuesto atómico concurrente, acumulación en fallos y consumo desconocido
+- **Diagnóstico de Codex:**
+  - Dos llamadas concurrentes con presupuesto de 1000 consultaban saldo antes del cobro y gastaban 1400 tokens juntas.
+  - Respuestas JSON inválidas seguidas de fallback exitoso registraban solo el uso del intento final (800 en lugar de 1400).
+  - Tres respuestas inválidas reportaban 1280 estimados en vez de los 1800 tokens reales consumidos.
+  - Errores de red o excepciones desconocidas reportaban `total_tokens_used=0` y `tokens_estimated=False`, confundiendo consumo desconocido con cero real.
+- **Remediación técnica implementada:**
+  - **Reserva atómica concurrente (`try_reserve`):** En `backend/app/agent.py:TokenBudgetTracker`, se implementó `try_reserve(requested)` protegido por mutex (`threading.Lock()`), descontando del saldo disponible mediante `reserved_tokens`. Si no hay saldo suficiente, la reserva es rechazada de forma inmediata antes de cualquier invocación.
+  - **Reconciliación y liberación (`reconcile_usage`):** Tras la ejecución, se descuenta el uso real de `total_tokens_used` y se libera la reserva previa, soportando reintentos y liberaciones limpias.
+  - **Acumulación de uso en fallos e invalidaciones:** En `backend/app/ai_router.py:classify_evidence_with_router`, se acumulan los tokens de todos los intentos (`accumulated_prompt_tokens` y `accumulated_completion_tokens`), incluso cuando la salida resulta en `INVALID_SCHEMA` o fallo de validación. Tanto en éxito como en fallo total, los tokens acumulados se devuelven e imputan al tracker.
+  - **Representación explícita de consumo desconocido:** Se incorporaron los campos `tokens_estimated: bool` y `unknown_consumption: bool` en el esquema de respuesta y en el tracker. Cuando un intento falla por error remoto/red sin metadatos de uso, se imputa una estimación conservadora identificada y se marcan explícitamente como estimados, nunca reportando cero engañoso.
+- **Pruebas adversariales permanentes:**
+  - `test_g2_1_1_m02_concurrent_token_reservation_prevents_overconsumption`: Dos llamadas simultáneas intentan reservar 700 tokens con presupuesto de 1000; la primera pasa y la segunda es rechazada atómicamente con `MAX_TOKENS`, previniendo sobreconsumo (`PASSED`).
+  - `test_g2_1_1_m02_token_accumulation_invalid_json_fallback`: Gemini inválido (600) + Groq válido (800) registra exactamente 1400 tokens conocidos (`PASSED`).
+  - `test_g2_1_1_m02_token_accumulation_three_invalid_responses`: Tres proveedores inválidos (600 c/u) registran exactamente 1800 tokens conocidos (`PASSED`).
+  - `test_g2_1_1_m02_agent_unknown_consumption_reported_as_estimated_not_zero`: Fallo por error de red en todos los intentos reporta `tokens_estimated=True`, `unknown_consumption=True` y consumo mayor a cero (`PASSED`).

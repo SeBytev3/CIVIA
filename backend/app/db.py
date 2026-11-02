@@ -19,6 +19,100 @@ logger = logging.getLogger("civia.db")
 _SAFE_DB_NAME_RE = re.compile(r"^[a-zA-Z0-9_]+$")
 _CURRENT_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("_CURRENT_DEADLINE", default=None)
 
+
+class ExecutionCapability:
+    """
+    Capacidad revocable de ejecución para acotar efectos secundarios (M-03).
+    Asociada al deadline y ciclo de vida de la herramienta o invocación.
+    Permite invalidación síncrona inmediata que bloquea nuevas sentencias SQL,
+    commits o escrituras en disco incluso si el worker no coopera o se retrasa.
+    """
+
+    def __init__(self, deadline: float | None = None, label: str = "default") -> None:
+        self.deadline = deadline
+        self.label = label
+        self._revoked = False
+        self._lock = threading.Lock()
+
+    def revoke(self) -> None:
+        with self._lock:
+            self._revoked = True
+
+    def is_valid(self) -> bool:
+        with self._lock:
+            if self._revoked:
+                return False
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                self._revoked = True
+                return False
+            return True
+
+    def check_or_raise(self, operation_desc: str = "operación") -> None:
+        with self._lock:
+            if self._revoked:
+                raise TimeoutError(f"Capacidad de ejecución revocada: {operation_desc} rechazada.")
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                self._revoked = True
+                raise TimeoutError(f"Capacidad de ejecución expirada por deadline: {operation_desc} rechazada.")
+
+
+_CURRENT_CAPABILITY: contextvars.ContextVar[ExecutionCapability | None] = contextvars.ContextVar(
+    "_CURRENT_CAPABILITY", default=None
+)
+
+
+def set_execution_capability(cap: ExecutionCapability | None) -> contextvars.Token[ExecutionCapability | None]:
+    return _CURRENT_CAPABILITY.set(cap)
+
+
+def reset_execution_capability(tok: contextvars.Token[ExecutionCapability | None]) -> None:
+    _CURRENT_CAPABILITY.reset(tok)
+
+
+def get_current_capability() -> ExecutionCapability | None:
+    return _CURRENT_CAPABILITY.get()
+
+
+def check_execution_capability_or_raise(operation_desc: str = "operación") -> None:
+    cap = get_current_capability()
+    if cap is not None:
+        cap.check_or_raise(operation_desc)
+    dl = get_deadline_context()
+    if dl is not None and time.monotonic() >= dl:
+        raise TimeoutError(f"Deadline de ejecución expirado: {operation_desc} rechazada.")
+
+
+class _CapabilityCursorProxy:
+    """Proxy para cursores psycopg que valida la capacidad de ejecución antes de cada consulta."""
+
+    def __init__(self, cur: Any, cap: ExecutionCapability | None) -> None:
+        self._cur = cur
+        self._cap = cap
+
+    def execute(self, query: Any, params: Any = None, **kwargs: Any) -> Any:
+        if self._cap is not None:
+            self._cap.check_or_raise("sentencia SQL")
+        check_execution_capability_or_raise("sentencia SQL")
+        return self._cur.execute(query, params, **kwargs)
+
+    def executemany(self, query: Any, params_seq: Any, **kwargs: Any) -> Any:
+        if self._cap is not None:
+            self._cap.check_or_raise("sentencia SQL múltiple")
+        check_execution_capability_or_raise("sentencia SQL múltiple")
+        return self._cur.executemany(query, params_seq, **kwargs)
+
+    def __iter__(self) -> Any:
+        return iter(self._cur)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cur, name)
+
+    def __enter__(self) -> "_CapabilityCursorProxy":
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        return self._cur.__exit__(exc_type, exc_val, exc_tb)
+
 _ACTIVE_CONNS_BY_THREAD: dict[int, set[psycopg.Connection[Any]]] = {}
 _CONNS_LOCK = threading.Lock()
 
@@ -127,6 +221,9 @@ def ensure_isolated_database(target_db_name: str = "civia_test", base_url: str |
 
 
 def checked_commit(conn: psycopg.Connection[Any]) -> None:
+    conn_cap = getattr(conn, "_execution_capability", None)
+    if conn_cap is not None:
+        conn_cap.check_or_raise("commit en base de datos")
     dl_check = get_deadline_context()
     if dl_check is not None:
         rem_sec = dl_check - time.monotonic()
@@ -150,11 +247,15 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
         finally:
             timer.cancel()
     else:
+        check_execution_capability_or_raise("commit en base de datos")
         conn.commit()
 
 
 @contextmanager
 def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Connection[dict[str, Any]], None, None]:
+    cap = get_current_capability()
+    if cap is not None:
+        cap.check_or_raise("apertura de conexión a base de datos")
     dl = get_deadline_context()
     if dl is not None:
         rem_sec = dl - time.monotonic()
@@ -164,10 +265,21 @@ def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Conne
             statement_timeout_ms = max(10, int(rem_sec * 1000))
 
     conn = psycopg.connect(settings.DATABASE_URL, row_factory=dict_row, connect_timeout=5)
+    cap = get_current_capability()
+    conn._execution_capability = cap  # type: ignore[attr-defined]
+    orig_cursor = conn.cursor
+
+    def _proxy_cursor(*c_args: Any, **c_kwargs: Any) -> _CapabilityCursorProxy:
+        return _CapabilityCursorProxy(orig_cursor(*c_args, **c_kwargs), cap)
+
+    conn.cursor = _proxy_cursor  # type: ignore[assignment]
     register_active_conn(conn)
     orig_commit = conn.commit
 
     def _wrapped_commit() -> None:
+        if cap is not None:
+            cap.check_or_raise("commit en base de datos")
+        check_execution_capability_or_raise("commit en base de datos")
         dl_check = get_deadline_context()
         if dl_check is not None:
             rem_sec_commit = dl_check - time.monotonic()

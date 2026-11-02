@@ -7,6 +7,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_change_me}
     volumes:
       - civia_postgres:/var/lib/postgresql/data
+    networks:
+      - civia_net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -29,7 +31,7 @@ services:
       FALLA_FORZADA: ${FALLA_FORZADA:-}
       AUTO_SEED_SYNTHETIC: ${AUTO_SEED_SYNTHETIC:-true}
       FORWARDED_ALLOW_IPS: ""
-      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.16.0.0/12}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.28.0.2,172.18.0.2}
       ADMIN_TOKEN: ${ADMIN_TOKEN:?Configure ADMIN_TOKEN en .env con un secreto robusto (>=24 caracteres)}
     volumes:
       - civia_uploads:/app/data/uploads
@@ -39,6 +41,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    networks:
+      - civia_net
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)"]
       interval: 10s
@@ -51,11 +55,23 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    networks:
+      civia_net:
+        ipv4_address: 172.28.0.2
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:80/health >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 4s
       retries: 6
+
+networks:
+  civia_net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
+          gateway: 172.28.0.1
 volumes:
   civia_postgres:
   civia_uploads:

@@ -583,6 +583,9 @@ def classify_evidence_with_router(
 
     attempt_global = 0
     provider_switches = 0
+    accumulated_prompt_tokens = 0
+    accumulated_completion_tokens = 0
+    has_unknown_consumption = False
 
     for idx, node in enumerate(chain):
         elapsed_router = time.perf_counter() - t_start
@@ -629,6 +632,8 @@ def classify_evidence_with_router(
                 break
             attempt_global += 1
             t0 = time.perf_counter()
+            in_tok = 0
+            out_tok = 0
             try:
                 forced_raw = _check_forced_fault(tier, provider)
                 if forced_raw is not None:
@@ -651,6 +656,13 @@ def classify_evidence_with_router(
                         image_mime=image_mime,
                         timeout_sec=effective_timeout,
                     )
+
+                # Acumulación atómica de tokens de todas las respuestas recibidas (M-02)
+                if in_tok > 0 or out_tok > 0:
+                    accumulated_prompt_tokens += in_tok
+                    accumulated_completion_tokens += out_tok
+                else:
+                    has_unknown_consumption = True
 
                 # Post-call deadline verification: reject if call finished outside deadline
                 post_elapsed = time.perf_counter() - t_start
@@ -684,6 +696,7 @@ def classify_evidence_with_router(
                         "severity": contract.severity,
                     },
                 )
+                total_acc = accumulated_prompt_tokens + accumulated_completion_tokens
                 return contract, {
                     "trace_group_id": str(eff_trace_group_id),
                     "provider": provider,
@@ -692,12 +705,17 @@ def classify_evidence_with_router(
                     "fallback_used": idx > 0,
                     "attempts": attempt_global,
                     "latency_ms": dt_ms,
-                    "prompt_tokens": in_tok,
-                    "completion_tokens": out_tok,
-                    "total_tokens": in_tok + out_tok,
+                    "prompt_tokens": accumulated_prompt_tokens,
+                    "completion_tokens": accumulated_completion_tokens,
+                    "total_tokens": total_acc,
+                    "unknown_consumption": has_unknown_consumption,
+                    "last_prompt_tokens": in_tok,
+                    "last_completion_tokens": out_tok,
                 }
 
             except AIProviderError as exc:
+                if in_tok == 0 and out_tok == 0:
+                    has_unknown_consumption = True
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_failure(exc.code)
                 _safe_record_trace(
@@ -729,6 +747,8 @@ def classify_evidence_with_router(
                 backoff = min(0.6, 0.15 * (2**node_try) + random.uniform(0.01, 0.08))
                 time.sleep(backoff)
             except Exception as exc:
+                if in_tok == 0 and out_tok == 0:
+                    has_unknown_consumption = True
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_failure("UNEXPECTED_ERROR")
                 _safe_record_trace(
@@ -749,6 +769,7 @@ def classify_evidence_with_router(
         provider_switches += 1
 
     dt_total = int((time.perf_counter() - t_start) * 1000)
+    total_acc = accumulated_prompt_tokens + accumulated_completion_tokens
     return None, {
         "trace_group_id": str(eff_trace_group_id),
         "provider": "none",
@@ -757,9 +778,10 @@ def classify_evidence_with_router(
         "attempts": attempt_global,
         "all_failed": True,
         "latency_ms": dt_total,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
+        "prompt_tokens": accumulated_prompt_tokens,
+        "completion_tokens": accumulated_completion_tokens,
+        "total_tokens": total_acc,
+        "unknown_consumption": has_unknown_consumption or (total_acc == 0),
     }
 
 

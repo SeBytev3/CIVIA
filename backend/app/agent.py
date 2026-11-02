@@ -24,11 +24,14 @@ from app.ai_router import (
 )
 from app.config import settings
 from app.db import (
+    ExecutionCapability,
     cancel_active_conns_for_thread,
     get_conn,
     get_deadline_context,
     reset_deadline_context,
+    reset_execution_capability,
     set_deadline_context,
+    set_execution_capability,
 )
 from app.observability import record_ai_trace, sanitize_secret_text
 from app.repository import (
@@ -52,24 +55,74 @@ class TokenBudgetTracker:
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
+        self.reserved_tokens = 0
         self.tokens_estimated = False
+        self.has_unknown_consumption = False
         self._lock = threading.Lock()
 
-    def record_usage(self, prompt: int, completion: int, estimated: bool = False) -> None:
+    def try_reserve(self, requested: int) -> bool:
+        """
+        Intenta reservar atómicamente 'requested' tokens dentro del presupuesto (M-02).
+        Retorna True si hay saldo suficiente y la reserva se registró, False de lo contrario.
+        """
+        with self._lock:
+            effective_usage = self.total_tokens + self.reserved_tokens
+            if (effective_usage + requested) > self.max_budget:
+                return False
+            self.reserved_tokens += requested
+            return True
+
+    def release_reservation(self, reserved: int) -> None:
+        """Libera tokens reservados sin registrar consumo adicional."""
+        with self._lock:
+            self.reserved_tokens = max(0, self.reserved_tokens - reserved)
+
+    def reconcile_usage(
+        self,
+        reserved: int,
+        actual_prompt: int,
+        actual_completion: int,
+        estimated: bool = False,
+        unknown: bool = False,
+    ) -> None:
+        """
+        Reconcilia de forma atómica una reserva previa con el consumo real observado (M-02).
+        Libera la reserva y suma el consumo exacto o estimado.
+        """
+        with self._lock:
+            self.reserved_tokens = max(0, self.reserved_tokens - reserved)
+            self.prompt_tokens += max(0, actual_prompt)
+            self.completion_tokens += max(0, actual_completion)
+            self.total_tokens += max(0, actual_prompt + actual_completion)
+            if estimated:
+                self.tokens_estimated = True
+            if unknown:
+                self.has_unknown_consumption = True
+
+    def record_usage(
+        self,
+        prompt: int,
+        completion: int,
+        estimated: bool = False,
+        unknown: bool = False,
+    ) -> None:
         with self._lock:
             self.prompt_tokens += max(0, prompt)
             self.completion_tokens += max(0, completion)
             self.total_tokens += max(0, prompt + completion)
             if estimated:
                 self.tokens_estimated = True
+            if unknown:
+                self.has_unknown_consumption = True
 
     def remaining(self) -> int:
         with self._lock:
-            return max(0, self.max_budget - self.total_tokens)
+            effective_usage = self.total_tokens + self.reserved_tokens
+            return max(0, self.max_budget - effective_usage)
 
     def is_exhausted(self) -> bool:
         with self._lock:
-            return self.total_tokens >= self.max_budget
+            return (self.total_tokens + self.reserved_tokens) >= self.max_budget
 
 
 _ACTIVE_TOKEN_TRACKER: contextvars.ContextVar[TokenBudgetTracker | None] = contextvars.ContextVar(
@@ -358,34 +411,49 @@ def tool_clasificar_evidencia(args: dict[str, Any]) -> dict[str, Any]:
     est_total_multimodal = est_input_tokens + est_image_tokens + est_output_tokens
 
     tracker = _ACTIVE_TOKEN_TRACKER.get()
-    if tracker is not None and tracker.remaining() < est_total_multimodal:
-        return {
-            "encontrado": True,
-            "tracking_code": row["tracking_code"],
-            "analisis_completado": False,
-            "status": row["status"],
-            "mensaje": f"Presupuesto de tokens del agente insuficiente para clasificación multimodal (requiere ~{est_total_multimodal} tokens, saldo restante {tracker.remaining()}).",
-            "guardrail_triggered": "MAX_TOKENS",
-        }
-
-    contract, meta = classify_evidence_with_router(
-        description=row["description"],
-        latitude=float(row["latitude"]),
-        longitude=float(row["longitude"]),
-        image_bytes=img_bytes,
-        image_mime=row["photo_mime"],
-        address_hint=row.get("address_hint"),
-        audio_transcript=row.get("audio_transcript"),
-        report_id=row["id"],
-    )
-
     if tracker is not None:
-        p_tok = int(meta.get("prompt_tokens") or 0)
-        c_tok = int(meta.get("completion_tokens") or 0)
-        if p_tok <= 0 and c_tok <= 0:
-            tracker.record_usage(1200, 80, estimated=True)
-        else:
-            tracker.record_usage(p_tok, c_tok, estimated=False)
+        if not tracker.try_reserve(est_total_multimodal):
+            return {
+                "encontrado": True,
+                "tracking_code": row["tracking_code"],
+                "analisis_completado": False,
+                "status": row["status"],
+                "mensaje": f"Presupuesto de tokens del agente insuficiente para clasificación multimodal (requiere ~{est_total_multimodal} tokens, saldo restante {tracker.remaining()}).",
+                "guardrail_triggered": "MAX_TOKENS",
+            }
+
+    try:
+        contract, meta = classify_evidence_with_router(
+            description=row["description"],
+            latitude=float(row["latitude"]),
+            longitude=float(row["longitude"]),
+            image_bytes=img_bytes,
+            image_mime=row["photo_mime"],
+            address_hint=row.get("address_hint"),
+            audio_transcript=row.get("audio_transcript"),
+            report_id=row["id"],
+        )
+    finally:
+        if tracker is not None:
+            p_tok = int(meta.get("prompt_tokens") or 0) if "meta" in locals() else 0
+            c_tok = int(meta.get("completion_tokens") or 0) if "meta" in locals() else 0
+            is_unk = bool(meta.get("unknown_consumption", False)) if "meta" in locals() else True
+            if p_tok > 0 or c_tok > 0:
+                tracker.reconcile_usage(
+                    reserved=est_total_multimodal,
+                    actual_prompt=p_tok,
+                    actual_completion=c_tok,
+                    estimated=False,
+                    unknown=is_unk,
+                )
+            else:
+                tracker.reconcile_usage(
+                    reserved=est_total_multimodal,
+                    actual_prompt=est_input_tokens + est_image_tokens,
+                    actual_completion=est_output_tokens,
+                    estimated=True,
+                    unknown=True,
+                )
 
     if contract is None:
         return {
@@ -495,14 +563,17 @@ def execute_tool_with_timeout(
 
     eff_deadline = deadline if deadline is not None else (time.monotonic() + timeout_sec)
     active_tracker = _ACTIVE_TOKEN_TRACKER.get()
+    capability = ExecutionCapability(deadline=eff_deadline, label=f"tool:{tool_name}")
     worker_tid: list[int] = []
 
     def _worker() -> dict[str, Any]:
         worker_tid.append(threading.get_ident())
-        tok = set_deadline_context(eff_deadline)
+        tok_cap = set_execution_capability(capability)
+        tok_dl = set_deadline_context(eff_deadline)
         tok_tracker = _ACTIVE_TOKEN_TRACKER.set(active_tracker) if active_tracker is not None else None
         try:
             res = fn(tool_args)
+            capability.check_or_raise(f"resultado de herramienta '{tool_name}'")
             if time.monotonic() >= eff_deadline:
                 raise TimeoutError(f"La herramienta '{tool_name}' superó el deadline de ejecución ({timeout_sec}s).")
             return res
@@ -512,7 +583,8 @@ def execute_tool_with_timeout(
                     _ACTIVE_TOKEN_TRACKER.reset(tok_tracker)
                 except Exception:
                     pass
-            reset_deadline_context(tok)
+            reset_deadline_context(tok_dl)
+            reset_execution_capability(tok_cap)
 
     ctx = contextvars.copy_context()
     executor = ThreadPoolExecutor(max_workers=1)
@@ -520,12 +592,22 @@ def execute_tool_with_timeout(
     try:
         return future.result(timeout=timeout_sec)
     except FuturesTimeoutError as exc:
+        capability.revoke()
         if worker_tid:
-            cancel_active_conns_for_thread(worker_tid[0])
+            threading.Thread(
+                target=cancel_active_conns_for_thread,
+                args=(worker_tid[0],),
+                daemon=True,
+            ).start()
         raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s.") from exc
     finally:
+        capability.revoke()
         if worker_tid:
-            cancel_active_conns_for_thread(worker_tid[0])
+            threading.Thread(
+                target=cancel_active_conns_for_thread,
+                args=(worker_tid[0],),
+                daemon=True,
+            ).start()
         executor.shutdown(wait=False, cancel_futures=True)
 
 
@@ -912,13 +994,15 @@ def run_civia_agent(
 
             rem_tokens = tracker.remaining()
             est_prompt_tokens = estimate_prompt_tokens(conversation, AGENT_TOOLS_SPEC)
-            # Reserva dinámica de tokens de entrada + margen mínimo de respuesta (20 tokens)
-            if rem_tokens < (est_prompt_tokens + 20):
+            est_turn_total = est_prompt_tokens + 20
+            # Reserva dinámica y atómica de tokens de entrada + margen mínimo de respuesta (M-02)
+            if not tracker.try_reserve(est_turn_total):
                 guardrail_triggered = "MAX_TOKENS"
                 break
 
             call_max_tokens = min(700, max(1, rem_tokens - est_prompt_tokens))
             if call_max_tokens < 10:
+                tracker.release_reservation(est_turn_total)
                 guardrail_triggered = "MAX_TOKENS"
                 break
 
@@ -978,7 +1062,12 @@ def run_civia_agent(
                         out_tok = max(10, int(math.ceil(len(turn_text or "") / 3.0)))
                         est = True
 
-                    tracker.record_usage(in_tok, out_tok, estimated=est)
+                    tracker.reconcile_usage(
+                        reserved=est_turn_total,
+                        actual_prompt=in_tok,
+                        actual_completion=out_tok,
+                        estimated=est,
+                    )
                     active_provider = provider
                     active_model = model
                     if idx > 0:
@@ -1005,6 +1094,7 @@ def run_civia_agent(
                     )
                     break
                 except AIProviderError as exc:
+                    tracker.has_unknown_consumption = True
                     dt_ms = int((time.perf_counter() - t_call) * 1000)
                     cb.record_failure(exc.code)
                     _safe_record_trace(
@@ -1022,6 +1112,7 @@ def run_civia_agent(
                     fallback_used = True
                     continue
                 except Exception as exc:
+                    tracker.has_unknown_consumption = True
                     dt_ms = int((time.perf_counter() - t_call) * 1000)
                     cb.record_failure("UNEXPECTED_ERROR")
                     _safe_record_trace(
@@ -1040,6 +1131,9 @@ def run_civia_agent(
                     continue
 
             if not turn_succeeded:
+                tracker.release_reservation(est_turn_total)
+                if tracker.total_tokens == 0:
+                    tracker.record_usage(est_prompt_tokens, 0, estimated=True, unknown=True)
                 # Caída total de proveedores IA: responder con respaldo SQL determinista sin error técnico
                 answer = _deterministic_sql_fallback_answer(query, executed_tools)
                 for et in executed_tools:
@@ -1059,6 +1153,7 @@ def run_civia_agent(
                     "prompt_tokens_used": tracker.prompt_tokens,
                     "completion_tokens_used": tracker.completion_tokens,
                     "tokens_estimated": tracker.tokens_estimated,
+                    "unknown_consumption": tracker.has_unknown_consumption,
                     "max_tokens_budget": eff_max_tokens,
                     "latency_ms": total_ms,
                     "guardrail_triggered": guardrail_triggered,
@@ -1106,6 +1201,7 @@ def run_civia_agent(
                     "prompt_tokens_used": tracker.prompt_tokens,
                     "completion_tokens_used": tracker.completion_tokens,
                     "tokens_estimated": tracker.tokens_estimated,
+                    "unknown_consumption": tracker.has_unknown_consumption,
                     "max_tokens_budget": eff_max_tokens,
                     "latency_ms": total_ms,
                     "guardrail_triggered": guardrail_triggered,
@@ -1200,6 +1296,7 @@ def run_civia_agent(
             "prompt_tokens_used": tracker.prompt_tokens,
             "completion_tokens_used": tracker.completion_tokens,
             "tokens_estimated": tracker.tokens_estimated,
+            "unknown_consumption": tracker.has_unknown_consumption,
             "max_tokens_budget": eff_max_tokens,
             "latency_ms": total_ms,
             "guardrail_triggered": guardrail_triggered,
@@ -1220,6 +1317,7 @@ def run_civia_agent(
             "prompt_tokens_used": tracker.prompt_tokens,
             "completion_tokens_used": tracker.completion_tokens,
             "tokens_estimated": tracker.tokens_estimated,
+            "unknown_consumption": tracker.has_unknown_consumption,
             "max_tokens_budget": eff_max_tokens,
             "latency_ms": total_ms,
             "guardrail_triggered": "TIMEOUT",

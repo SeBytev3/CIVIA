@@ -125,6 +125,8 @@ class AgentQueryResponse(BaseModel):
     guardrail_triggered: str | None = None
     requires_human_approval: bool = False
     pending_approval_id: str | None = None
+    tokens_estimated: bool = False
+    unknown_consumption: bool = False
 
 
 class ApprovalDecisionRequest(BaseModel):
