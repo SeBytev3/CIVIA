@@ -11,7 +11,7 @@ from app.db import run_migrations
 from app.main import app
 from app.security import rate_limiter
 from app.seed import seed_synthetic_reports
-from tests.conftest import restore_db_snapshot, snapshot_db_state
+from tests.conftest import cleanup_tracked_test_records
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -19,9 +19,8 @@ def setup_db_and_seed():
     settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     run_migrations()
     seed_synthetic_reports(force_reset=False)
-    snap = snapshot_db_state()
     yield
-    restore_db_snapshot(snap)
+    cleanup_tracked_test_records()
 
 
 @pytest.fixture(autouse=True)

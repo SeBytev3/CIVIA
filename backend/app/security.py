@@ -2,6 +2,7 @@ from collections import defaultdict, deque
 import hashlib
 import io
 import math
+import os
 from pathlib import Path
 import re
 import time
@@ -100,6 +101,34 @@ def _detect_image_magic(raw_bytes: bytes) -> tuple[str, str, str] | None:
     return None
 
 
+def _atomic_write_bytes(target_dir: Path, final_name: str, data: bytes) -> Path:
+    """
+    Escribe bytes primero en un archivo temporal dentro de target_dir, verifica que
+    el tamaño escrito coincida exactamente con len(data) y lo promueve atómicamente
+    al destino final. Si ocurre cualquier fallo o escritura parcial, elimina tanto
+    el archivo temporal como el archivo destino antes de propagar la excepción.
+    """
+    target_dir.mkdir(parents=True, exist_ok=True)
+    final_path = target_dir / final_name
+    staging_path = target_dir / f".tmp_{uuid.uuid4().hex}_{final_name}"
+    try:
+        staging_path.write_bytes(data)
+        if not staging_path.exists() or staging_path.stat().st_size != len(data):
+            raise OSError("Escritura parcial o incompleta detectada en archivo temporal.")
+        os.replace(staging_path, final_path)
+        return final_path
+    except BaseException:
+        try:
+            staging_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            final_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def validate_and_store_photo(
     raw_bytes: bytes,
     declared_filename: str | None = None,
@@ -163,11 +192,8 @@ def validate_and_store_photo(
         ) from exc
 
     target_dir = upload_dir or settings.UPLOAD_DIR
-    target_dir.mkdir(parents=True, exist_ok=True)
-
     safe_name = f"photo_{uuid.uuid4().hex}.{ext}"
-    file_path = target_dir / safe_name
-    file_path.write_bytes(sanitized_bytes)
+    _atomic_write_bytes(target_dir, safe_name, sanitized_bytes)
 
     sha256_hex = hashlib.sha256(sanitized_bytes).hexdigest()
     return {
@@ -245,9 +271,8 @@ def validate_and_store_audio(
         )
 
     target_dir = upload_dir or settings.UPLOAD_DIR
-    target_dir.mkdir(parents=True, exist_ok=True)
     safe_name = f"audio_{uuid.uuid4().hex}.{ext}"
-    (target_dir / safe_name).write_bytes(raw_bytes)
+    _atomic_write_bytes(target_dir, safe_name, raw_bytes)
 
     return {
         "audio_path": safe_name,

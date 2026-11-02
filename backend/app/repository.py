@@ -2,15 +2,22 @@ from datetime import datetime, timezone
 import hashlib
 import hmac
 import json
-from typing import Any
+import secrets
+from typing import Any, Callable
 from uuid import UUID
 import uuid
 
 import psycopg
 
-from app.config import settings
 from app.db import get_conn
 from app.security import CitizenValidationError
+
+_ON_REPORT_CREATED_HOOK: Callable[[UUID], None] | None = None
+
+
+def set_report_created_hook(hook: Callable[[UUID], None] | None) -> None:
+    global _ON_REPORT_CREATED_HOOK
+    _ON_REPORT_CREATED_HOOK = hook
 
 STATUS_MESSAGES: dict[str, str] = {
     "PENDING_ANALYSIS": "Reporte recibido y almacenado de forma segura. El análisis automático está pendiente de procesamiento.",
@@ -76,14 +83,55 @@ def row_to_public_dict(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def derive_citizen_edit_token(report_uuid: UUID | str) -> str:
-    rid = UUID(str(report_uuid))
-    secret = f"civia-citizen-edit:{settings.DATABASE_URL}".encode("utf-8")
-    return hmac.new(secret, rid.bytes, hashlib.sha256).hexdigest()
+def generate_citizen_edit_token() -> str:
+    """Genera una capacidad de edición impredecible por reporte mediante CSPRNG."""
+    return secrets.token_urlsafe(32)
 
 
 def hash_edit_token(token: str) -> str:
     return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
+
+
+def hash_idempotency_key(raw_key: str) -> str:
+    return hashlib.sha256(f"civia-idem-v2:{raw_key.strip()}".encode("utf-8")).hexdigest()
+
+
+def _seal_edit_token_for_idempotency(raw_idem_key: str, report_id: UUID, edit_token: str) -> str:
+    token_bytes = edit_token.encode("utf-8")
+    rid = UUID(str(report_id))
+    keystream = hashlib.pbkdf2_hmac(
+        "sha256",
+        raw_idem_key.strip().encode("utf-8"),
+        rid.bytes,
+        iterations=10_000,
+        dklen=len(token_bytes),
+    )
+    cipher_bytes = bytes(a ^ b for a, b in zip(token_bytes, keystream))
+    return cipher_bytes.hex()
+
+
+def _unseal_edit_token_for_idempotency(
+    raw_idem_key: str, report_id: UUID, sealed_hex: str | None
+) -> str | None:
+    if not sealed_hex:
+        return None
+    try:
+        cipher_bytes = bytes.fromhex(sealed_hex)
+    except ValueError:
+        return None
+    rid = UUID(str(report_id))
+    keystream = hashlib.pbkdf2_hmac(
+        "sha256",
+        raw_idem_key.strip().encode("utf-8"),
+        rid.bytes,
+        iterations=10_000,
+        dklen=len(cipher_bytes),
+    )
+    plain_bytes = bytes(a ^ b for a, b in zip(cipher_bytes, keystream))
+    try:
+        return plain_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
 
 
 def generate_tracking_code(
@@ -120,41 +168,49 @@ def create_report(
 ) -> dict[str, Any]:
     rid = report_id or uuid.uuid4()
     am = audio_meta or {}
-    eff_idem_key = idempotency_key.strip()[:128] if (idempotency_key and idempotency_key.strip()) else None
-    eff_fingerprint = (request_fingerprint or "")[:64]
-    c_token = (citizen_edit_token or derive_citizen_edit_token(rid)).strip()
+    raw_idem_key = idempotency_key.strip() if (idempotency_key and idempotency_key.strip()) else None
+    if raw_idem_key is not None and (len(raw_idem_key) < 8 or len(raw_idem_key) > 128):
+        raise CitizenValidationError(
+            "La clave de idempotencia proporcionada no tiene una longitud válida.",
+            status_code=422,
+            code="INVALID_IDEMPOTENCY_KEY",
+        )
+    idem_key_hash = hash_idempotency_key(raw_idem_key) if raw_idem_key else None
+    eff_fingerprint = (request_fingerprint or "").strip()[:64]
+    c_token = (citizen_edit_token or generate_citizen_edit_token()).strip()
     c_token_hash = hash_edit_token(c_token)
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            if eff_idem_key:
-                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s));", (eff_idem_key,))
+            if idem_key_hash and raw_idem_key:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s));", (idem_key_hash,))
                 cur.execute(
                     """
-                    SELECT r.*, ir.request_fingerprint AS _stored_fingerprint
+                    SELECT r.*,
+                           ir.request_fingerprint AS _stored_fingerprint,
+                           ir.citizen_edit_token AS _sealed_edit_token
                     FROM reports r
                     LEFT JOIN idempotency_records ir ON ir.idempotency_key = r.idempotency_key
                     WHERE r.idempotency_key = %s
                     LIMIT 1;
                     """,
-                    (eff_idem_key,),
+                    (idem_key_hash,),
                 )
                 existing_row = cur.fetchone()
                 if existing_row is not None:
                     stored_fp = existing_row.get("_stored_fingerprint")
-                    if (
-                        eff_idem_key.startswith("hdr:")
-                        and eff_fingerprint
-                        and stored_fp
-                        and stored_fp != eff_fingerprint
-                    ):
+                    if eff_fingerprint and stored_fp and stored_fp != eff_fingerprint:
                         raise CitizenValidationError(
                             "La clave Idempotency-Key ya fue utilizada para una solicitud distinta.",
                             status_code=409,
                             code="IDEMPOTENCY_KEY_CONFLICT",
                         )
                     existing_row["_replayed"] = True
-                    existing_row["_citizen_edit_token"] = derive_citizen_edit_token(existing_row["id"])
+                    existing_row["_citizen_edit_token"] = _unseal_edit_token_for_idempotency(
+                        raw_idem_key,
+                        existing_row["id"],
+                        existing_row.get("_sealed_edit_token"),
+                    )
                     conn.commit()
                     return existing_row
 
@@ -216,7 +272,7 @@ def create_report(
                             audio_transcript,
                             is_synthetic,
                             c_token_hash,
-                            eff_idem_key,
+                            idem_key_hash,
                         ),
                     )
                     row = cur.fetchone()
@@ -225,21 +281,38 @@ def create_report(
                 except psycopg.errors.UniqueViolation as exc:
                     last_exc = exc
                     cur.execute("ROLLBACK TO SAVEPOINT sp_insert_report;")
-                    if eff_idem_key:
+                    if idem_key_hash and raw_idem_key:
                         cur.execute(
-                            "SELECT * FROM reports WHERE idempotency_key = %s LIMIT 1;",
-                            (eff_idem_key,),
+                            """
+                            SELECT r.*,
+                                   ir.request_fingerprint AS _stored_fingerprint,
+                                   ir.citizen_edit_token AS _sealed_edit_token
+                            FROM reports r
+                            LEFT JOIN idempotency_records ir ON ir.idempotency_key = r.idempotency_key
+                            WHERE r.idempotency_key = %s
+                            LIMIT 1;
+                            """,
+                            (idem_key_hash,),
                         )
                         concurrent_row = cur.fetchone()
                         if concurrent_row is not None:
+                            stored_fp = concurrent_row.get("_stored_fingerprint")
+                            if eff_fingerprint and stored_fp and stored_fp != eff_fingerprint:
+                                raise CitizenValidationError(
+                                    "La clave Idempotency-Key ya fue utilizada para una solicitud distinta.",
+                                    status_code=409,
+                                    code="IDEMPOTENCY_KEY_CONFLICT",
+                                ) from exc
                             concurrent_row["_replayed"] = True
-                            concurrent_row["_citizen_edit_token"] = derive_citizen_edit_token(
-                                concurrent_row["id"]
+                            concurrent_row["_citizen_edit_token"] = _unseal_edit_token_for_idempotency(
+                                raw_idem_key,
+                                concurrent_row["id"],
+                                concurrent_row.get("_sealed_edit_token"),
                             )
                             conn.commit()
                             return concurrent_row
                     rid = report_id or uuid.uuid4()
-                    c_token = (citizen_edit_token or derive_citizen_edit_token(rid)).strip()
+                    c_token = (citizen_edit_token or generate_citizen_edit_token()).strip()
                     c_token_hash = hash_edit_token(c_token)
 
             if row is None:
@@ -247,7 +320,8 @@ def create_report(
                     raise last_exc
                 raise RuntimeError("No se pudo insertar el reporte tras reintentos de colisión.")
 
-            if eff_idem_key:
+            if idem_key_hash and raw_idem_key:
+                sealed_token = _seal_edit_token_for_idempotency(raw_idem_key, row["id"], c_token)
                 cur.execute(
                     """
                     INSERT INTO idempotency_records (
@@ -257,15 +331,20 @@ def create_report(
                     ON CONFLICT (idempotency_key) DO NOTHING;
                     """,
                     (
-                        eff_idem_key,
+                        idem_key_hash,
                         eff_fingerprint or "default",
                         row["id"],
                         row["tracking_code"],
-                        c_token,
+                        sealed_token,
                     ),
                 )
 
             conn.commit()
+            if _ON_REPORT_CREATED_HOOK is not None and not is_synthetic:
+                try:
+                    _ON_REPORT_CREATED_HOOK(UUID(str(row["id"])))
+                except Exception:
+                    pass
             row["_replayed"] = False
             row["_citizen_edit_token"] = c_token
             return row
@@ -374,10 +453,13 @@ def confirm_report_category(
                     )
 
                 stored_hash = (existing.get("edit_token_hash") or "").strip()
-                expected_hash = stored_hash or hash_edit_token(derive_citizen_edit_token(rid))
                 provided_token = (edit_token or "").strip()
                 provided_hash = hash_edit_token(provided_token) if provided_token else ""
-                if not provided_hash or not hmac.compare_digest(provided_hash, expected_hash):
+                if (
+                    not stored_hash
+                    or not provided_hash
+                    or not hmac.compare_digest(provided_hash, stored_hash)
+                ):
                     raise CitizenValidationError(
                         "Se requiere la credencial de edición del reporte para confirmar o ajustar su clasificación.",
                         status_code=403,

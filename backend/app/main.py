@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 import hashlib
 import hmac
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -202,16 +203,35 @@ async def create_citizen_report(
 
     raw_photo_sha = hashlib.sha256(raw_photo).hexdigest() if raw_photo else ""
     raw_audio_sha = hashlib.sha256(raw_audio).hexdigest() if raw_audio else ""
-    req_fingerprint = hashlib.sha256(
-        f"{clean_title}|{clean_desc}|{lat:.6f}|{lon:.6f}|{raw_photo_sha}|{raw_audio_sha}".encode(
-            "utf-8"
-        )
-    ).hexdigest()
-    eff_idem_key = (
-        f"hdr:{idempotency_key.strip()[:100]}"
-        if (idempotency_key and idempotency_key.strip())
-        else f"op:{req_fingerprint}"
+    canonical_payload = json.dumps(
+        {
+            "title": clean_title,
+            "description": clean_desc,
+            "latitude": f"{lat:.6f}",
+            "longitude": f"{lon:.6f}",
+            "comuna": clean_comuna,
+            "neighborhood": clean_neighborhood,
+            "address_hint": clean_address,
+            "auto_analyze": bool(auto_analyze),
+            "photo_sha256": raw_photo_sha,
+            "audio_sha256": raw_audio_sha,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
     )
+    req_fingerprint = hashlib.sha256(canonical_payload.encode("utf-8")).hexdigest()
+
+    eff_idem_key: str | None = None
+    if idempotency_key is not None and idempotency_key.strip():
+        cleaned_idem = idempotency_key.strip()
+        if len(cleaned_idem) < 8 or len(cleaned_idem) > 128:
+            raise CitizenValidationError(
+                "La cabecera Idempotency-Key debe tener entre 8 y 128 caracteres.",
+                status_code=422,
+                code="INVALID_IDEMPOTENCY_KEY",
+            )
+        eff_idem_key = cleaned_idem
 
     written_files: list[Path] = []
     try:

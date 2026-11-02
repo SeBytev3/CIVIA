@@ -38,7 +38,14 @@ from app.ai_router import (
     set_runtime_fault_override,
 )
 from app.config import settings
-from app.db import ensure_isolated_database, get_conn, get_database_name, run_migrations
+from app.db import (
+    assert_disposable_test_db,
+    ensure_isolated_database,
+    get_conn,
+    get_database_name,
+    is_disposable_test_or_eval_db,
+    run_migrations,
+)
 from app.observability import estimate_cost_usd
 from app.seed import generate_synthetic_evidence_png, seed_synthetic_reports
 
@@ -312,17 +319,23 @@ def get_latest_trace_info(trace_group_id: str) -> dict[str, Any]:
 
 def run_evaluation(mode: str = "all", pause_sec: float = 0.7) -> dict[str, Any]:
     import os
+    import shutil
     import tempfile
+    from uuid import UUID
+    import uuid
 
-    if get_database_name(settings.DATABASE_URL) == "civia" and os.getenv("CIVIA_ALLOW_MAIN_DB_EVAL") != "1":
-        try:
-            eval_db_url = ensure_isolated_database("civia_eval", settings.DATABASE_URL)
-            settings.DATABASE_URL = eval_db_url
-            os.environ["DATABASE_URL"] = eval_db_url
-        except Exception:
-            pass
+    if not is_disposable_test_or_eval_db(settings.DATABASE_URL):
+        if os.getenv("CIVIA_STRICT_REJECT_NON_EVAL_DB") == "1":
+            assert_disposable_test_db(settings.DATABASE_URL)
+        eval_db_name = f"civia_eval_{uuid.uuid4().hex[:8]}"
+        eval_db_url = ensure_isolated_database(eval_db_name, settings.DATABASE_URL)
+        settings.DATABASE_URL = eval_db_url
+        os.environ["DATABASE_URL"] = eval_db_url
 
-    eval_upload_dir = Path(tempfile.gettempdir()) / "civia_eval_uploads"
+    assert_disposable_test_db(settings.DATABASE_URL)
+
+    prev_upload_dir = settings.UPLOAD_DIR
+    eval_upload_dir = Path(tempfile.gettempdir()) / f"civia_eval_uploads_{uuid.uuid4().hex[:8]}"
     eval_upload_dir.mkdir(parents=True, exist_ok=True)
     settings.UPLOAD_DIR = eval_upload_dir
 
@@ -343,12 +356,11 @@ def run_evaluation(mode: str = "all", pause_sec: float = 0.7) -> dict[str, Any]:
         (RESULTS_DIR / "reporte_determinista.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        settings.UPLOAD_DIR = prev_upload_dir
+        shutil.rmtree(eval_upload_dir, ignore_errors=True)
         return report
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT id FROM pending_approvals;")
-            pre_existing_pa_ids = [r["id"] for r in cur.fetchall()]
+    created_eval_pa_ids: list[UUID] = []
 
     queries = build_15_representative_queries()
     query_results: list[dict[str, Any]] = []
@@ -367,6 +379,24 @@ def run_evaluation(mode: str = "all", pause_sec: float = 0.7) -> dict[str, Any]:
             set_runtime_fault_override("NONE")
             res = run_civia_agent(q["input"])
             dt_ms = int((time.perf_counter() - t0) * 1000)
+
+            if res.get("pending_approval_id"):
+                try:
+                    pa_uuid = UUID(str(res["pending_approval_id"]))
+                    if pa_uuid not in created_eval_pa_ids:
+                        created_eval_pa_ids.append(pa_uuid)
+                except ValueError:
+                    pass
+            for tool_call in res.get("tools_invoked", []):
+                aid_str = (tool_call.get("result") or {}).get("approval_id")
+                if aid_str:
+                    try:
+                        aid_uuid = UUID(str(aid_str))
+                        if aid_uuid not in created_eval_pa_ids:
+                            created_eval_pa_ids.append(aid_uuid)
+                    except ValueError:
+                        pass
+
             trace_info = get_latest_trace_info(res["trace_group_id"])
             answer_text = res["answer"]
             ans_upper = answer_text.upper()
@@ -453,17 +483,17 @@ def run_evaluation(mode: str = "all", pause_sec: float = 0.7) -> dict[str, Any]:
         if idx < len(queries) and pause_sec > 0:
             time.sleep(pause_sec)
 
-    # Limpiar exclusivamente las solicitudes de aprobación creadas durante esta ejecución (M-07 / N-03)
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            if pre_existing_pa_ids:
+    # Limpiar exclusivamente las solicitudes de aprobación cuyo UUID fue generado por esta corrida (N-03)
+    if created_eval_pa_ids:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM pending_approvals WHERE NOT (id = ANY(%s));",
-                    (pre_existing_pa_ids,),
+                    "DELETE FROM pending_approvals WHERE id = ANY(%s);",
+                    (created_eval_pa_ids,),
                 )
-            else:
-                cur.execute("DELETE FROM pending_approvals;")
-            conn.commit()
+                conn.commit()
+    settings.UPLOAD_DIR = prev_upload_dir
+    shutil.rmtree(eval_upload_dir, ignore_errors=True)
 
     total_q = len(query_results)
     passed_q = sum(1 for r in query_results if r["passed"])

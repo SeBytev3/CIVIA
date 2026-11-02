@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import secrets
 
 
 class Settings:
@@ -37,7 +38,7 @@ class Settings:
     # Auto-seed de datos sintéticos identificados al arrancar si la tabla está vacía
     AUTO_SEED_SYNTHETIC: bool = os.getenv("AUTO_SEED_SYNTHETIC", "true").lower() in ("1", "true", "yes")
 
-    # Token de administración para observabilidad protegida y operaciones admin (sin valor por defecto débil)
+    # Token de administración para observabilidad protegida y operaciones admin (sin valor por defecto)
     ADMIN_TOKEN: str = os.getenv("ADMIN_TOKEN", "")
 
     # Configuración de proveedores IA (Fase D)
@@ -72,29 +73,127 @@ WEAK_ADMIN_TOKENS: set[str] = {
     "replace_with_generated_admin_token",
 }
 
+_WEAK_SUBSTRINGS: tuple[str, ...] = (
+    "civia-admin-demo",
+    "change_me",
+    "changeme",
+    "password",
+    "admin123",
+    "replace_with",
+    "default_token",
+    "example_token",
+    "qwerty",
+    "asdfgh",
+    "zxcvbn",
+)
+
+_KEYBOARD_ROWS: tuple[str, ...] = (
+    "01234567890",
+    "09876543210",
+    "abcdefghijklmnopqrstuvwxyz",
+    "zyxwvutsrqponmlkjihgfedcba",
+    "qwertyuiop",
+    "poiuytrewq",
+    "asdfghjkl",
+    "lkjhgfdsa",
+    "zxcvbnm",
+    "mnbvcxz",
+)
+
+
+def _has_sequential_run(value: str, run_len: int = 5) -> bool:
+    low = value.lower()
+    if len(low) < run_len:
+        return False
+    for row in _KEYBOARD_ROWS:
+        for i in range(len(row) - run_len + 1):
+            if row[i : i + run_len] in low:
+                return True
+    for i in range(len(low) - run_len + 1):
+        window = low[i : i + run_len]
+        diffs = [ord(window[j + 1]) - ord(window[j]) for j in range(run_len - 1)]
+        if all(d == 1 for d in diffs) or all(d == -1 for d in diffs) or all(d == 0 for d in diffs):
+            return True
+    return False
+
+
+def _has_repeated_pattern(value: str) -> bool:
+    n = len(value)
+    low = value.lower()
+    # 1. Periodicidad global: la cadena completa es repetición de un prefijo de periodo p
+    for p in range(1, (n // 2) + 1):
+        repeated = (low[:p] * ((n // p) + 1))[:n]
+        if low == repeated:
+            return True
+    # 2. Repetición de bloques de longitud >= 3 tres o más veces, o bloques adyacentes de longitud >= 4
+    for k in range(3, min(13, (n // 2) + 1)):
+        for i in range(n - k + 1):
+            sub = low[i : i + k]
+            if low.count(sub) >= 3:
+                return True
+            if k >= 4 and i + 2 * k <= n and low[i + k : i + 2 * k] == sub:
+                return True
+    return False
+
 
 def is_strong_admin_token(token: str | None) -> bool:
+    """
+    Valida que ADMIN_TOKEN no sea vacío ni coincida con patrones predecibles
+    (secuencias numéricas/alfabéticas, repeticiones periódicas, contraseñas de demostración
+    o cadenas de una sola clase de caracteres).
+    Nota de seguridad: las validaciones deterministas descartan credenciales débiles o de
+    demostración; la impredecibilidad real proviene de generar el token con un CSPRNG
+    como secrets.token_urlsafe(32).
+    """
     if not token or not isinstance(token, str):
         return False
     cleaned = token.strip()
-    if len(cleaned) < 24:
+    if len(cleaned) < 24 or len(cleaned) > 256:
         return False
-    if len(set(cleaned)) < 8:
+    if any(ch.isspace() for ch in cleaned):
         return False
+    if len(set(cleaned)) < 10:
+        return False
+
     low = cleaned.lower()
     if low in WEAK_ADMIN_TOKENS:
         return False
-    if "civia-admin-demo" in low or "change_me" in low:
+    if any(w in low for w in _WEAK_SUBSTRINGS):
         return False
+
+    has_lower = any("a" <= c <= "z" for c in cleaned)
+    has_upper = any("A" <= c <= "Z" for c in cleaned)
+    has_digit = any("0" <= c <= "9" for c in cleaned)
+    has_symbol = any(not c.isalnum() for c in cleaned)
+    char_classes = sum((has_lower, has_upper, has_digit, has_symbol))
+    if char_classes < 2:
+        return False
+    if cleaned.isdigit() or cleaned.isalpha():
+        return False
+
+    if _has_sequential_run(cleaned, run_len=5):
+        return False
+    if _has_repeated_pattern(cleaned):
+        return False
+
     return True
+
+
+def generate_admin_token(nbytes: int = 32) -> str:
+    """Genera una credencial administrativa criptográficamente segura con CSPRNG."""
+    for _ in range(20):
+        candidate = secrets.token_urlsafe(max(32, nbytes))
+        if is_strong_admin_token(candidate):
+            return candidate
+    return secrets.token_urlsafe(48)
 
 
 def validate_admin_token_or_raise(token: str | None = None) -> None:
     effective = settings.ADMIN_TOKEN if token is None else token
     if not is_strong_admin_token(effective):
         raise RuntimeError(
-            "Configuración insegura: ADMIN_TOKEN falta o es débil. "
-            "Configure un secreto robusto (>=24 caracteres y alta entropía) generado por instalación."
+            "Configuración insegura: ADMIN_TOKEN falta o presenta un patrón predecible/débil. "
+            "Genere un secreto criptográfico con CSPRNG: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
         )
 
 

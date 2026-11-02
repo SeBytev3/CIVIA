@@ -34,6 +34,13 @@ from app.security import _CO_PHONE_RE, _EMAIL_RE
 
 logger = logging.getLogger("civia.agent")
 
+_ON_APPROVAL_CREATED_HOOK: Callable[[UUID], None] | None = None
+
+
+def set_approval_created_hook(hook: Callable[[UUID], None] | None) -> None:
+    global _ON_APPROVAL_CREATED_HOOK
+    _ON_APPROVAL_CREATED_HOOK = hook
+
 
 def _safe_record_trace(**kwargs: Any) -> None:
     try:
@@ -346,6 +353,11 @@ def tool_proponer_actualizacion_critica(args: dict[str, Any]) -> dict[str, Any]:
                 (approval_id, row["id"], json.dumps(payload, ensure_ascii=False), motivo[:500]),
             )
             conn.commit()
+    if _ON_APPROVAL_CREATED_HOOK is not None:
+        try:
+            _ON_APPROVAL_CREATED_HOOK(approval_id)
+        except Exception:
+            pass
 
     return {
         "creado": True,
@@ -1048,16 +1060,23 @@ def decide_pending_approval(
             expected_version = payload.get("expected_version")
             proposed_status = payload.get("proposed_status", "IN_REVIEW")
 
+            has_valid_expected_version = (
+                isinstance(expected_version, int)
+                and not isinstance(expected_version, bool)
+                and expected_version >= 1
+            )
+
             is_stale = False
             if approve:
                 if report_row is None:
                     is_stale = True
-                elif expected_status is not None and report_row["status"] != expected_status:
+                elif not isinstance(expected_status, str) or not expected_status.strip():
                     is_stale = True
-                elif (
-                    expected_version is not None
-                    and int(report_row.get("version") or 1) != int(expected_version)
-                ):
+                elif not has_valid_expected_version:
+                    is_stale = True
+                elif report_row["status"] != expected_status:
+                    is_stale = True
+                elif int(report_row.get("version") or 1) != int(expected_version):
                     is_stale = True
 
             if approve and is_stale:
@@ -1102,16 +1121,36 @@ def decide_pending_approval(
                         human_override_note = %s,
                         version = COALESCE(version, 1) + 1,
                         updated_at = NOW()
-                    WHERE id = %s AND (%s::varchar IS NULL OR status = %s);
+                    WHERE id = %s
+                      AND status = %s
+                      AND COALESCE(version, 1) = %s
+                    RETURNING id;
                     """,
                     (
                         proposed_status,
                         f"Aprobado por humano ({decided_by}): {row['reason']}",
                         row["report_id"],
                         expected_status,
-                        expected_status,
+                        int(expected_version),
                     ),
                 )
+                if cur.fetchone() is None:
+                    cur.execute(
+                        """
+                        UPDATE pending_approvals
+                        SET status = 'REJECTED',
+                            decided_by = %s,
+                            decided_at = NOW(),
+                            reason = LEFT(reason || ' [Rechazada automáticamente por obsolescencia: el estado o versión del reporte cambió previamente]', 500)
+                        WHERE id = %s
+                        RETURNING *;
+                        """,
+                        (decided_by, aid),
+                    )
+                    stale_pa = cur.fetchone() or updated_pa
+                    stale_pa["stale_conflict"] = True
+                    conn.commit()
+                    return stale_pa
             updated_pa["stale_conflict"] = False
             conn.commit()
             return updated_pa

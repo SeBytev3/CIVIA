@@ -11,12 +11,12 @@ from app.ai_router import (
     set_runtime_fault_override,
 )
 from app.config import settings
-from app.db import get_conn, run_migrations
+from app.db import run_migrations
 from app.main import app
 from app.observability import sanitize_secret_text
 from app.security import rate_limiter
 from app.seed import generate_synthetic_evidence_png, seed_synthetic_reports
-from tests.conftest import restore_db_snapshot, snapshot_db_state
+from tests.conftest import cleanup_tracked_test_records
 
 client = TestClient(app)
 ADMIN_HEADERS = {"X-Admin-Token": settings.ADMIN_TOKEN}
@@ -27,11 +27,10 @@ def setup_phase_d_db():
     settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     run_migrations()
     seed_synthetic_reports(force_reset=False)
-    snap = snapshot_db_state()
     yield
     set_runtime_fault_override("NONE")
     reset_all_circuits()
-    restore_db_snapshot(snap)
+    cleanup_tracked_test_records()
 
 
 @pytest.fixture(autouse=True)
@@ -271,6 +270,30 @@ def test_four_agent_guardrails_enforced(monkeypatch):
     assert b_timeout["guardrail_triggered"] == "TIMEOUT"
 
     # Guardrail 4: Aprobación humana obligatoria para escritura crítica (la IA NO modifica reports directamente)
+    # Usamos un reporte propio desechable creado en esta prueba para jamás tocar CIV-2026-DEMO0001
+    img_bytes = generate_synthetic_evidence_png("HUECO", "GUARDRAIL-4")
+    r_disp = client.post(
+        "/api/reports",
+        data={
+            "title": "Reporte desechable para prueba de guardrail 4",
+            "description": "DATO SINTÉTICO PRUEBA GUARDRAIL: Hueco para validar aprobación humana sin tocar reportes compartidos.",
+            "latitude": "3.4510",
+            "longitude": "-76.5310",
+            "auto_analyze": "false",
+        },
+        files={"photo": ("guardrail4.png", img_bytes, "image/png")},
+    )
+    assert r_disp.status_code == 201
+    disp_body = r_disp.json()
+    disp_code = disp_body["tracking_code"]
+
+    r_conf = client.patch(
+        f"/api/reports/{disp_body['id']}/confirm",
+        headers={"X-Citizen-Edit-Token": disp_body["citizen_edit_token"]},
+        json={"final_category": "HUECO", "final_severity": "MEDIA"},
+    )
+    assert r_conf.status_code == 200
+
     def fake_turn_proposes_write(**kwargs):
         return (
             None,
@@ -278,7 +301,7 @@ def test_four_agent_guardrails_enforced(monkeypatch):
                 {
                     "name": "proponer_actualizacion_critica",
                     "args": {
-                        "identificador": "CIV-2026-DEMO0001",
+                        "identificador": disp_code,
                         "nuevo_estado": "RESOLVED",
                         "motivo": "Prueba de límite de aprobación humana",
                     },
@@ -291,62 +314,30 @@ def test_four_agent_guardrails_enforced(monkeypatch):
     monkeypatch.setattr(agent_module, "_call_agent_turn_gemini", fake_turn_proposes_write)
     monkeypatch.setattr(agent_module, "_call_agent_turn_groq", fake_turn_proposes_write)
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT status, human_override_note, version FROM reports WHERE tracking_code = 'CIV-2026-DEMO0001';"
-            )
-            saved_demo1 = cur.fetchone()
-            if saved_demo1 and saved_demo1["status"] != "CONFIRMED":
-                cur.execute(
-                    "UPDATE reports SET status = 'CONFIRMED' WHERE tracking_code = 'CIV-2026-DEMO0001';"
-                )
-                conn.commit()
+    res_write = client.post(
+        "/api/agent/query",
+        json={"query": f"Cambia el estado de {disp_code} a RESOLVED", "max_iterations": 1},
+    )
+    assert res_write.status_code == 200
+    b_write = res_write.json()
+    assert b_write["requires_human_approval"] is True
+    assert b_write["guardrail_triggered"] == "HUMAN_APPROVAL_REQUIRED"
+    approval_id = b_write["pending_approval_id"]
+    assert approval_id is not None
 
-    try:
-        res_write = client.post(
-            "/api/agent/query",
-            json={"query": "Cambia el estado de CIV-2026-DEMO0001 a RESOLVED", "max_iterations": 1},
-        )
-        assert res_write.status_code == 200
-        b_write = res_write.json()
-        assert b_write["requires_human_approval"] is True
-        assert b_write["guardrail_triggered"] == "HUMAN_APPROVAL_REQUIRED"
-        approval_id = b_write["pending_approval_id"]
-        assert approval_id is not None
+    # Comprobar que el reporte en PostgreSQL NO cambió de estado todavía
+    rep_before = client.get(f"/api/reports/by-code/{disp_code}").json()
+    assert rep_before["status"] == "CONFIRMED"
 
-        # Comprobar que el reporte en PostgreSQL NO cambió de estado todavía
-        rep_before = client.get("/api/reports/by-code/CIV-2026-DEMO0001").json()
-        assert rep_before["status"] == "CONFIRMED"
-
-        # Ahora el humano aprueba la solicitud en el endpoint protegido
-        decide_resp = client.post(
-            f"/api/admin/approvals/{approval_id}/decide",
-            headers=ADMIN_HEADERS,
-            json={"approve": True, "decided_by": "Coordinador Cali"},
-        )
-        assert decide_resp.status_code == 200
-        rep_after = client.get("/api/reports/by-code/CIV-2026-DEMO0001").json()
-        assert rep_after["status"] == "RESOLVED"
-    finally:
-        if saved_demo1 is not None:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        UPDATE reports
-                        SET status = %s,
-                            human_override_note = %s,
-                            version = %s
-                        WHERE tracking_code = 'CIV-2026-DEMO0001';
-                        """,
-                        (
-                            saved_demo1["status"],
-                            saved_demo1.get("human_override_note"),
-                            saved_demo1.get("version") or 1,
-                        ),
-                    )
-                    conn.commit()
+    # Ahora el humano aprueba la solicitud en el endpoint protegido
+    decide_resp = client.post(
+        f"/api/admin/approvals/{approval_id}/decide",
+        headers=ADMIN_HEADERS,
+        json={"approve": True, "decided_by": "Coordinador Cali"},
+    )
+    assert decide_resp.status_code == 200
+    rep_after = client.get(f"/api/reports/by-code/{disp_code}").json()
+    assert rep_after["status"] == "RESOLVED"
 
 
 def test_protected_observability_endpoint():

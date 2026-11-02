@@ -77,9 +77,18 @@ export async function fetchReportById(reportId: string): Promise<ReportItem> {
   return safeJsonFetch<ReportItem>(`/api/reports/${encodeURIComponent(reportId)}`);
 }
 
-export async function submitCitizenReport(formData: FormData): Promise<ReportItem> {
+export async function submitCitizenReport(
+  formData: FormData,
+  idempotencyKey?: string
+): Promise<ReportItem> {
+  const opKey =
+    idempotencyKey ||
+    (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+      ? `civia-op-${crypto.randomUUID()}`
+      : `civia-op-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   return safeJsonFetch<ReportItem>('/api/reports', {
     method: 'POST',
+    headers: { 'Idempotency-Key': opKey },
     body: formData,
   });
 }

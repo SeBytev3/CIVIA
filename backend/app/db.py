@@ -29,6 +29,8 @@ def is_disposable_test_or_eval_db(db_url: str | None = None) -> bool:
         or db_name.endswith("_eval")
         or db_name.startswith("test_")
         or db_name.startswith("eval_")
+        or "_test_" in db_name
+        or "_eval_" in db_name
     )
 
 

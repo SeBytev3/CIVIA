@@ -18,10 +18,12 @@ CIVIA es una aplicación web progresiva (PWA) conectada a una API FastAPI, Postg
 
 ## Arranque desde un clon limpio en un comando
 
-1. Copia `.env.example` como `.env` en la raíz del proyecto, genera un `ADMIN_TOKEN` único robusto (`>= 24` caracteres) y completa las claves API (nunca subas `.env` a Git):
+1. Copia `.env.example` como `.env` en la raíz del proyecto, genera un `ADMIN_TOKEN` criptográficamente aleatorio con `secrets.token_urlsafe(32)` y completa las claves API (nunca imprimas el secreto en logs ni subas `.env` a Git):
    ```powershell
    Copy-Item .env.example .env
-   # Si usas .\scripts\run.ps1 o ./run.sh, ADMIN_TOKEN se genera automáticamente si está vacío en .env
+   # Generar ADMIN_TOKEN con CSPRNG (sin imprimirlo en consola ni registrarlo en historial):
+   # python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); p.write_text(re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', p.read_text()))"
+   # O bien ejecuta .\scripts\run.ps1 / ./run.sh, que genera ADMIN_TOKEN con CSPRNG si está vacío.
    ```
 2. Levanta todos los servicios (`db`, `api` y `frontend` PWA) con un solo comando:
    ```powershell
@@ -57,7 +59,7 @@ CIVIA es una aplicación web progresiva (PWA) conectada a una API FastAPI, Postg
 | `AGENT_MAX_TOKENS` | Límite #2: presupuesto máximo de tokens | `6000` |
 | `FALLA_FORZADA` | Simulación de fallos (`429`, `503`, `TIMEOUT`, `INVALID_JSON`, `GROQ_FAIL`, `TOTAL`) | *(vacío = operación normal)* |
 | `AUTO_SEED_SYNTHETIC` | Semilla automática de datos sintéticos identificados | `true` |
-| `ADMIN_TOKEN` | Secreto robusto obligatorio (`>= 24` caracteres) generado por instalación para observabilidad y operaciones administrativas (`X-Admin-Token`) | *(sin valor por defecto; falla al iniciar si falta o es débil)* |
+| `ADMIN_TOKEN` | Credencial administrativa obligatoria generada con CSPRNG (`secrets.token_urlsafe(32)`) por instalación para observabilidad y operaciones administrativas (`X-Admin-Token`) | *(sin valor por defecto; falla al iniciar si falta o presenta patrones predecibles)* |
 
 ---
 
