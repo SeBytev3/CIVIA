@@ -1,9 +1,16 @@
+from datetime import datetime, timezone
+import hashlib
+import hmac
 import json
 from typing import Any
 from uuid import UUID
 import uuid
 
+import psycopg
+
+from app.config import settings
 from app.db import get_conn
+from app.security import CitizenValidationError
 
 STATUS_MESSAGES: dict[str, str] = {
     "PENDING_ANALYSIS": "Reporte recibido y almacenado de forma segura. El análisis automático está pendiente de procesamiento.",
@@ -63,14 +70,32 @@ def row_to_public_dict(row: dict[str, Any]) -> dict[str, Any]:
         "status_message": STATUS_MESSAGES.get(status, "Reporte registrado."),
         "distance_km": round(float(dist), 3) if dist is not None else None,
         "is_synthetic": bool(row.get("is_synthetic", False)),
+        "citizen_edit_token": row.get("_citizen_edit_token"),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
 
 
-def generate_tracking_code(report_uuid: UUID) -> str:
-    short = report_uuid.hex[:8].upper()
-    return f"CIV-2026-{short}"
+def derive_citizen_edit_token(report_uuid: UUID | str) -> str:
+    rid = UUID(str(report_uuid))
+    secret = f"civia-citizen-edit:{settings.DATABASE_URL}".encode("utf-8")
+    return hmac.new(secret, rid.bytes, hashlib.sha256).hexdigest()
+
+
+def hash_edit_token(token: str) -> str:
+    return hashlib.sha256(token.strip().encode("utf-8")).hexdigest()
+
+
+def generate_tracking_code(
+    report_uuid: UUID,
+    *,
+    created_year: int | None = None,
+    attempt: int = 0,
+) -> str:
+    year = created_year if created_year is not None else datetime.now(timezone.utc).year
+    seed = report_uuid.bytes if attempt == 0 else f"{report_uuid.hex}:{attempt}".encode("utf-8")
+    short = hashlib.sha256(seed).hexdigest()[:10].upper()
+    return f"CIV-{year}-{short}"
 
 
 def create_report(
@@ -89,65 +114,160 @@ def create_report(
     report_id: UUID | None = None,
     tracking_code: str | None = None,
     is_synthetic: bool = False,
+    idempotency_key: str | None = None,
+    request_fingerprint: str | None = None,
+    citizen_edit_token: str | None = None,
 ) -> dict[str, Any]:
     rid = report_id or uuid.uuid4()
-    tcode = tracking_code or generate_tracking_code(rid)
     am = audio_meta or {}
+    eff_idem_key = idempotency_key.strip()[:128] if (idempotency_key and idempotency_key.strip()) else None
+    eff_fingerprint = (request_fingerprint or "")[:64]
+    c_token = (citizen_edit_token or derive_citizen_edit_token(rid)).strip()
+    c_token_hash = hash_edit_token(c_token)
 
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO reports (
-                    id, tracking_code, title, description,
-                    latitude, longitude, in_service_area,
-                    comuna, neighborhood, address_hint,
-                    photo_path, photo_mime, photo_size_bytes,
-                    photo_width, photo_height, photo_sha256,
-                    audio_path, audio_mime, audio_size_bytes,
-                    audio_duration_seconds, audio_transcript,
-                    status, is_synthetic
+            if eff_idem_key:
+                cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s));", (eff_idem_key,))
+                cur.execute(
+                    """
+                    SELECT r.*, ir.request_fingerprint AS _stored_fingerprint
+                    FROM reports r
+                    LEFT JOIN idempotency_records ir ON ir.idempotency_key = r.idempotency_key
+                    WHERE r.idempotency_key = %s
+                    LIMIT 1;
+                    """,
+                    (eff_idem_key,),
                 )
-                VALUES (
-                    %s, %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s, %s,
-                    %s, %s,
-                    'PENDING_ANALYSIS', %s
+                existing_row = cur.fetchone()
+                if existing_row is not None:
+                    stored_fp = existing_row.get("_stored_fingerprint")
+                    if (
+                        eff_idem_key.startswith("hdr:")
+                        and eff_fingerprint
+                        and stored_fp
+                        and stored_fp != eff_fingerprint
+                    ):
+                        raise CitizenValidationError(
+                            "La clave Idempotency-Key ya fue utilizada para una solicitud distinta.",
+                            status_code=409,
+                            code="IDEMPOTENCY_KEY_CONFLICT",
+                        )
+                    existing_row["_replayed"] = True
+                    existing_row["_citizen_edit_token"] = derive_citizen_edit_token(existing_row["id"])
+                    conn.commit()
+                    return existing_row
+
+            row: dict[str, Any] | None = None
+            last_exc: Exception | None = None
+            for attempt in range(5):
+                tcode = (
+                    tracking_code
+                    if (tracking_code and attempt == 0)
+                    else generate_tracking_code(rid, attempt=attempt)
                 )
-                RETURNING *;
-                """,
-                (
-                    rid,
-                    tcode,
-                    title,
-                    description,
-                    latitude,
-                    longitude,
-                    in_service_area,
-                    comuna,
-                    neighborhood,
-                    address_hint,
-                    photo_meta["photo_path"],
-                    photo_meta["photo_mime"],
-                    photo_meta["photo_size_bytes"],
-                    photo_meta["photo_width"],
-                    photo_meta["photo_height"],
-                    photo_meta["photo_sha256"],
-                    am.get("audio_path"),
-                    am.get("audio_mime"),
-                    am.get("audio_size_bytes"),
-                    am.get("audio_duration_seconds"),
-                    audio_transcript,
-                    is_synthetic,
-                ),
-            )
-            row = cur.fetchone()
+                cur.execute("SAVEPOINT sp_insert_report;")
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO reports (
+                            id, tracking_code, title, description,
+                            latitude, longitude, in_service_area,
+                            comuna, neighborhood, address_hint,
+                            photo_path, photo_mime, photo_size_bytes,
+                            photo_width, photo_height, photo_sha256,
+                            audio_path, audio_mime, audio_size_bytes,
+                            audio_duration_seconds, audio_transcript,
+                            status, is_synthetic, edit_token_hash, idempotency_key, version
+                        )
+                        VALUES (
+                            %s, %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s, %s,
+                            %s, %s,
+                            'PENDING_ANALYSIS', %s, %s, %s, 1
+                        )
+                        RETURNING *;
+                        """,
+                        (
+                            rid,
+                            tcode,
+                            title,
+                            description,
+                            latitude,
+                            longitude,
+                            in_service_area,
+                            comuna,
+                            neighborhood,
+                            address_hint,
+                            photo_meta["photo_path"],
+                            photo_meta["photo_mime"],
+                            photo_meta["photo_size_bytes"],
+                            photo_meta["photo_width"],
+                            photo_meta["photo_height"],
+                            photo_meta["photo_sha256"],
+                            am.get("audio_path"),
+                            am.get("audio_mime"),
+                            am.get("audio_size_bytes"),
+                            am.get("audio_duration_seconds"),
+                            audio_transcript,
+                            is_synthetic,
+                            c_token_hash,
+                            eff_idem_key,
+                        ),
+                    )
+                    row = cur.fetchone()
+                    cur.execute("RELEASE SAVEPOINT sp_insert_report;")
+                    break
+                except psycopg.errors.UniqueViolation as exc:
+                    last_exc = exc
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_insert_report;")
+                    if eff_idem_key:
+                        cur.execute(
+                            "SELECT * FROM reports WHERE idempotency_key = %s LIMIT 1;",
+                            (eff_idem_key,),
+                        )
+                        concurrent_row = cur.fetchone()
+                        if concurrent_row is not None:
+                            concurrent_row["_replayed"] = True
+                            concurrent_row["_citizen_edit_token"] = derive_citizen_edit_token(
+                                concurrent_row["id"]
+                            )
+                            conn.commit()
+                            return concurrent_row
+                    rid = report_id or uuid.uuid4()
+                    c_token = (citizen_edit_token or derive_citizen_edit_token(rid)).strip()
+                    c_token_hash = hash_edit_token(c_token)
+
+            if row is None:
+                if last_exc is not None:
+                    raise last_exc
+                raise RuntimeError("No se pudo insertar el reporte tras reintentos de colisión.")
+
+            if eff_idem_key:
+                cur.execute(
+                    """
+                    INSERT INTO idempotency_records (
+                        idempotency_key, request_fingerprint, report_id, tracking_code, citizen_edit_token
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (idempotency_key) DO NOTHING;
+                    """,
+                    (
+                        eff_idem_key,
+                        eff_fingerprint or "default",
+                        row["id"],
+                        row["tracking_code"],
+                        c_token,
+                    ),
+                )
+
             conn.commit()
-            assert row is not None
+            row["_replayed"] = False
+            row["_citizen_edit_token"] = c_token
             return row
 
 
@@ -229,10 +349,41 @@ def confirm_report_category(
     final_category: str,
     final_severity: str | None = None,
     human_override_note: str | None = None,
+    edit_token: str | None = None,
+    is_admin: bool = False,
 ) -> dict[str, Any] | None:
     rid = UUID(str(report_id))
     with get_conn() as conn:
         with conn.cursor() as cur:
+            cur.execute("SELECT * FROM reports WHERE id = %s FOR UPDATE;", (rid,))
+            existing = cur.fetchone()
+            if not existing:
+                return None
+
+            if not is_admin:
+                if bool(existing.get("human_confirmed")) or existing["status"] in (
+                    "CONFIRMED",
+                    "IN_REVIEW",
+                    "RESOLVED",
+                    "REJECTED",
+                ):
+                    raise CitizenValidationError(
+                        "El reporte ya fue confirmado o gestionado administrativamente y no puede modificarse sin autorización administrativa.",
+                        status_code=409,
+                        code="REPORT_ALREADY_MANAGED",
+                    )
+
+                stored_hash = (existing.get("edit_token_hash") or "").strip()
+                expected_hash = stored_hash or hash_edit_token(derive_citizen_edit_token(rid))
+                provided_token = (edit_token or "").strip()
+                provided_hash = hash_edit_token(provided_token) if provided_token else ""
+                if not provided_hash or not hmac.compare_digest(provided_hash, expected_hash):
+                    raise CitizenValidationError(
+                        "Se requiere la credencial de edición del reporte para confirmar o ajustar su clasificación.",
+                        status_code=403,
+                        code="CONFIRMATION_UNAUTHORIZED",
+                    )
+
             cur.execute(
                 """
                 UPDATE reports
@@ -244,6 +395,7 @@ def confirm_report_category(
                         WHEN status IN ('IN_REVIEW', 'RESOLVED', 'REJECTED') THEN status
                         ELSE 'CONFIRMED'
                     END,
+                    version = COALESCE(version, 1) + 1,
                     updated_at = NOW()
                 WHERE id = %s
                 RETURNING *;
@@ -269,6 +421,7 @@ def update_report_status(
                 UPDATE reports
                 SET status = %s,
                     human_override_note = COALESCE(%s, human_override_note),
+                    version = COALESCE(version, 1) + 1,
                     updated_at = NOW()
                 WHERE id = %s
                 RETURNING *;

@@ -37,8 +37,8 @@ class Settings:
     # Auto-seed de datos sintéticos identificados al arrancar si la tabla está vacía
     AUTO_SEED_SYNTHETIC: bool = os.getenv("AUTO_SEED_SYNTHETIC", "true").lower() in ("1", "true", "yes")
 
-    # Token de administración para observabilidad protegida y operaciones admin
-    ADMIN_TOKEN: str = os.getenv("ADMIN_TOKEN", "civia-admin-demo-2026")
+    # Token de administración para observabilidad protegida y operaciones admin (sin valor por defecto débil)
+    ADMIN_TOKEN: str = os.getenv("ADMIN_TOKEN", "")
 
     # Configuración de proveedores IA (Fase D)
     GOOGLE_API_KEY_PRIMARY: str = os.getenv("GOOGLE_API_KEY_PRIMARY", "")
@@ -55,6 +55,47 @@ class Settings:
     @property
     def falla_forzada(self) -> str:
         return os.getenv("FALLA_FORZADA", "").strip().upper()
+
+
+WEAK_ADMIN_TOKENS: set[str] = {
+    "",
+    "civia-admin-demo-2026",
+    "admin",
+    "password",
+    "secret",
+    "changeme",
+    "local_dev_change_me",
+    "123456",
+    "admin123",
+    "test",
+    "demo",
+    "replace_with_generated_admin_token",
+}
+
+
+def is_strong_admin_token(token: str | None) -> bool:
+    if not token or not isinstance(token, str):
+        return False
+    cleaned = token.strip()
+    if len(cleaned) < 24:
+        return False
+    if len(set(cleaned)) < 8:
+        return False
+    low = cleaned.lower()
+    if low in WEAK_ADMIN_TOKENS:
+        return False
+    if "civia-admin-demo" in low or "change_me" in low:
+        return False
+    return True
+
+
+def validate_admin_token_or_raise(token: str | None = None) -> None:
+    effective = settings.ADMIN_TOKEN if token is None else token
+    if not is_strong_admin_token(effective):
+        raise RuntimeError(
+            "Configuración insegura: ADMIN_TOKEN falta o es débil. "
+            "Configure un secreto robusto (>=24 caracteres y alta entropía) generado por instalación."
+        )
 
 
 settings = Settings()

@@ -16,6 +16,7 @@ from app.main import app
 from app.observability import sanitize_secret_text
 from app.security import rate_limiter
 from app.seed import generate_synthetic_evidence_png, seed_synthetic_reports
+from tests.conftest import restore_db_snapshot, snapshot_db_state
 
 client = TestClient(app)
 ADMIN_HEADERS = {"X-Admin-Token": settings.ADMIN_TOKEN}
@@ -26,15 +27,11 @@ def setup_phase_d_db():
     settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     run_migrations()
     seed_synthetic_reports(force_reset=False)
+    snap = snapshot_db_state()
     yield
     set_runtime_fault_override("NONE")
     reset_all_circuits()
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM reports WHERE is_synthetic = FALSE;")
-            cur.execute("DELETE FROM pending_approvals;")
-            cur.execute("UPDATE reports SET status = 'CONFIRMED' WHERE tracking_code = 'CIV-2026-DEMO0001';")
-            conn.commit()
+    restore_db_snapshot(snap)
 
 
 @pytest.fixture(autouse=True)
@@ -107,9 +104,10 @@ def test_vertical_flow_create_analyze_confirm_and_query():
     assert created["ai_summary"] is not None and len(created["ai_summary"]) >= 10
     assert created["human_confirmed"] is False
 
-    # Confirmar / ajustar por el ciudadano
+    # Confirmar / ajustar por el ciudadano con credencial de edición del reporte
     confirm_resp = client.patch(
         f"/api/reports/{report_id}/confirm",
+        headers={"X-Citizen-Edit-Token": created["citizen_edit_token"]},
         json={
             "final_category": "HUECO",
             "final_severity": "ALTA",
@@ -163,6 +161,7 @@ def test_router_resilience_and_fallback_across_providers(fault_mode: str):
     assert "traceback" not in serialized
     assert "groq" not in serialized
     assert "gemini" not in serialized
+    time.sleep(1.2)
 
 
 def test_total_provider_outage_graceful_degradation():
@@ -292,30 +291,62 @@ def test_four_agent_guardrails_enforced(monkeypatch):
     monkeypatch.setattr(agent_module, "_call_agent_turn_gemini", fake_turn_proposes_write)
     monkeypatch.setattr(agent_module, "_call_agent_turn_groq", fake_turn_proposes_write)
 
-    res_write = client.post(
-        "/api/agent/query",
-        json={"query": "Cambia el estado de CIV-2026-DEMO0001 a RESOLVED", "max_iterations": 1},
-    )
-    assert res_write.status_code == 200
-    b_write = res_write.json()
-    assert b_write["requires_human_approval"] is True
-    assert b_write["guardrail_triggered"] == "HUMAN_APPROVAL_REQUIRED"
-    approval_id = b_write["pending_approval_id"]
-    assert approval_id is not None
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status, human_override_note, version FROM reports WHERE tracking_code = 'CIV-2026-DEMO0001';"
+            )
+            saved_demo1 = cur.fetchone()
+            if saved_demo1 and saved_demo1["status"] != "CONFIRMED":
+                cur.execute(
+                    "UPDATE reports SET status = 'CONFIRMED' WHERE tracking_code = 'CIV-2026-DEMO0001';"
+                )
+                conn.commit()
 
-    # Comprobar que el reporte en PostgreSQL NO cambió de estado todavía
-    rep_before = client.get("/api/reports/by-code/CIV-2026-DEMO0001").json()
-    assert rep_before["status"] == "CONFIRMED"
+    try:
+        res_write = client.post(
+            "/api/agent/query",
+            json={"query": "Cambia el estado de CIV-2026-DEMO0001 a RESOLVED", "max_iterations": 1},
+        )
+        assert res_write.status_code == 200
+        b_write = res_write.json()
+        assert b_write["requires_human_approval"] is True
+        assert b_write["guardrail_triggered"] == "HUMAN_APPROVAL_REQUIRED"
+        approval_id = b_write["pending_approval_id"]
+        assert approval_id is not None
 
-    # Ahora el humano aprueba la solicitud en el endpoint protegido
-    decide_resp = client.post(
-        f"/api/admin/approvals/{approval_id}/decide",
-        headers=ADMIN_HEADERS,
-        json={"approve": True, "decided_by": "Coordinador Cali"},
-    )
-    assert decide_resp.status_code == 200
-    rep_after = client.get("/api/reports/by-code/CIV-2026-DEMO0001").json()
-    assert rep_after["status"] == "RESOLVED"
+        # Comprobar que el reporte en PostgreSQL NO cambió de estado todavía
+        rep_before = client.get("/api/reports/by-code/CIV-2026-DEMO0001").json()
+        assert rep_before["status"] == "CONFIRMED"
+
+        # Ahora el humano aprueba la solicitud en el endpoint protegido
+        decide_resp = client.post(
+            f"/api/admin/approvals/{approval_id}/decide",
+            headers=ADMIN_HEADERS,
+            json={"approve": True, "decided_by": "Coordinador Cali"},
+        )
+        assert decide_resp.status_code == 200
+        rep_after = client.get("/api/reports/by-code/CIV-2026-DEMO0001").json()
+        assert rep_after["status"] == "RESOLVED"
+    finally:
+        if saved_demo1 is not None:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE reports
+                        SET status = %s,
+                            human_override_note = %s,
+                            version = %s
+                        WHERE tracking_code = 'CIV-2026-DEMO0001';
+                        """,
+                        (
+                            saved_demo1["status"],
+                            saved_demo1.get("human_override_note"),
+                            saved_demo1.get("version") or 1,
+                        ),
+                    )
+                    conn.commit()
 
 
 def test_protected_observability_endpoint():

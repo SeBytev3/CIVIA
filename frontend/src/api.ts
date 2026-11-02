@@ -96,11 +96,22 @@ export async function confirmReportClassification(
     final_category: ReportCategory;
     final_severity: ReportSeverity;
     human_override_note?: string;
-  }
+    edit_token?: string;
+  },
+  citizenEditToken?: string | null,
+  adminToken?: string | null
 ): Promise<ReportItem> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const tok = citizenEditToken || payload.edit_token;
+  if (tok) {
+    headers['X-Citizen-Edit-Token'] = tok;
+  }
+  if (adminToken && adminToken.trim()) {
+    headers['X-Admin-Token'] = adminToken.trim();
+  }
   return safeJsonFetch<ReportItem>(`/api/reports/${encodeURIComponent(reportId)}/confirm`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(payload),
   });
 }

@@ -1,14 +1,77 @@
 from contextlib import contextmanager
 import logging
 from pathlib import Path
+import re
 from typing import Any, Generator
+from urllib.parse import urlparse, urlunparse
 
 import psycopg
+from psycopg import sql
 from psycopg.rows import dict_row
 
 from app.config import settings
 
 logger = logging.getLogger("civia.db")
+
+_SAFE_DB_NAME_RE = re.compile(r"^[a-zA-Z0-9_]+$")
+
+
+def get_database_name(db_url: str | None = None) -> str:
+    url = db_url or settings.DATABASE_URL
+    parsed = urlparse(url)
+    return (parsed.path or "").lstrip("/") or "civia"
+
+
+def is_disposable_test_or_eval_db(db_url: str | None = None) -> bool:
+    db_name = get_database_name(db_url).lower()
+    return (
+        db_name.endswith("_test")
+        or db_name.endswith("_eval")
+        or db_name.startswith("test_")
+        or db_name.startswith("eval_")
+    )
+
+
+def assert_disposable_test_db(db_url: str | None = None) -> None:
+    db_name = get_database_name(db_url)
+    if not is_disposable_test_or_eval_db(db_url):
+        raise RuntimeError(
+            f"Operación destructiva rechazada sobre la base de datos '{db_name}'. "
+            "Las pruebas destructivas o resets globales solo se permiten en bases aisladas (*_test / *_eval)."
+        )
+
+
+def replace_database_in_url(db_url: str, new_db_name: str) -> str:
+    if not _SAFE_DB_NAME_RE.match(new_db_name):
+        raise ValueError(f"Nombre de base de datos inválido: {new_db_name}")
+    parsed = urlparse(db_url)
+    return urlunparse(parsed._replace(path=f"/{new_db_name}"))
+
+
+def ensure_isolated_database(target_db_name: str = "civia_test", base_url: str | None = None) -> str:
+    if not _SAFE_DB_NAME_RE.match(target_db_name):
+        raise ValueError(f"Nombre de base de datos inválido: {target_db_name}")
+    src_url = base_url or settings.DATABASE_URL
+    target_url = replace_database_in_url(src_url, target_db_name)
+    admin_url = replace_database_in_url(src_url, "postgres")
+    try:
+        with psycopg.connect(admin_url, autocommit=True, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM pg_database WHERE datname = %s;", (target_db_name,))
+                if cur.fetchone() is None:
+                    cur.execute(
+                        sql.SQL("CREATE DATABASE {}").format(sql.Identifier(target_db_name))
+                    )
+    except Exception:
+        # Fallback conectando a la BD origen si el usuario no tiene acceso a 'postgres'
+        with psycopg.connect(src_url, autocommit=True, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1 FROM pg_database WHERE datname = %s;", (target_db_name,))
+                if cur.fetchone() is None:
+                    cur.execute(
+                        sql.SQL("CREATE DATABASE {}").format(sql.Identifier(target_db_name))
+                    )
+    return target_url
 
 
 @contextmanager

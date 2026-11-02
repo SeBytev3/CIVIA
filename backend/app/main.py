@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+import hashlib
 import hmac
 import logging
 from pathlib import Path
@@ -20,7 +21,7 @@ from app.ai_router import (
     set_runtime_fault_override,
     transcribe_audio_optional,
 )
-from app.config import settings
+from app.config import is_strong_admin_token, settings, validate_admin_token_or_raise
 from app.db import check_db_health, run_migrations
 from app.observability import get_observability_summary
 from app.repository import (
@@ -63,6 +64,7 @@ logger = logging.getLogger("civia.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_admin_token_or_raise(settings.ADMIN_TOKEN)
     try:
         settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         applied = run_migrations()
@@ -123,9 +125,13 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 
 
 def verify_admin_token(x_admin_token: str | None = Header(default=None)) -> None:
-    expected = settings.ADMIN_TOKEN.strip()
+    expected = (settings.ADMIN_TOKEN or "").strip()
     provided = (x_admin_token or "").strip()
-    if not expected or not provided or not hmac.compare_digest(provided, expected):
+    if (
+        not is_strong_admin_token(expected)
+        or not is_strong_admin_token(provided)
+        or not hmac.compare_digest(provided, expected)
+    ):
         raise CitizenValidationError(
             "Acceso restringido a observabilidad y administración.",
             status_code=401,
@@ -161,6 +167,7 @@ async def create_citizen_report(
     auto_analyze: bool = Form(default=True),
     photo: UploadFile = File(...),
     audio: UploadFile | None = File(default=None),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     client_ip = request.client.host if request.client else "unknown"
     rate_limiter.check(client_ip)
@@ -189,64 +196,110 @@ async def create_citizen_report(
     lat, lon, in_service_area = validate_coordinates(latitude, longitude)
 
     raw_photo = await photo.read()
-    photo_meta = validate_and_store_photo(raw_photo, declared_filename=photo.filename)
-
-    audio_meta = None
-    audio_transcript = None
+    raw_audio = b""
     if audio is not None and audio.filename:
         raw_audio = await audio.read()
-        if raw_audio:
-            try:
-                audio_meta = validate_and_store_audio(raw_audio, declared_filename=audio.filename)
-            except Exception:
-                orphan_photo = settings.UPLOAD_DIR / Path(photo_meta["photo_path"]).name
-                orphan_photo.unlink(missing_ok=True)
-                raise
-            if auto_analyze:
-                audio_transcript = transcribe_audio_optional(
-                    raw_audio, audio.filename, audio_meta["audio_mime"]
-                )
 
-    row = create_report(
-        title=clean_title,
-        description=clean_desc,
-        latitude=lat,
-        longitude=lon,
-        in_service_area=in_service_area,
-        comuna=clean_comuna,
-        neighborhood=clean_neighborhood,
-        address_hint=clean_address,
-        photo_meta=photo_meta,
-        audio_meta=audio_meta,
-        audio_transcript=audio_transcript,
+    raw_photo_sha = hashlib.sha256(raw_photo).hexdigest() if raw_photo else ""
+    raw_audio_sha = hashlib.sha256(raw_audio).hexdigest() if raw_audio else ""
+    req_fingerprint = hashlib.sha256(
+        f"{clean_title}|{clean_desc}|{lat:.6f}|{lon:.6f}|{raw_photo_sha}|{raw_audio_sha}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    eff_idem_key = (
+        f"hdr:{idempotency_key.strip()[:100]}"
+        if (idempotency_key and idempotency_key.strip())
+        else f"op:{req_fingerprint}"
     )
 
-    if auto_analyze:
-        safe_photo_file = settings.UPLOAD_DIR / Path(photo_meta["photo_path"]).name
-        stored_photo_bytes = safe_photo_file.read_bytes() if safe_photo_file.exists() else raw_photo
-        contract, _ = classify_evidence_with_router(
-            description=clean_desc,
-            latitude=lat,
-            longitude=lon,
-            image_bytes=stored_photo_bytes,
-            image_mime=photo_meta["photo_mime"],
-            address_hint=clean_address,
-            audio_transcript=audio_transcript,
-            report_id=row["id"],
-        )
-        if contract is not None:
-            updated = update_report_ai_analysis(
-                row["id"],
-                ai_category=contract.category,
-                ai_severity=contract.severity,
-                ai_confidence=contract.confidence,
-                ai_summary=contract.summary,
-                ai_keywords=contract.keywords,
-                auto_confirm=False,
-            )
-            if updated is not None:
-                row = updated
+    written_files: list[Path] = []
+    try:
+        photo_meta = validate_and_store_photo(raw_photo, declared_filename=photo.filename)
+        written_files.append(settings.UPLOAD_DIR / Path(photo_meta["photo_path"]).name)
 
+        audio_meta = None
+        audio_transcript = None
+        if raw_audio:
+            audio_meta = validate_and_store_audio(
+                raw_audio, declared_filename=audio.filename if audio else None
+            )
+            written_files.append(settings.UPLOAD_DIR / Path(audio_meta["audio_path"]).name)
+            if auto_analyze:
+                try:
+                    audio_transcript = transcribe_audio_optional(
+                        raw_audio,
+                        audio.filename if audio and audio.filename else "audio.wav",
+                        audio_meta["audio_mime"],
+                    )
+                except Exception as exc:
+                    logger.warning("Fallo no bloqueante en transcripción opcional: %s", type(exc).__name__)
+
+        create_kwargs: dict[str, Any] = {
+            "title": clean_title,
+            "description": clean_desc,
+            "latitude": lat,
+            "longitude": lon,
+            "in_service_area": in_service_area,
+            "comuna": clean_comuna,
+            "neighborhood": clean_neighborhood,
+            "address_hint": clean_address,
+            "photo_meta": photo_meta,
+            "audio_meta": audio_meta,
+            "audio_transcript": audio_transcript,
+            "idempotency_key": eff_idem_key,
+            "request_fingerprint": req_fingerprint,
+        }
+        row = create_report(**create_kwargs)
+    except Exception:
+        for orphan_file in written_files:
+            orphan_file.unlink(missing_ok=True)
+        raise
+
+    if row.get("_replayed"):
+        for duplicate_file in written_files:
+            duplicate_file.unlink(missing_ok=True)
+
+    saved_edit_token = row.get("_citizen_edit_token")
+
+    if auto_analyze and row.get("status") == "PENDING_ANALYSIS":
+        try:
+            active_photo_name = Path(row["photo_path"]).name
+            safe_photo_file = settings.UPLOAD_DIR / active_photo_name
+            stored_photo_bytes = (
+                safe_photo_file.read_bytes() if safe_photo_file.exists() else raw_photo
+            )
+            contract, _ = classify_evidence_with_router(
+                description=clean_desc,
+                latitude=lat,
+                longitude=lon,
+                image_bytes=stored_photo_bytes,
+                image_mime=row["photo_mime"],
+                address_hint=clean_address,
+                audio_transcript=row.get("audio_transcript") or audio_transcript,
+                report_id=row["id"],
+            )
+            if contract is not None:
+                updated = update_report_ai_analysis(
+                    row["id"],
+                    ai_category=contract.category,
+                    ai_severity=contract.severity,
+                    ai_confidence=contract.confidence,
+                    ai_summary=contract.summary,
+                    ai_keywords=contract.keywords,
+                    auto_confirm=False,
+                )
+                if updated is not None:
+                    updated["_citizen_edit_token"] = saved_edit_token
+                    row = updated
+        except Exception as exc:
+            logger.warning(
+                "El reporte %s fue confirmado en BD, pero el análisis post-commit falló de forma aislada: %s",
+                row.get("tracking_code"),
+                type(exc).__name__,
+            )
+
+    row["_citizen_edit_token"] = saved_edit_token
     return row_to_public_dict(row)
 
 
@@ -376,7 +429,12 @@ def get_citizen_report_photo(report_id: UUID):
 
 
 @app.patch("/api/reports/{report_id}/confirm", response_model=ReportPublicResponse)
-def confirm_citizen_report(report_id: UUID, payload: ReportConfirmRequest):
+def confirm_citizen_report(
+    report_id: UUID,
+    payload: ReportConfirmRequest,
+    x_citizen_edit_token: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
+):
     existing = get_report_raw(report_id)
     if not existing:
         raise CitizenValidationError(
@@ -393,17 +451,31 @@ def confirm_citizen_report(report_id: UUID, payload: ReportConfirmRequest):
         )
         or None
     )
+    expected_admin = (settings.ADMIN_TOKEN or "").strip()
+    provided_admin = (x_admin_token or "").strip()
+    is_admin = (
+        is_strong_admin_token(expected_admin)
+        and is_strong_admin_token(provided_admin)
+        and hmac.compare_digest(provided_admin, expected_admin)
+    )
+    eff_edit_token = x_citizen_edit_token or payload.edit_token
     updated = confirm_report_category(
         report_id,
         final_category=payload.final_category,
         final_severity=payload.final_severity,
         human_override_note=clean_note,
+        edit_token=eff_edit_token,
+        is_admin=is_admin,
     )
     assert updated is not None
     return row_to_public_dict(updated)
 
 
-@app.patch("/api/reports/{report_id}/status", response_model=ReportPublicResponse)
+@app.patch(
+    "/api/reports/{report_id}/status",
+    response_model=ReportPublicResponse,
+    dependencies=[Depends(verify_admin_token)],
+)
 def change_report_status(report_id: UUID, payload: ReportStatusUpdateRequest):
     if not payload.human_approved:
         raise CitizenValidationError(
@@ -504,6 +576,12 @@ def admin_decide_approval(approval_id: UUID, payload: ApprovalDecisionRequest) -
             "No se encontró la solicitud de aprobación indicada.",
             status_code=404,
             code="APPROVAL_NOT_FOUND",
+        )
+    if payload.approve and updated.get("stale_conflict"):
+        raise CitizenValidationError(
+            "La solicitud de aprobación quedó obsoleta porque el estado o versión del reporte cambió previamente.",
+            status_code=409,
+            code="STALE_APPROVAL",
         )
     return {"status": "ok", "approval": updated}
 

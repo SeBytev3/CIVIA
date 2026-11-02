@@ -67,3 +67,34 @@
 - **F1 (Auditoría de seguridad)**: Remediados los hallazgos de auditoría (`docs/auditoria_codex.md`): comparación `hmac.compare_digest` en `verify_admin_token`, eliminación de token prellenado en el frontend, cabeceras `Content-Security-Policy` y `X-Content-Type-Options: nosniff` en fotos, validación de tamaño/trama en audio y limpieza compensatoria de fotos huérfanas, rechazo de `{}` en `parse_and_validate_analysis_json`, retorno inmediato en `execute_tool_with_timeout`, aprobación de un solo uso con `FOR UPDATE` y sanitización de respuestas ciudadanas del agente (`sanitize_citizen_agent_output`). Cero secretos en Git.
 - **F2 (Prueba desde clon limpio)**: Ejecutada en directorio independiente (`%TEMP%\civia_prof_clone`) con proyecto y volúmenes aislados (`civia_clean_prof`): clonación, copia de `.env`, `docker compose -p civia_clean_prof up --build -d`, verificación de `/health` (`connected: true, schema_ready: true`), frontend HTTP `200`, y `pytest -v` (`20 passed in 20.75s`). **Tiempo total medido de principio a fin: `84.6 segundos` (`1 min 24.6 s`, < 5 minutos)**.
 - **F3, F4, F5, F6**: Actualizados `README.md`, `docs/checklist_rubrica.md`, `docs/guion_sustentacion.md`, `docs/decisiones.md` y `docs/estado.md`. Todos los contenedores (`civia-db-1`, `civia-api-1`, `civia-frontend-1`) activos y saludables.
+
+---
+
+## Fase G — Remediación de Auditoría Independiente (en curso en rama `fix/auditoria-final`)
+
+### Bloque G1 — Seguridad e integridad de datos completado (2026-11-01)
+- **C-01 (`ADMIN_TOKEN` robusto obligatorio)**:
+  - Eliminado el valor por defecto `civia-admin-demo-2026` de `backend/app/config.py`, `docker-compose.yml`, `.env.example` y `README.md`.
+  - Implementadas `is_strong_admin_token()` y `validate_admin_token_or_raise()` exigiendo `>= 24` caracteres, `>= 8` caracteres distintos y rechazo de valores débiles/demo.
+  - `lifespan` en `backend/app/main.py` falla inmediatamente al iniciar si `ADMIN_TOKEN` falta o es débil, y `verify_admin_token` rechaza con `401` cualquier token débil o vacío.
+  - `scripts/run.ps1` y `run.sh` generan automáticamente un `ADMIN_TOKEN` criptográfico único por instalación si `.env` no tiene uno válido.
+- **A-01 (Autenticación y autorización en `PATCH /status` y `PATCH /confirm`)**:
+  - `PATCH /api/reports/{report_id}/status` exige `Depends(verify_admin_token)` (`401` sin `X-Admin-Token` válido; `human_approved=true` nunca actúa como credencial).
+  - `POST /api/reports` emite una credencial de capacidad por reporte (`citizen_edit_token`, almacenada como hash SHA-256 `edit_token_hash` en PostgreSQL) que jamás se expone en lecturas públicas (`GET /api/reports*`).
+  - `PATCH /api/reports/{report_id}/confirm` exige `X-Citizen-Edit-Token` (o `X-Admin-Token` válido) con `SELECT ... FOR UPDATE`, devuelve `403 CONFIRMATION_UNAUTHORIZED` ante solicitudes anónimas, y devuelve `409 REPORT_ALREADY_MANAGED` si el reporte ya fue confirmado o gestionado administrativamente (`CONFIRMED`, `IN_REVIEW`, `RESOLVED`, `REJECTED`).
+- **M-07 y N-03 (Aislamiento automático de BD/volúmenes de pruebas y evaluación; cero borrados globales)**:
+  - `backend/app/db.py` implementa `ensure_isolated_database()`, `is_disposable_test_or_eval_db()` y `assert_disposable_test_db()` que rechaza operaciones destructivas sobre la base normal `civia`.
+  - `backend/tests/conftest.py` y `eval/evaluar.py` aíslan automáticamente la ejecución en `civia_test` / `civia_eval` y directorios temporales de subida (`/tmp/civia_test_uploads`, `/tmp/civia_eval_uploads`).
+  - Eliminados todos los `DELETE FROM reports WHERE is_synthetic = FALSE`, `DELETE FROM pending_approvals` y `UPDATE` incondicionales de `CIV-2026-DEMO0001`; las pruebas limpian exclusivamente los IDs creados en su alcance y preservan registros centinela preexistentes.
+- **A-06 (Idempotencia durable con `UNIQUE`, concurrencia y aislamiento de fallos post-commit)**:
+  - Migración `backend/migrations/002_security_and_idempotency.sql` añade `edit_token_hash`, `idempotency_key` (`UNIQUE`), `version` y tabla `idempotency_records`.
+  - `create_report()` sincroniza reintentos concurrentes mediante `pg_advisory_xact_lock(hashtext(idempotency_key))` + `SAVEPOINT` y recupera el mismo `id`, `tracking_code` y `citizen_edit_token` ante reintentos con `Idempotency-Key` o huella determinista de operación (`op:<sha256>`), devolviendo `409 IDEMPOTENCY_KEY_CONFLICT` si se reutiliza una `Idempotency-Key` con payload distinto.
+  - Los fallos de `record_ai_trace` (`_safe_record_trace`) o del análisis post-commit están aislados y jamás invalidan ni duplican un reporte ya confirmado en PostgreSQL.
+- **A-07 (Bloqueo de aprobaciones obsoletas en la misma transacción)**:
+  - `tool_proponer_actualizacion_critica` registra `previous_status` y `expected_version`.
+  - `decide_pending_approval` bloquea `pending_approvals` y `reports` con `SELECT ... FOR UPDATE` en la misma transacción; si el estado o versión del reporte cambió previamente, rechaza automáticamente la propuesta obsoleta (`status = 'REJECTED'`, `stale_conflict = True`, HTTP `409 STALE_APPROVAL`) sin sobrescribir `reports`.
+- **B-03 (Cero archivos huérfanos en fallos de BD y prevención de colisiones de radicado)**:
+  - `create_citizen_report` rastrea todos los archivos escritos (`photo_*`, `audio_*`) y los elimina en bloque `except Exception:` si falla cualquier paso previo o `create_report` en BD, así como en reintentos idempotentes.
+  - `generate_tracking_code()` calcula SHA-256 sobre los 128 bits del UUID (`report_uuid.bytes`), usa año UTC dinámico (`datetime.now(timezone.utc).year`) y reintenta ante `UniqueViolation`.
+- **Verificación de pruebas en PostgreSQL 17 real (`civia_test`)**:
+  - `docker compose exec -T api pytest -v`: **`26 passed in 38.97s`** (incluyendo las 6 pruebas negativas y de regresión de `backend/tests/test_audit_g1_security.py`).

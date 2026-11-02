@@ -19,6 +19,13 @@ from app.schemas import AIAnalysisContract
 logger = logging.getLogger("civia.ai_router")
 
 
+def _safe_record_trace(**kwargs: Any) -> None:
+    try:
+        record_ai_trace(**kwargs)
+    except Exception as exc:
+        logger.warning("Fallo no bloqueante al registrar traza de observabilidad: %s", type(exc).__name__)
+
+
 class AIProviderError(Exception):
     def __init__(self, code: str, message: str, retryable: bool = True):
         super().__init__(message)
@@ -334,7 +341,7 @@ def _call_gemini_multimodal(
         "generationConfig": {
             "responseMimeType": "application/json",
             "temperature": 0.1,
-            "maxOutputTokens": 600,
+            "maxOutputTokens": 1200,
         },
     }
 
@@ -510,7 +517,7 @@ def classify_evidence_with_router(
         cb = get_circuit(provider, model)
         if not cb.allow_request():
             attempt_global += 1
-            record_ai_trace(
+            _safe_record_trace(
                 trace_group_id=trace_group_id,
                 operation="classify_evidence",
                 provider=provider,
@@ -558,7 +565,7 @@ def classify_evidence_with_router(
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_success()
 
-                record_ai_trace(
+                _safe_record_trace(
                     trace_group_id=trace_group_id,
                     operation="classify_evidence",
                     provider=provider,
@@ -590,7 +597,7 @@ def classify_evidence_with_router(
             except AIProviderError as exc:
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_failure(exc.code)
-                record_ai_trace(
+                _safe_record_trace(
                     trace_group_id=trace_group_id,
                     operation="classify_evidence",
                     provider=provider,
@@ -621,7 +628,7 @@ def classify_evidence_with_router(
             except Exception as exc:
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_failure("UNEXPECTED_ERROR")
-                record_ai_trace(
+                _safe_record_trace(
                     trace_group_id=trace_group_id,
                     operation="classify_evidence",
                     provider=provider,
@@ -670,7 +677,7 @@ def transcribe_audio_optional(audio_bytes: bytes, filename: str, mime_type: str)
         dt_ms = int((time.perf_counter() - t0) * 1000)
         if resp.status_code == 200:
             txt = (resp.json().get("text") or "").strip()
-            record_ai_trace(
+            _safe_record_trace(
                 trace_group_id=trace_group_id,
                 operation="transcribe_audio",
                 provider="groq",
@@ -682,7 +689,7 @@ def transcribe_audio_optional(audio_bytes: bytes, filename: str, mime_type: str)
                 completion_tokens=max(1, len(txt) // 4),
             )
             return txt[:1000] if txt else None
-        record_ai_trace(
+        _safe_record_trace(
             trace_group_id=trace_group_id,
             operation="transcribe_audio",
             provider="groq",
@@ -695,7 +702,7 @@ def transcribe_audio_optional(audio_bytes: bytes, filename: str, mime_type: str)
         )
     except Exception as exc:
         dt_ms = int((time.perf_counter() - t0) * 1000)
-        record_ai_trace(
+        _safe_record_trace(
             trace_group_id=trace_group_id,
             operation="transcribe_audio",
             provider="groq",

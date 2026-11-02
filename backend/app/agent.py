@@ -35,6 +35,13 @@ from app.security import _CO_PHONE_RE, _EMAIL_RE
 logger = logging.getLogger("civia.agent")
 
 
+def _safe_record_trace(**kwargs: Any) -> None:
+    try:
+        record_ai_trace(**kwargs)
+    except Exception as exc:
+        logger.warning("Fallo no bloqueante al registrar traza de agente: %s", type(exc).__name__)
+
+
 def sanitize_citizen_agent_output(text: str) -> str:
     """
     Garantiza que la respuesta entregada al ciudadano no contenga secretos, PII,
@@ -324,6 +331,7 @@ def tool_proponer_actualizacion_critica(args: dict[str, Any]) -> dict[str, Any]:
     payload = {
         "tracking_code": row["tracking_code"],
         "previous_status": row["status"],
+        "expected_version": int(row.get("version") or 1),
         "proposed_status": nuevo_estado,
     }
     with get_conn() as conn:
@@ -796,7 +804,7 @@ def run_civia_agent(
                     fallback_used = True
                 turn_succeeded = True
 
-                record_ai_trace(
+                _safe_record_trace(
                     trace_group_id=trace_group_id,
                     operation="agent_turn",
                     provider=provider,
@@ -813,7 +821,7 @@ def run_civia_agent(
             except AIProviderError as exc:
                 dt_ms = int((time.perf_counter() - t_call) * 1000)
                 cb.record_failure(exc.code)
-                record_ai_trace(
+                _safe_record_trace(
                     trace_group_id=trace_group_id,
                     operation="agent_turn",
                     provider=provider,
@@ -830,7 +838,7 @@ def run_civia_agent(
             except Exception as exc:
                 dt_ms = int((time.perf_counter() - t_call) * 1000)
                 cb.record_failure("UNEXPECTED_ERROR")
-                record_ai_trace(
+                _safe_record_trace(
                     trace_group_id=trace_group_id,
                     operation="agent_turn",
                     provider=provider,
@@ -928,7 +936,7 @@ def run_civia_agent(
                 t_res = execute_tool_with_timeout(tname, targs, timeout_sec=tool_timeout_seconds)
             except TimeoutError as exc:
                 guardrail_triggered = "TIMEOUT"
-                record_ai_trace(
+                _safe_record_trace(
                     trace_group_id=trace_group_id,
                     operation="tool_timeout",
                     provider=active_provider,
@@ -1015,7 +1023,6 @@ def decide_pending_approval(
     decided_by: str = "operador-humano",
 ) -> dict[str, Any] | None:
     aid = UUID(str(approval_id))
-    new_decision = "APPROVED" if approve else "REJECTED"
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM pending_approvals WHERE id = %s FOR UPDATE;", (aid,))
@@ -1025,6 +1032,53 @@ def decide_pending_approval(
             if row["status"] != "PENDING":
                 return row
 
+            cur.execute("SELECT * FROM reports WHERE id = %s FOR UPDATE;", (row["report_id"],))
+            report_row = cur.fetchone()
+
+            payload = row["proposed_payload"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+            elif not isinstance(payload, dict):
+                payload = {}
+
+            expected_status = payload.get("previous_status")
+            expected_version = payload.get("expected_version")
+            proposed_status = payload.get("proposed_status", "IN_REVIEW")
+
+            is_stale = False
+            if approve:
+                if report_row is None:
+                    is_stale = True
+                elif expected_status is not None and report_row["status"] != expected_status:
+                    is_stale = True
+                elif (
+                    expected_version is not None
+                    and int(report_row.get("version") or 1) != int(expected_version)
+                ):
+                    is_stale = True
+
+            if approve and is_stale:
+                cur.execute(
+                    """
+                    UPDATE pending_approvals
+                    SET status = 'REJECTED',
+                        decided_by = %s,
+                        decided_at = NOW(),
+                        reason = LEFT(reason || ' [Rechazada automáticamente por obsolescencia: el estado o versión del reporte cambió previamente]', 500)
+                    WHERE id = %s AND status = 'PENDING'
+                    RETURNING *;
+                    """,
+                    (decided_by, aid),
+                )
+                stale_pa = cur.fetchone() or row
+                stale_pa["stale_conflict"] = True
+                conn.commit()
+                return stale_pa
+
+            new_decision = "APPROVED" if approve else "REJECTED"
             cur.execute(
                 """
                 UPDATE pending_approvals
@@ -1041,23 +1095,23 @@ def decide_pending_approval(
                 return row
 
             if approve:
-                payload = row["proposed_payload"]
-                if isinstance(payload, str):
-                    payload = json.loads(payload)
-                proposed_status = payload.get("proposed_status", "IN_REVIEW")
                 cur.execute(
                     """
                     UPDATE reports
                     SET status = %s,
                         human_override_note = %s,
+                        version = COALESCE(version, 1) + 1,
                         updated_at = NOW()
-                    WHERE id = %s;
+                    WHERE id = %s AND (%s::varchar IS NULL OR status = %s);
                     """,
                     (
                         proposed_status,
                         f"Aprobado por humano ({decided_by}): {row['reason']}",
                         row["report_id"],
+                        expected_status,
+                        expected_status,
                     ),
                 )
+            updated_pa["stale_conflict"] = False
             conn.commit()
             return updated_pa

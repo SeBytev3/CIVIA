@@ -8,7 +8,7 @@ from uuid import UUID
 from PIL import Image, ImageDraw
 
 from app.config import settings
-from app.db import get_conn
+from app.db import assert_disposable_test_db, get_conn
 
 
 def generate_synthetic_evidence_png(kind: str, code: str, width: int = 240, height: int = 160) -> bytes:
@@ -277,7 +277,9 @@ def seed_synthetic_reports(force_reset: bool = False) -> dict[str, int]:
     with get_conn() as conn:
         with conn.cursor() as cur:
             if force_reset:
-                cur.execute("DELETE FROM reports WHERE is_synthetic = TRUE;")
+                assert_disposable_test_db()
+                catalog_ids = [UUID(item["id"]) for item in SYNTHETIC_REPORTS]
+                cur.execute("DELETE FROM reports WHERE id = ANY(%s);", (catalog_ids,))
 
             for item in SYNTHETIC_REPORTS:
                 rid = UUID(item["id"])

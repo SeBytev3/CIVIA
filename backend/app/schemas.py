@@ -44,6 +44,7 @@ class ReportConfirmRequest(BaseModel):
     final_category: ReportCategory
     final_severity: ReportSeverity | None = None
     human_override_note: str | None = Field(default=None, max_length=500)
+    edit_token: str | None = Field(default=None, max_length=128)
 
 
 class ReportStatusUpdateRequest(BaseModel):
@@ -86,6 +87,7 @@ class ReportPublicResponse(BaseModel):
     status_message: str
     distance_km: float | None = None
     is_synthetic: bool = False
+    citizen_edit_token: str | None = None
     created_at: datetime
     updated_at: datetime
 

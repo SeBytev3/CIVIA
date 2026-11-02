@@ -40,6 +40,7 @@ export interface ReportItem {
   status_message: string;
   distance_km: number | null;
   is_synthetic: boolean;
+  citizen_edit_token?: string | null;
   created_at: string;
   updated_at: string;
 }

@@ -355,6 +355,13 @@ export function App() {
       if (formAudio) fd.append('audio', formAudio);
 
       const created = await submitCitizenReport(fd);
+      if (created.citizen_edit_token) {
+        try {
+          sessionStorage.setItem(`civia_edit_token_${created.id}`, created.citizen_edit_token);
+        } catch {
+          // Ignorar si sessionStorage no está disponible
+        }
+      }
       openReportInspection(created);
       setTrackedReport(created);
       setTrackingInput(created.tracking_code);
@@ -374,11 +381,25 @@ export function App() {
     setConfirmBusy(true);
     setGlobalError(null);
     try {
-      const updated = await confirmReportClassification(rep.id, {
-        final_category: confirmCat,
-        final_severity: confirmSev,
-        human_override_note: confirmNote.trim() || undefined,
-      });
+      let storedEditToken = rep.citizen_edit_token || null;
+      if (!storedEditToken) {
+        try {
+          storedEditToken = sessionStorage.getItem(`civia_edit_token_${rep.id}`);
+        } catch {
+          storedEditToken = null;
+        }
+      }
+      const updated = await confirmReportClassification(
+        rep.id,
+        {
+          final_category: confirmCat,
+          final_severity: confirmSev,
+          human_override_note: confirmNote.trim() || undefined,
+          edit_token: storedEditToken || undefined,
+        },
+        storedEditToken,
+        adminToken
+      );
       setSelectedReport(updated);
       if (trackedReport?.id === updated.id) {
         setTrackedReport(updated);

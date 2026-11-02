@@ -18,9 +18,10 @@ CIVIA es una aplicación web progresiva (PWA) conectada a una API FastAPI, Postg
 
 ## Arranque desde un clon limpio en un comando
 
-1. Copia `.env.example` como `.env` en la raíz del proyecto y completa las claves API (nunca subas `.env` a Git):
+1. Copia `.env.example` como `.env` en la raíz del proyecto, genera un `ADMIN_TOKEN` único robusto (`>= 24` caracteres) y completa las claves API (nunca subas `.env` a Git):
    ```powershell
    Copy-Item .env.example .env
+   # Si usas .\scripts\run.ps1 o ./run.sh, ADMIN_TOKEN se genera automáticamente si está vacío en .env
    ```
 2. Levanta todos los servicios (`db`, `api` y `frontend` PWA) con un solo comando:
    ```powershell
@@ -56,7 +57,7 @@ CIVIA es una aplicación web progresiva (PWA) conectada a una API FastAPI, Postg
 | `AGENT_MAX_TOKENS` | Límite #2: presupuesto máximo de tokens | `6000` |
 | `FALLA_FORZADA` | Simulación de fallos (`429`, `503`, `TIMEOUT`, `INVALID_JSON`, `GROQ_FAIL`, `TOTAL`) | *(vacío = operación normal)* |
 | `AUTO_SEED_SYNTHETIC` | Semilla automática de datos sintéticos identificados | `true` |
-| `ADMIN_TOKEN` | Token para zona de observabilidad protegida (`X-Admin-Token`) | `civia-admin-demo-2026` |
+| `ADMIN_TOKEN` | Secreto robusto obligatorio (`>= 24` caracteres) generado por instalación para observabilidad y operaciones administrativas (`X-Admin-Token`) | *(sin valor por defecto; falla al iniciar si falta o es débil)* |
 
 ---
 
@@ -86,17 +87,17 @@ Puedes inyectar fallos controlados en caliente desde la **Consola de Observabili
 ```powershell
 # Simular HTTP 429 en proveedor primario (conmuta automáticamente a Groq):
 Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injection" `
-  -Headers @{"X-Admin-Token"="civia-admin-demo-2026"; "Content-Type"="application/json"} `
+  -Headers @{"X-Admin-Token"="$env:ADMIN_TOKEN"; "Content-Type"="application/json"} `
   -Body '{"mode":"429","reset_circuits":true}'
 
 # Simular caída total de los 3 proveedores (guarda reportes en PENDING_ANALYSIS):
 Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injection" `
-  -Headers @{"X-Admin-Token"="civia-admin-demo-2026"; "Content-Type"="application/json"} `
+  -Headers @{"X-Admin-Token"="$env:ADMIN_TOKEN"; "Content-Type"="application/json"} `
   -Body '{"mode":"TOTAL","reset_circuits":true}'
 
 # Restaurar operación normal:
 Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injection" `
-  -Headers @{"X-Admin-Token"="civia-admin-demo-2026"; "Content-Type"="application/json"} `
+  -Headers @{"X-Admin-Token"="$env:ADMIN_TOKEN"; "Content-Type"="application/json"} `
   -Body '{"mode":"NONE","reset_circuits":true}'
 ```
 
@@ -106,9 +107,9 @@ Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injec
 
 - **Detener conservando los datos**: `docker compose down`
 - **Reiniciar desde cero (elimina volúmenes de BD y fotos)**: `docker compose down -v`
-- **Restablecer únicamente los reportes sintéticos de demostración**:
+- **Restablecer únicamente los reportes sintéticos de demostración (solo en BD de prueba `*_test` / `*_eval`)**:
   ```powershell
-  Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/seed?force_reset=true" -Headers @{"X-Admin-Token"="civia-admin-demo-2026"}
+  Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/seed?force_reset=true" -Headers @{"X-Admin-Token"="$env:ADMIN_TOKEN"}
   ```
 - **Solución de problemas frecuentes en Windows 11**:
   1. *Docker Desktop no responde*: Asegúrate de que el motor WSL2 esté activo (`wsl --status`) y Docker Desktop muestre `Engine running`.

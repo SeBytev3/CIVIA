@@ -7,10 +7,11 @@ from PIL import Image
 import pytest
 
 from app.config import settings
-from app.db import get_conn, run_migrations
+from app.db import run_migrations
 from app.main import app
 from app.security import rate_limiter
 from app.seed import seed_synthetic_reports
+from tests.conftest import restore_db_snapshot, snapshot_db_state
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -18,11 +19,9 @@ def setup_db_and_seed():
     settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     run_migrations()
     seed_synthetic_reports(force_reset=False)
+    snap = snapshot_db_state()
     yield
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM reports WHERE is_synthetic = FALSE;")
-            conn.commit()
+    restore_db_snapshot(snap)
 
 
 @pytest.fixture(autouse=True)
@@ -113,6 +112,8 @@ def test_create_report_and_pii_sanitization_and_photo_serving():
     assert created["is_synthetic"] is False
 
     report_id = created["id"]
+    edit_token = created["citizen_edit_token"]
+    assert edit_token is not None and len(edit_token) >= 32
 
     # Verificar que la foto se sirve con cabeceras seguras
     photo_resp = client.get(f"/api/reports/{report_id}/photo")
@@ -121,9 +122,10 @@ def test_create_report_and_pii_sanitization_and_photo_serving():
     assert photo_resp.headers["x-content-type-options"] == "nosniff"
     assert len(photo_resp.content) > 100
 
-    # Confirmar / editar categoría por humano
+    # Confirmar / editar categoría por humano con credencial del reporte
     confirm_resp = client.patch(
         f"/api/reports/{report_id}/confirm",
+        headers={"X-Citizen-Edit-Token": edit_token},
         json={
             "final_category": "HUECO",
             "final_severity": "ALTA",
@@ -137,17 +139,21 @@ def test_create_report_and_pii_sanitization_and_photo_serving():
     assert confirmed["effective_category"] == "HUECO"
     assert confirmed["status"] == "CONFIRMED"
 
+    admin_headers = {"X-Admin-Token": settings.ADMIN_TOKEN}
+
     # Cambio de estado sin aprobación humana debe rechazarse
     bad_status = client.patch(
         f"/api/reports/{report_id}/status",
+        headers=admin_headers,
         json={"status": "IN_REVIEW", "human_approved": False},
     )
     assert bad_status.status_code == 400
     assert bad_status.json()["error"] == "HUMAN_APPROVAL_REQUIRED"
 
-    # Cambio de estado con aprobación humana explícita
+    # Cambio de estado con autenticación admin y aprobación humana explícita
     ok_status = client.patch(
         f"/api/reports/{report_id}/status",
+        headers=admin_headers,
         json={"status": "IN_REVIEW", "human_approved": True, "note": "Asignado a cuadrilla vial."},
     )
     assert ok_status.status_code == 200

@@ -37,7 +37,8 @@ from app.ai_router import (
     reset_all_circuits,
     set_runtime_fault_override,
 )
-from app.db import get_conn, run_migrations
+from app.config import settings
+from app.db import ensure_isolated_database, get_conn, get_database_name, run_migrations
 from app.observability import estimate_cost_usd
 from app.seed import generate_synthetic_evidence_png, seed_synthetic_reports
 
@@ -310,6 +311,21 @@ def get_latest_trace_info(trace_group_id: str) -> dict[str, Any]:
 
 
 def run_evaluation(mode: str = "all", pause_sec: float = 0.7) -> dict[str, Any]:
+    import os
+    import tempfile
+
+    if get_database_name(settings.DATABASE_URL) == "civia" and os.getenv("CIVIA_ALLOW_MAIN_DB_EVAL") != "1":
+        try:
+            eval_db_url = ensure_isolated_database("civia_eval", settings.DATABASE_URL)
+            settings.DATABASE_URL = eval_db_url
+            os.environ["DATABASE_URL"] = eval_db_url
+        except Exception:
+            pass
+
+    eval_upload_dir = Path(tempfile.gettempdir()) / "civia_eval_uploads"
+    eval_upload_dir.mkdir(parents=True, exist_ok=True)
+    settings.UPLOAD_DIR = eval_upload_dir
+
     run_migrations()
     seed_synthetic_reports(force_reset=False)
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -317,16 +333,22 @@ def run_evaluation(mode: str = "all", pause_sec: float = 0.7) -> dict[str, Any]:
     golden_path = EVAL_DIR / "casos_dorados.json"
     golden_sql_checks = verify_golden_sql_ground_truth(golden_path)
 
-    if mode == "deterministic":
+    if mode in ("deterministic", "offline"):
         report = {
             "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-            "mode": "deterministic",
+            "mode": mode,
+            "database": get_database_name(settings.DATABASE_URL),
             "golden_sql_verification": golden_sql_checks,
         }
         (RESULTS_DIR / "reporte_determinista.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         return report
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM pending_approvals;")
+            pre_existing_pa_ids = [r["id"] for r in cur.fetchall()]
 
     queries = build_15_representative_queries()
     query_results: list[dict[str, Any]] = []
@@ -431,10 +453,16 @@ def run_evaluation(mode: str = "all", pause_sec: float = 0.7) -> dict[str, Any]:
         if idx < len(queries) and pause_sec > 0:
             time.sleep(pause_sec)
 
-    # Limpiar posibles solicitudes de aprobación creadas en Q13 para mantener la BD limpia
+    # Limpiar exclusivamente las solicitudes de aprobación creadas durante esta ejecución (M-07 / N-03)
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("DELETE FROM pending_approvals WHERE reason ILIKE '%atendido%' OR reason ILIKE '%RESOLVED%';")
+            if pre_existing_pa_ids:
+                cur.execute(
+                    "DELETE FROM pending_approvals WHERE NOT (id = ANY(%s));",
+                    (pre_existing_pa_ids,),
+                )
+            else:
+                cur.execute("DELETE FROM pending_approvals;")
             conn.commit()
 
     total_q = len(query_results)
@@ -556,7 +584,7 @@ def run_evaluation(mode: str = "all", pause_sec: float = 0.7) -> dict[str, Any]:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ejecuta la suite de evaluación de CIVIA.")
-    parser.add_argument("--mode", choices=["all", "deterministic", "live"], default="all")
+    parser.add_argument("--mode", choices=["all", "deterministic", "offline", "live"], default="all")
     parser.add_argument("--pause", type=float, default=0.7)
     args = parser.parse_args()
     run_evaluation(mode=args.mode, pause_sec=args.pause)
