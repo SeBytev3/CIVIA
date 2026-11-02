@@ -3,7 +3,7 @@ if (-not (Test-Path '.env')) {
     Copy-Item '.env.example' '.env'
 }
 $envContent = Get-Content '.env' -Raw
-if ($envContent -match '(?m)^ADMIN_TOKEN=\s*$' -or $envContent -notmatch '(?m)^ADMIN_TOKEN=.{32,}') {
+if ($envContent -match '(?m)^ADMIN_TOKEN=\s*$' -or $envContent -notmatch '(?m)^ADMIN_TOKEN=[A-Za-z0-9_-]{32,256}\r?$') {
     $bytes = New-Object byte[] 32
     [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
     $generatedToken = ([Convert]::ToBase64String($bytes)).TrimEnd('=').Replace('+', '-').Replace('/', '_')

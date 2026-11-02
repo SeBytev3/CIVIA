@@ -3,7 +3,7 @@ set -eu
 if [ ! -f .env ]; then
   cp .env.example .env
 fi
-if ! grep -Eq '^ADMIN_TOKEN=.{32,}' .env; then
+if ! grep -Eq '^ADMIN_TOKEN=[A-Za-z0-9_-]{32,256}$' .env; then
   GEN_TOKEN="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=\n\r')"
   if grep -q '^ADMIN_TOKEN=' .env; then
     sed -i "s/^ADMIN_TOKEN=.*/ADMIN_TOKEN=${GEN_TOKEN}/" .env

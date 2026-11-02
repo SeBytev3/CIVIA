@@ -147,6 +147,61 @@ def test_g1_1_c01_rejects_sequential_and_repeated_tokens(monkeypatch):
     assert r_ok.status_code == 200
 
 
+def test_g1_2_c01_rejects_contextual_project_role_year_demo_token(monkeypatch):
+    """
+    G1.2 C-01 (contraejemplo contextual exacto de docs/auditoria_codex_g1_1.md):
+    El patrón construido con nombre público del proyecto, rol administrativo, año y etiqueta
+    Demo/Test ('_'.join(('Civia', 'AdminToken', '2026', 'Demo')) + '!') y sus variantes
+    (incluso extendidas a >= 32 caracteres o con ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT=true)
+    no permiten iniciar el servidor ni acceder a /api/admin/observability.
+    """
+    codex_pattern = "_".join(("Civia", "AdminToken", "2026", "Demo")) + "!"
+    contextual_variants = [
+        codex_pattern,
+        "Civia_AdminToken_2026_Demo_Extended_9842",
+        "Civia-Admin-Role-2026-Test-Credential-7391",
+        "Proyecto_Civia_Operador_2026_Demo_Key_8472",
+        "Supervisor_Cali_Valle_2026_Production_9182",
+    ]
+
+    for candidate in contextual_variants:
+        assert is_strong_admin_token(candidate) is False, f"Debió rechazarse patrón contextual: {candidate}"
+        with pytest.raises(RuntimeError):
+            validate_admin_token_or_raise(candidate)
+
+    # Incluso si se habilita ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT=true, los patrones contextuales siguen rechazados
+    monkeypatch.setenv("ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT", "true")
+    for candidate in contextual_variants:
+        assert is_strong_admin_token(candidate) is False
+    monkeypatch.delenv("ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT", raising=False)
+
+    # Reproductor exacto de Codex: el lifespan completo rechaza iniciar con codex_pattern
+    monkeypatch.setattr(settings, "ADMIN_TOKEN", codex_pattern)
+    with pytest.raises(RuntimeError):
+        with TestClient(app):
+            pass
+
+    # Y ante cualquier petición al endpoint administrativo devuelve 401
+    r_ctx = client.get(
+        "/api/admin/observability",
+        headers={"X-Admin-Token": codex_pattern},
+    )
+    assert r_ctx.status_code == 401
+
+    r_no_tok = client.get("/api/admin/observability")
+    assert r_no_tok.status_code == 401
+
+    # Un secreto nuevo generado mediante CSPRNG permite iniciar la aplicación y acceder a /api/admin/observability
+    csprng_secret = generate_admin_token(32)
+    monkeypatch.setattr(settings, "ADMIN_TOKEN", csprng_secret)
+    with TestClient(app) as fresh_client:
+        r_valid = fresh_client.get(
+            "/api/admin/observability",
+            headers={"X-Admin-Token": csprng_secret},
+        )
+        assert r_valid.status_code == 200
+
+
 def test_a01_confirm_requires_report_edit_token_and_blocks_post_admin_mutation():
     """
     A-01:

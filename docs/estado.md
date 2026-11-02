@@ -111,3 +111,13 @@
   7. **`B-03`**: `_atomic_write_bytes()` en `backend/app/security.py` escribe en `.tmp_<uuid>_<name>`, verifica longitud exacta, promueve con `os.replace` y en `except BaseException:` elimina tanto el archivo temporal como el destino final antes de propagar el error (`0` archivos huérfanos ante escrituras parciales interrumpidas con `OSError`).
 - **Verificación de la suite completa + pruebas adversariales G1.1 en PostgreSQL 17 real**:
   - `docker compose exec -T api pytest -v`: **`33 passed in 30.05s`** (`13/13` en `tests/test_audit_g1_security.py`).
+
+### Bloque G1.2 — Cierre del último hallazgo `C-01` (`docs/auditoria_codex_g1_1.md`) completado (2026-11-01)
+- **Alcance exclusivo**: Se mantuvieron intactas las 6 correcciones ya aprobadas (`A-01`, `M-07`, `N-03`, `A-06`, `A-07`, `B-03`) y se cerró el contraejemplo contextual de `C-01` (`_'.join(('Civia', 'AdminToken', '2026', 'Demo')) + '!'`).
+- **Corrección aplicada (`backend/app/config.py`, `scripts/run.ps1`, `run.sh`, `.env.example`, `README.md`)**:
+  - Se estableció `secrets.token_urlsafe(32)` (`>= 32` caracteres URL-safe base64, `>= 12` símbolos distintos) como procedimiento estándar de generación local por instalación, sin credenciales predeterminadas ni modo demo en desarrollo o producción.
+  - Se bloqueó explícitamente el patrón contextual `Civia_AdminToken_2026_Demo!` y sus variantes con nombre del proyecto, rol administrativo, años (`2024..2027`) y etiquetas `Demo`/`Test` (tanto en formato estándar como con `ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT=true`).
+  - Se documentó en código, `.env.example`, `README.md` y adenda de `docs/remediacion_g1_1.md` que los filtros estáticos bloquean patrones previsibles pero no prueban matemáticamente la entropía criptográfica de una cadena arbitraria.
+- **Verificación**:
+  - Prueba adversarial añadida: `tests/test_audit_g1_security.py::test_g1_2_c01_rejects_contextual_project_role_year_demo_token`.
+  - Suite completa ejecutada sobre PostgreSQL 17 real: **`34 passed`** (`14/14` en `tests/test_audit_g1_security.py`).

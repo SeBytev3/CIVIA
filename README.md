@@ -18,13 +18,14 @@ CIVIA es una aplicación web progresiva (PWA) conectada a una API FastAPI, Postg
 
 ## Arranque desde un clon limpio en un comando
 
-1. Copia `.env.example` como `.env` en la raíz del proyecto, genera un `ADMIN_TOKEN` criptográficamente aleatorio con `secrets.token_urlsafe(32)` y completa las claves API (nunca imprimas el secreto en logs ni subas `.env` a Git):
+1. Copia `.env.example` como `.env` en la raíz del proyecto, genera localmente `ADMIN_TOKEN` con `secrets.token_urlsafe(32)` y completa las claves API (nunca imprimas el secreto en logs ni subas `.env` a Git):
    ```powershell
    Copy-Item .env.example .env
-   # Generar ADMIN_TOKEN con CSPRNG (sin imprimirlo en consola ni registrarlo en historial):
-   # python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); p.write_text(re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', p.read_text()))"
-   # O bien ejecuta .\scripts\run.ps1 / ./run.sh, que genera ADMIN_TOKEN con CSPRNG si está vacío.
+   # Procedimiento estándar: generar ADMIN_TOKEN con CSPRNG (sin imprimirlo en consola):
+   python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); p.write_text(re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', p.read_text()))"
+   # Alternativamente, .\scripts\run.ps1 (PowerShell) o ./run.sh (Bash) generan ADMIN_TOKEN con CSPRNG automáticamente si está vacío.
    ```
+   > **Política de `ADMIN_TOKEN`:** No existe ninguna credencial predeterminada ni ruta de demostración en desarrollo o producción. El servidor exige por defecto el formato URL-safe base64 de `secrets.token_urlsafe(32)` (`>= 32` caracteres, `>= 12` caracteres únicos, sin secuencias, repeticiones ni términos contextuales del proyecto/rol/año/Demo/Test). Si un gestor externo de secretos requiere caracteres fuera de base64url, puede declararse explícitamente `ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT=true` manteniendo todas las demás restricciones; ten en cuenta que ningún filtro sobre cadenas puede demostrar matemáticamente la entropía criptográfica de un valor arbitrario.
 2. Levanta todos los servicios (`db`, `api` y `frontend` PWA) con un solo comando:
    ```powershell
    docker compose up --build -d

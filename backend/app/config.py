@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+import re
 import secrets
 
 
@@ -61,6 +62,7 @@ class Settings:
 WEAK_ADMIN_TOKENS: set[str] = {
     "",
     "civia-admin-demo-2026",
+    "civia_admintoken_2026_demo!",
     "admin",
     "password",
     "secret",
@@ -74,18 +76,42 @@ WEAK_ADMIN_TOKENS: set[str] = {
 }
 
 _WEAK_SUBSTRINGS: tuple[str, ...] = (
-    "civia-admin-demo",
+    "civia",
+    "admintoken",
+    "admin",
+    "prueba",
     "change_me",
     "changeme",
     "password",
-    "admin123",
+    "passwd",
+    "secret",
+    "secreto",
+    "token",
+    "clave",
     "replace_with",
-    "default_token",
-    "example_token",
+    "default",
+    "example",
+    "sample",
+    "localdev",
+    "local_dev",
+    "operator",
+    "operador",
+    "valle",
+    "momento",
+    "evaluativo",
     "qwerty",
     "asdfgh",
     "zxcvbn",
 )
+
+_DELIMITED_CONTEXT_TERMS_RE = re.compile(
+    r"(?:^|[_.\-:])(?:demo|test|testing|cali|role|prod|staging|dev|2024|2025|2026|2027)(?:$|[_.\-:!])",
+    re.IGNORECASE,
+)
+
+_URLSAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
+_PURE_TITLE_OR_CAMEL_SEG_RE = re.compile(r"^[A-Z][a-z]{2,}(?:[A-Z][a-z]{2,})*$")
+_DELIMITED_YEAR_RE = re.compile(r"(?:^|[^0-9])(?:19|20)\d{2}(?:$|[^0-9])")
 
 _KEYBOARD_ROWS: tuple[str, ...] = (
     "01234567890",
@@ -101,7 +127,7 @@ _KEYBOARD_ROWS: tuple[str, ...] = (
 )
 
 
-def _has_sequential_run(value: str, run_len: int = 5) -> bool:
+def _has_sequential_run(value: str, run_len: int = 6) -> bool:
     low = value.lower()
     if len(low) < run_len:
         return False
@@ -136,29 +162,58 @@ def _has_repeated_pattern(value: str) -> bool:
     return False
 
 
+def _has_contextual_or_phrase_pattern(value: str) -> bool:
+    low = value.lower()
+    alnum_low = re.sub(r"[^a-z0-9]", "", low)
+    if any(w in low or w in alnum_low for w in _WEAK_SUBSTRINGS):
+        return True
+    if _DELIMITED_CONTEXT_TERMS_RE.search(value):
+        return True
+    # Frases compuestas por segmentos separados por '_' o '-' donde >= 2 segmentos son palabras TitleCase/CamelCase puras
+    raw_segments = [re.sub(r"[!@#$%^&*+=?~]+$", "", seg) for seg in re.split(r"[_.\-:]+", value) if seg]
+    title_segments = sum(1 for seg in raw_segments if _PURE_TITLE_OR_CAMEL_SEG_RE.match(seg))
+    if len(raw_segments) >= 3 and title_segments >= 2:
+        return True
+    if _DELIMITED_YEAR_RE.search(value) and title_segments >= 1:
+        return True
+    return False
+
+
 def is_strong_admin_token(token: str | None) -> bool:
     """
-    Valida que ADMIN_TOKEN no sea vacío ni coincida con patrones predecibles
-    (secuencias numéricas/alfabéticas, repeticiones periódicas, contraseñas de demostración
-    o cadenas de una sola clase de caracteres).
-    Nota de seguridad: las validaciones deterministas descartan credenciales débiles o de
-    demostración; la impredecibilidad real proviene de generar el token con un CSPRNG
-    como secrets.token_urlsafe(32).
+    Política de validación de ADMIN_TOKEN:
+    - El mecanismo estándar de instalación es la generación local con CSPRNG mediante
+      secrets.token_urlsafe(32) (>= 32 caracteres URL-safe base64).
+    - Rechaza tokens vacíos, cortos (< 32 caracteres), con baja variedad de símbolos (< 12),
+      secuencias numéricas/alfabéticas/teclado, patrones periódicos y credenciales contextuales
+      o de demostración construidas con nombre del proyecto, rol, año o etiquetas Demo/Test.
+    - Nota técnica: ningún filtro sobre una cadena estática puede demostrar matemáticamente
+      que un valor externo arbitrario proviene de un CSPRNG; la seguridad depende de seguir el
+      procedimiento de generación con secrets.token_urlsafe(32).
     """
     if not token or not isinstance(token, str):
         return False
     cleaned = token.strip()
-    if len(cleaned) < 24 or len(cleaned) > 256:
+    if len(cleaned) < 32 or len(cleaned) > 256:
         return False
     if any(ch.isspace() for ch in cleaned):
         return False
-    if len(set(cleaned)) < 10:
+    if len(set(cleaned)) < 12:
         return False
 
     low = cleaned.lower()
     if low in WEAK_ADMIN_TOKENS:
         return False
-    if any(w in low for w in _WEAK_SUBSTRINGS):
+
+    allow_custom_format = os.getenv("ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+    if not allow_custom_format and not _URLSAFE_TOKEN_RE.match(cleaned):
+        return False
+
+    if _has_contextual_or_phrase_pattern(cleaned):
         return False
 
     has_lower = any("a" <= c <= "z" for c in cleaned)
@@ -166,12 +221,12 @@ def is_strong_admin_token(token: str | None) -> bool:
     has_digit = any("0" <= c <= "9" for c in cleaned)
     has_symbol = any(not c.isalnum() for c in cleaned)
     char_classes = sum((has_lower, has_upper, has_digit, has_symbol))
-    if char_classes < 2:
+    if char_classes < 3 and not (has_lower and has_upper and has_digit):
         return False
     if cleaned.isdigit() or cleaned.isalpha():
         return False
 
-    if _has_sequential_run(cleaned, run_len=5):
+    if _has_sequential_run(cleaned, run_len=6):
         return False
     if _has_repeated_pattern(cleaned):
         return False
@@ -180,20 +235,21 @@ def is_strong_admin_token(token: str | None) -> bool:
 
 
 def generate_admin_token(nbytes: int = 32) -> str:
-    """Genera una credencial administrativa criptográficamente segura con CSPRNG."""
-    for _ in range(20):
+    """Genera una credencial administrativa con CSPRNG (secrets.token_urlsafe(32))."""
+    for _ in range(50):
         candidate = secrets.token_urlsafe(max(32, nbytes))
         if is_strong_admin_token(candidate):
             return candidate
-    return secrets.token_urlsafe(48)
+    raise RuntimeError("No fue posible generar un ADMIN_TOKEN válido con CSPRNG.")
 
 
 def validate_admin_token_or_raise(token: str | None = None) -> None:
     effective = settings.ADMIN_TOKEN if token is None else token
     if not is_strong_admin_token(effective):
         raise RuntimeError(
-            "Configuración insegura: ADMIN_TOKEN falta o presenta un patrón predecible/débil. "
-            "Genere un secreto criptográfico con CSPRNG: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
+            "Configuración insegura: ADMIN_TOKEN falta o fue rechazado por la política de seguridad "
+            "(patrón contextual, de demostración, secuencial o formato inválido). "
+            "Genere el secreto localmente con CSPRNG: python -c \"import secrets; print(secrets.token_urlsafe(32))\""
         )
 
 

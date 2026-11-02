@@ -141,3 +141,30 @@
   `PASSED` (`POST /api/reports` devuelve `500`, quedan `0` archivos temporales o parciales nuevos en `UPLOAD_DIR` y `0` filas nuevas en `reports`).
 - **Limitaciones pendientes:**
   Ninguna.
+
+---
+
+## Adenda G1.2 — Cierre del último hallazgo `C-01` (`docs/auditoria_codex_g1_1.md`)
+
+- **Informe de referencia:** `docs/auditoria_codex_g1_1.md` (sobre commit `74ecc025`). Los hallazgos `A-01`, `M-07`, `N-03`, `A-06`, `A-07` y `B-03` obtuvieron `PASS` y no fueron modificados en G1.2.
+- **Hallazgo residual en `C-01`:**
+  Una credencial contextual construida exclusivamente con información pública del proyecto, rol administrativo, año y etiqueta de demostración (`pattern = "_".join(("Civia", "AdminToken", "2026", "Demo")) + "!"` -> `"Civia_AdminToken_2026_Demo!"`) superaba las comprobaciones de `74ecc025` (`27` caracteres, `17` símbolos únicos, mezcla de clases y sin secuencias numéricas), permitiendo iniciar el `lifespan` de FastAPI y obtener `HTTP 200` en `GET /api/admin/observability`.
+- **Corrección aplicada en G1.2 (`backend/app/config.py`, `scripts/run.ps1`, `run.sh`, `.env.example`, `README.md`):**
+  1. **Procedimiento estándar CSPRNG y formato por defecto (`secrets.token_urlsafe(32)`):**
+     - `is_strong_admin_token()` exige longitud mínima de `32` caracteres (`secrets.token_urlsafe(32)` produce `43` caracteres), al menos `12` caracteres distintos y alfabeto URL-safe base64 (`^[A-Za-z0-9_-]{32,256}$`).
+     - Si una instalación externa requiere explícitamente otro alfabeto de símbolos desde un gestor de secretos, debe declararlo mediante `ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT=true`, manteniéndose activas todas las demás restricciones.
+     - No existe ninguna ruta de demostración ni excepción por `CIVIA_PHASE=mvp`.
+  2. **Rechazo expreso del patrón contextual y de variantes con nombre de proyecto, rol, año o etiquetas Demo/Test (`_has_contextual_or_phrase_pattern`):**
+     - Se evalúa tanto la cadena en minúsculas como su forma alfanumérica normalizada (`re.sub(r"[^a-z0-9]", "", low)`) contra términos contextuales y de demostración (`civia`, `admintoken`, `admin`, `demo`, `test`, `prueba`, `password`, `passwd`, `secret`, `secreto`, `token`, `clave`, `operator`, `operador`, `cali`, `valle`, `momento`, `evaluativo`, `default`, `example`, `sample`, `localdev`, `2024`, `2025`, `2026`, `2027`, etc.).
+     - Se rechazan además estructuras de frase compuesta por múltiples palabras `CamelCase`/`TitleCase` separadas por `_`, `-`, `.` o combinadas con años de cuatro dígitos `(19|20)\d{2}`.
+  3. **Documentación honesta del alcance técnico:**
+     - Se documenta expresamente en código, `.env.example` y `README.md` que ningún conjunto finito de filtros sobre cadenas demuestra matemáticamente que una cadena arbitraria provenga de un CSPRNG; la propiedad criptográfica depende de generar el secreto con `secrets.token_urlsafe(32)`.
+- **Prueba adversarial ejecutada:**
+  `tests/test_audit_g1_security.py::test_g1_2_c01_rejects_contextual_project_role_year_demo_token`:
+  - Verifica que `pattern = "_".join(("Civia", "AdminToken", "2026", "Demo")) + "!"` y sus variantes extendidas (`>= 32` caracteres, con y sin `ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT=true`) devuelven `is_strong_admin_token == False` y lanzan `RuntimeError` en `validate_admin_token_or_raise()` y al iniciar `TestClient(app)`.
+  - Verifica que `/api/admin/observability` responde `401` tanto con el patrón contextual como sin token.
+  - Verifica que un secreto nuevo generado con `generate_admin_token(32)` (`secrets.token_urlsafe(32)`) permite iniciar `TestClient(app)` y responde `200` en `/api/admin/observability`.
+- **Resultado:**
+  `PASSED` (`34 passed` en la suite completa).
+- **Limitaciones pendientes:**
+  Un filtro determinista en el servidor no puede demostrar matemáticamente el origen aleatorio de una cadena externa arbitraria que evite todos los patrones prohibidos; por ello la generación local con `secrets.token_urlsafe(32)` se establece como procedimiento estándar de instalación.
