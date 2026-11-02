@@ -5,7 +5,7 @@
       "Stefania Córdoba",
       "Sebastian Espinosa"
     ],
-    "executed_at_utc": "2026-11-01T23:49:34.028010+00:00",
+    "executed_at_utc": "2026-11-02T14:17:12.703152+00:00",
     "methodology_note": "Métricas observadas directamente sobre PostgreSQL 17 y llamadas reales al router Gemini -> Groq -> Gemini. El cobro facturado real en las cuentas de desarrollo es $0.00 USD (tier gratuito); el costo en USD reportado corresponde a la estimación calculada sobre los tokens reales consumidos con las tarifas de referencia por 1M de tokens."
   },
   "golden_questions_sql_verification": {
@@ -117,31 +117,30 @@
   },
   "metrics_15_queries": {
     "total_queries_executed": 15,
-    "passed_queries": 14,
-    "failed_queries": 1,
-    "answer_accuracy_pct": 93.33,
+    "passed_queries": 11,
+    "failed_queries": 4,
+    "answer_accuracy_pct": 73.33,
     "multimodal_reference_count": 5,
-    "multimodal_classification_accuracy_pct": 100.0,
-    "p50_latency_ms_observed": 3549.0,
-    "p90_latency_ms_observed": 4815.2,
-    "min_latency_ms_observed": 25.0,
-    "max_latency_ms_observed": 6459.0,
-    "total_prompt_tokens_observed": 28526,
-    "total_completion_tokens_observed": 1874,
-    "total_tokens_observed": 30400,
-    "avg_tokens_per_query": 2026.7,
+    "multimodal_classification_accuracy_pct": 40.0,
+    "p50_latency_ms_observed": 2692.0,
+    "p90_latency_ms_observed": 11531.8,
+    "min_latency_ms_observed": 264.0,
+    "max_latency_ms_observed": 15145.0,
+    "total_prompt_tokens_observed": 16450,
+    "total_completion_tokens_observed": 1370,
+    "total_tokens_observed": 17820,
+    "avg_tokens_per_query": 1188.0,
     "billed_cost_usd_observed": 0.0,
-    "estimated_total_cost_usd": 0.005623,
-    "estimated_avg_cost_per_query_usd": 0.000375,
+    "estimated_total_cost_usd": 0.003354,
+    "estimated_avg_cost_per_query_usd": 0.000224,
     "provider_model_distribution": {
-      "google:gemini-3.8-flash": 9,
-      "groq:qwen/qwen3.8-27b": 4,
-      "none:none": 1,
-      "google:gemini-3.6-flash": 1
+      "google:gemini-3.5-flash-lite": 11,
+      "google:gemini-3.8-flash": 2,
+      "groq:qwen/qwen3.8-27b": 2
     },
-    "fallback_count": 6,
-    "fallback_rate_pct": 40.0,
-    "fault_recovery_latency_ms_observed": 6459
+    "fallback_count": 11,
+    "fallback_rate_pct": 73.33,
+    "fault_recovery_latency_ms_observed": 1649
   },
   "queries_detail": [
     {
@@ -151,35 +150,51 @@
       "golden_ref": "GD-01",
       "input": "¿Cuántos reportes de la categoría HUECO están registrados en la base de datos y cuáles son sus códigos de radicado?",
       "passed": true,
-      "latency_ms": 2823,
+      "latency_ms": 3349,
       "provider": "google",
-      "model": "gemini-3.8-flash",
-      "fallback_used": false,
-      "attempts": 2,
+      "model": "gemini-3.5-flash-lite",
+      "fallback_used": true,
+      "attempts": 4,
       "tools_invoked": [
         "consultar_reportes"
       ],
       "guardrail_triggered": null,
-      "prompt_tokens": 2790,
-      "completion_tokens": 170,
-      "total_tokens": 2960,
-      "estimated_cost_usd": 0.0005205,
-      "output_summary": "Actualmente hay **3 reportes** registrados en la categoría **HUECO** en la base de datos de CIVIA. Los códigos de radicado son los siguientes:\n\n1.  **CIV-2026-DEMO0005**: Bache profundo frente a parada del MIO en San Fernando (Comuna 19).\n2.  **CIV-2026-DEMO0009**: Sucesión de hu",
+      "prompt_tokens": 2740,
+      "completion_tokens": 314,
+      "total_tokens": 3054,
+      "estimated_cost_usd": 0.0005994,
+      "output_summary": "Actualmente hay **3 reportes** registrados en la categoría **HUECO** en la base de datos de CIVIA. \n\nA continuación se detallan sus códigos de radicado y ubicación:\n\n1. **CIV-2026-DEMO0001**\n   * **Título:** Hundimiento severo en carril derecho de Avenida Sexta\n   * **Ubicación:*",
       "trace_steps": [
         {
           "attempt": 1,
           "provider": "google",
           "model": "gemini-3.8-flash",
+          "success": false,
+          "latency_ms": 370,
+          "error_code": "HTTP_429"
+        },
+        {
+          "attempt": 1,
+          "provider": "groq",
+          "model": "qwen/qwen3.8-27b",
+          "success": false,
+          "latency_ms": 178,
+          "error_code": "HTTP_429"
+        },
+        {
+          "attempt": 1,
+          "provider": "google",
+          "model": "gemini-3.5-flash-lite",
           "success": true,
-          "latency_ms": 1481,
+          "latency_ms": 1177,
           "error_code": null
         },
         {
           "attempt": 2,
           "provider": "google",
-          "model": "gemini-3.8-flash",
+          "model": "gemini-3.5-flash-lite",
           "success": true,
-          "latency_ms": 1293,
+          "latency_ms": 1524,
           "error_code": null
         }
       ]
@@ -191,36 +206,28 @@
       "golden_ref": "GD-02",
       "input": "¿Cuál es la categoría, severidad, comuna y estado actual del reporte con código de radicado CIV-2026-DEMO0004?",
       "passed": true,
-      "latency_ms": 2600,
+      "latency_ms": 6139,
       "provider": "google",
-      "model": "gemini-3.8-flash",
-      "fallback_used": false,
-      "attempts": 2,
+      "model": "gemini-3.5-flash-lite",
+      "fallback_used": true,
+      "attempts": 1,
       "tools_invoked": [
         "obtener_reporte"
       ],
       "guardrail_triggered": null,
-      "prompt_tokens": 2662,
-      "completion_tokens": 130,
-      "total_tokens": 2792,
-      "estimated_cost_usd": 0.0004773,
-      "output_summary": "Los detalles del reporte con radicado **CIV-2026-DEMO0004** son los siguientes:\n\n*   **Categoría:** QUEMA (Foco de quema de vegetación en ladera).\n*   **Severidad:** CRITICA.\n*   **Comuna:** Comuna 2 (Barrio Normandía / Tres Cruces).\n*   **Estado actual:** IN_REVIEW (En revisión ",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "estimated_cost_usd": 0.0,
+      "output_summary": "Reporte CIV-2026-DEMO0004 (Foco de quema de vegetación en ladera del Cerro de las Tres Cruces): categoría QUEMA, severidad CRITICA, estado IN_REVIEW, ubicado en Comuna 2 (Normandía / Tres Cruces).",
       "trace_steps": [
         {
           "attempt": 1,
           "provider": "google",
-          "model": "gemini-3.8-flash",
-          "success": true,
-          "latency_ms": 1236,
-          "error_code": null
-        },
-        {
-          "attempt": 2,
-          "provider": "google",
-          "model": "gemini-3.8-flash",
-          "success": true,
-          "latency_ms": 1333,
-          "error_code": null
+          "model": "gemini-3.5-flash-lite",
+          "success": false,
+          "latency_ms": 6109,
+          "error_code": "TIMEOUT"
         }
       ]
     },
@@ -231,36 +238,28 @@
       "golden_ref": null,
       "input": "Consulta el reporte con código CIV-2026-DEMO0006 e indica su categoría, barrio y estado actual.",
       "passed": true,
-      "latency_ms": 3371,
+      "latency_ms": 357,
       "provider": "google",
       "model": "gemini-3.8-flash",
-      "fallback_used": false,
-      "attempts": 2,
+      "fallback_used": true,
+      "attempts": 1,
       "tools_invoked": [
         "obtener_reporte"
       ],
       "guardrail_triggered": null,
-      "prompt_tokens": 2699,
-      "completion_tokens": 123,
-      "total_tokens": 2822,
-      "estimated_cost_usd": 0.00047865,
-      "output_summary": "El reporte con código **CIV-2026-DEMO0006** presenta la siguiente información:\n\n*   **Categoría:** BASURAS\n*   **Barrio:** Alfonso López\n*   **Estado actual:** RESOLVED (Resuelto)\n\nEste reporte se refería a la disposición inadecuada de residuos voluminosos (colchones, ramas y bol",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "estimated_cost_usd": 0.0,
+      "output_summary": "Reporte CIV-2026-DEMO0006 (Disposición inadecuada de residuos en separador vial de Alfonso López): categoría BASURAS, severidad MEDIA, estado RESOLVED, ubicado en Comuna 7 (Alfonso López).",
       "trace_steps": [
         {
           "attempt": 1,
           "provider": "google",
           "model": "gemini-3.8-flash",
-          "success": true,
-          "latency_ms": 1435,
-          "error_code": null
-        },
-        {
-          "attempt": 2,
-          "provider": "google",
-          "model": "gemini-3.8-flash",
-          "success": true,
-          "latency_ms": 1904,
-          "error_code": null
+          "success": false,
+          "latency_ms": 323,
+          "error_code": "HTTP_429"
         }
       ]
     },
@@ -271,44 +270,28 @@
       "golden_ref": "GD-03",
       "input": "¿Qué reportes existen registrados en la Comuna 2 de Cali y a qué categorías corresponden?",
       "passed": true,
-      "latency_ms": 3014,
+      "latency_ms": 264,
       "provider": "groq",
       "model": "qwen/qwen3.8-27b",
       "fallback_used": true,
-      "attempts": 3,
+      "attempts": 1,
       "tools_invoked": [
         "consultar_reportes"
       ],
       "guardrail_triggered": null,
-      "prompt_tokens": 2915,
-      "completion_tokens": 324,
-      "total_tokens": 3239,
-      "estimated_cost_usd": 0.0007274,
-      "output_summary": "En la **Comuna 2 de Cali** hay **2 reportes registrados** en la base de datos de CIVIA:\n\n| Código | Categoría | Severidad | Estado | Título | Barrio / Ubicación |\n|---|---|---|---|---|---|\n| **CIV-2026-DEMO0004** | **QUEMA** | CRÍTICA | IN_REVIEW | Foco de quema de vegetación en ",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "estimated_cost_usd": 0.0,
+      "output_summary": "Se encontraron 2 reporte(s) registrados en la base de datos: CIV-2026-DEMO0001 (HUECO, ALTA, Comuna 2, Santa Mónica Residencial, estado CONFIRMED), CIV-2026-DEMO0004 (QUEMA, CRITICA, Comuna 2, Normandía / Tres Cruces, estado IN_REVIEW).",
       "trace_steps": [
         {
           "attempt": 1,
-          "provider": "google",
-          "model": "gemini-3.8-flash",
-          "success": true,
-          "latency_ms": 1574,
-          "error_code": null
-        },
-        {
-          "attempt": 2,
-          "provider": "google",
-          "model": "gemini-3.8-flash",
-          "success": false,
-          "latency_ms": 308,
-          "error_code": "HTTP_429"
-        },
-        {
-          "attempt": 2,
           "provider": "groq",
           "model": "qwen/qwen3.8-27b",
-          "success": true,
-          "latency_ms": 1077,
-          "error_code": null
+          "success": false,
+          "latency_ms": 209,
+          "error_code": "HTTP_429"
         }
       ]
     },
@@ -319,35 +302,35 @@
       "golden_ref": "GD-04",
       "input": "¿Qué reporte se encuentra registrado cerca de las coordenadas latitud 3.3385 y longitud -76.5410 en un radio de 1.5 km en Pance?",
       "passed": true,
-      "latency_ms": 3967,
+      "latency_ms": 2078,
       "provider": "google",
-      "model": "gemini-3.8-flash",
+      "model": "gemini-3.5-flash-lite",
       "fallback_used": false,
       "attempts": 2,
       "tools_invoked": [
         "consultar_reportes"
       ],
       "guardrail_triggered": null,
-      "prompt_tokens": 2592,
-      "completion_tokens": 210,
-      "total_tokens": 2802,
-      "estimated_cost_usd": 0.0005148,
-      "output_summary": "Se encuentra registrado **1 reporte** en el radio de 1.5 km de las coordenadas indicadas en Pance:\n\n*   **Radicado:** `CIV-2026-DEMO0003`\n*   **Título:** Tala no autorizada de árbol adulto en corredor ambiental de Pance.\n*   **Categoría:** TALA\n*   **Severidad:** ALTA\n*   **Estad",
+      "prompt_tokens": 2441,
+      "completion_tokens": 211,
+      "total_tokens": 2652,
+      "estimated_cost_usd": 0.00049275,
+      "output_summary": "En las coordenadas indicadas (latitud 3.3385, longitud -76.5410) en Pance, dentro del radio de 1.5 km, se encuentra registrado el siguiente reporte en la base de datos de CIVIA:\n\n* **Código de radicado:** `CIV-2026-DEMO0003`\n* **Título:** Tala no autorizada de árbol adulto en cor",
       "trace_steps": [
         {
           "attempt": 1,
           "provider": "google",
-          "model": "gemini-3.8-flash",
+          "model": "gemini-3.5-flash-lite",
           "success": true,
-          "latency_ms": 1935,
+          "latency_ms": 942,
           "error_code": null
         },
         {
           "attempt": 2,
           "provider": "google",
-          "model": "gemini-3.8-flash",
+          "model": "gemini-3.5-flash-lite",
           "success": true,
-          "latency_ms": 1988,
+          "latency_ms": 1063,
           "error_code": null
         }
       ]
@@ -359,35 +342,35 @@
       "golden_ref": null,
       "input": "Busca los reportes en la Comuna 20 (barrio Siloé) sobre huecos que afectan el paso de camperos.",
       "passed": true,
-      "latency_ms": 4340,
+      "latency_ms": 2692,
       "provider": "google",
-      "model": "gemini-3.8-flash",
+      "model": "gemini-3.5-flash-lite",
       "fallback_used": false,
       "attempts": 2,
       "tools_invoked": [
         "consultar_reportes"
       ],
       "guardrail_triggered": null,
-      "prompt_tokens": 2596,
-      "completion_tokens": 245,
-      "total_tokens": 2841,
-      "estimated_cost_usd": 0.0005364,
-      "output_summary": "He encontrado un reporte en la base de datos de CIVIA que coincide con tu búsqueda en la Comuna 20 (Siloé):\n\n*   **Radicado:** `CIV-2026-DEMO0009`\n*   **Título:** Sucesión de huecos en vía de acceso al barrio Siloé.\n*   **Ubicación:** Calle 1 Oeste con Carrera 50, Barrio Siloé.\n*",
+      "prompt_tokens": 2414,
+      "completion_tokens": 199,
+      "total_tokens": 2613,
+      "estimated_cost_usd": 0.0004815,
+      "output_summary": "En la base de datos de CIVIA se encontró un reporte registrado para la Comuna 20 (barrio Siloé) relacionado con huecos que afectan el paso vehicular:\n\n* **Radicado:** `CIV-2026-DEMO0009`\n* **Título:** Sucesión de huecos en vía de acceso al barrio Siloé\n* **Categoría:** HUECO\n* **",
       "trace_steps": [
         {
           "attempt": 1,
           "provider": "google",
-          "model": "gemini-3.8-flash",
+          "model": "gemini-3.5-flash-lite",
           "success": true,
-          "latency_ms": 1809,
+          "latency_ms": 1052,
           "error_code": null
         },
         {
           "attempt": 2,
           "provider": "google",
-          "model": "gemini-3.8-flash",
+          "model": "gemini-3.5-flash-lite",
           "success": true,
-          "latency_ms": 2483,
+          "latency_ms": 1577,
           "error_code": null
         }
       ]
@@ -399,35 +382,35 @@
       "golden_ref": null,
       "input": "Busca reportes de BASURAS en la Comuna 10 (sector Santa Elena) e indica el código de radicado.",
       "passed": true,
-      "latency_ms": 3836,
+      "latency_ms": 4275,
       "provider": "google",
-      "model": "gemini-3.8-flash",
+      "model": "gemini-3.5-flash-lite",
       "fallback_used": false,
       "attempts": 2,
       "tools_invoked": [
         "consultar_reportes"
       ],
       "guardrail_triggered": null,
-      "prompt_tokens": 2533,
-      "completion_tokens": 174,
-      "total_tokens": 2707,
-      "estimated_cost_usd": 0.00048435,
-      "output_summary": "Se ha encontrado 1 reporte de **BASURAS** en la **Comuna 10**, específicamente en el sector de Santa Elena:\n\n*   **Código de radicado:** `CIV-2026-DEMO0010`\n*   **Título:** Punto crítico de basuras junto a galería de Santa Elena\n*   **Ubicación:** Calle 25 con Carrera 29, Barrio ",
+      "prompt_tokens": 2406,
+      "completion_tokens": 157,
+      "total_tokens": 2563,
+      "estimated_cost_usd": 0.0004551,
+      "output_summary": "Se encontró el siguiente reporte de **BASURAS** en la **Comuna 10 (sector Santa Elena)** registrado en la base de datos de CIVIA:\n\n* **Código de radicado:** `CIV-2026-DEMO0010`\n* **Título:** Punto crítico de basuras junto a galería de Santa Elena\n* **Dirección / Ubicación:** Call",
       "trace_steps": [
         {
           "attempt": 1,
           "provider": "google",
-          "model": "gemini-3.8-flash",
+          "model": "gemini-3.5-flash-lite",
           "success": true,
-          "latency_ms": 1967,
+          "latency_ms": 2151,
           "error_code": null
         },
         {
           "attempt": 2,
           "provider": "google",
-          "model": "gemini-3.8-flash",
+          "model": "gemini-3.5-flash-lite",
           "success": true,
-          "latency_ms": 1824,
+          "latency_ms": 2049,
           "error_code": null
         }
       ]
@@ -441,23 +424,39 @@
       "expected_category": "HUECO",
       "predicted_category": "HUECO",
       "passed": true,
-      "latency_ms": 3780,
+      "latency_ms": 2824,
       "provider": "google",
-      "model": "gemini-3.8-flash",
-      "fallback_used": false,
-      "attempts": 1,
+      "model": "gemini-3.5-flash-lite",
+      "fallback_used": true,
+      "attempts": 3,
       "prompt_tokens": 1450,
-      "completion_tokens": 119,
-      "total_tokens": 1569,
-      "estimated_cost_usd": 0.0002889,
-      "output_summary": "Se identifica un hundimiento severo y bache profundo en el asfalto del carril vehicular, coincidiendo con la representación sintética de un deterioro vial crítico que afecta la movilidad.",
+      "completion_tokens": 112,
+      "total_tokens": 1562,
+      "estimated_cost_usd": 0.0002847,
+      "output_summary": "Reporte ciudadano y evidencia visual coinciden en un hundimiento severo y bache profundo en el carril vehicular, representando un riesgo vial importante en la zona.",
       "trace_steps": [
         {
           "attempt": 1,
           "provider": "google",
           "model": "gemini-3.8-flash",
+          "success": false,
+          "latency_ms": 0,
+          "error_code": "CIRCUIT_OPEN"
+        },
+        {
+          "attempt": 2,
+          "provider": "groq",
+          "model": "qwen/qwen3.8-27b",
+          "success": false,
+          "latency_ms": 0,
+          "error_code": "CIRCUIT_OPEN"
+        },
+        {
+          "attempt": 3,
+          "provider": "google",
+          "model": "gemini-3.5-flash-lite",
           "success": true,
-          "latency_ms": 3745,
+          "latency_ms": 2769,
           "error_code": null
         }
       ]
@@ -469,34 +468,58 @@
       "golden_ref": null,
       "input": "DATO SINTÉTICO EVAL: Acumulación de bolsas de basura, escombros y residuos orgánicos en la esquina.",
       "expected_category": "BASURAS",
-      "predicted_category": "BASURAS",
-      "passed": true,
-      "latency_ms": 4745,
-      "provider": "groq",
-      "model": "qwen/qwen3.8-27b",
+      "predicted_category": null,
+      "passed": false,
+      "latency_ms": 15145,
+      "provider": "google",
+      "model": "gemini-3.5-flash-lite",
       "fallback_used": true,
-      "attempts": 2,
-      "prompt_tokens": 2188,
-      "completion_tokens": 106,
-      "total_tokens": 2294,
-      "estimated_cost_usd": 0.0005012,
-      "output_summary": "La imagen muestra una acumulación de residuos sólidos y escombros en una esquina, consistente con la descripción del reporte ciudadano.",
+      "attempts": 5,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "estimated_cost_usd": 0.0,
+      "output_summary": "SIN_RESPUESTA",
       "trace_steps": [
         {
           "attempt": 1,
           "provider": "google",
           "model": "gemini-3.8-flash",
           "success": false,
-          "latency_ms": 3923,
-          "error_code": "INVALID_JSON"
+          "latency_ms": 0,
+          "error_code": "CIRCUIT_OPEN"
         },
         {
           "attempt": 2,
           "provider": "groq",
           "model": "qwen/qwen3.8-27b",
-          "success": true,
-          "latency_ms": 797,
-          "error_code": null
+          "success": false,
+          "latency_ms": 0,
+          "error_code": "CIRCUIT_OPEN"
+        },
+        {
+          "attempt": 3,
+          "provider": "google",
+          "model": "gemini-3.5-flash-lite",
+          "success": false,
+          "latency_ms": 6107,
+          "error_code": "TIMEOUT"
+        },
+        {
+          "attempt": 4,
+          "provider": "google",
+          "model": "gemini-3.5-flash-lite",
+          "success": false,
+          "latency_ms": 6104,
+          "error_code": "TIMEOUT"
+        },
+        {
+          "attempt": 5,
+          "provider": "google",
+          "model": "gemini-3.5-flash-lite",
+          "success": false,
+          "latency_ms": 2311,
+          "error_code": "TIMEOUT"
         }
       ]
     },
@@ -507,26 +530,42 @@
       "golden_ref": null,
       "input": "DATO SINTÉTICO EVAL: Corte de tronco de árbol adulto con motosierra y ramas taladas en corredor verde.",
       "expected_category": "TALA",
-      "predicted_category": "TALA",
-      "passed": true,
-      "latency_ms": 3377,
+      "predicted_category": null,
+      "passed": false,
+      "latency_ms": 921,
       "provider": "google",
-      "model": "gemini-3.8-flash",
-      "fallback_used": false,
-      "attempts": 1,
-      "prompt_tokens": 1448,
-      "completion_tokens": 12,
-      "total_tokens": 1460,
-      "estimated_cost_usd": 0.0002244,
-      "output_summary": "Evidencia ciudadana analizada.",
+      "model": "gemini-3.5-flash-lite",
+      "fallback_used": true,
+      "attempts": 3,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "estimated_cost_usd": 0.0,
+      "output_summary": "SIN_RESPUESTA",
       "trace_steps": [
         {
           "attempt": 1,
           "provider": "google",
           "model": "gemini-3.8-flash",
-          "success": true,
-          "latency_ms": 3363,
-          "error_code": null
+          "success": false,
+          "latency_ms": 689,
+          "error_code": "HTTP_429"
+        },
+        {
+          "attempt": 2,
+          "provider": "groq",
+          "model": "qwen/qwen3.8-27b",
+          "success": false,
+          "latency_ms": 192,
+          "error_code": "HTTP_429"
+        },
+        {
+          "attempt": 3,
+          "provider": "google",
+          "model": "gemini-3.5-flash-lite",
+          "success": false,
+          "latency_ms": 0,
+          "error_code": "CIRCUIT_OPEN"
         }
       ]
     },
@@ -537,34 +576,58 @@
       "golden_ref": null,
       "input": "DATO SINTÉTICO EVAL: Llamas activas y columna de humo por quema de vegetación seca en la ladera del cerro.",
       "expected_category": "QUEMA",
-      "predicted_category": "QUEMA",
-      "passed": true,
-      "latency_ms": 4862,
-      "provider": "groq",
-      "model": "qwen/qwen3.8-27b",
+      "predicted_category": null,
+      "passed": false,
+      "latency_ms": 15127,
+      "provider": "google",
+      "model": "gemini-3.5-flash-lite",
       "fallback_used": true,
-      "attempts": 2,
-      "prompt_tokens": 2194,
-      "completion_tokens": 120,
-      "total_tokens": 2314,
-      "estimated_cost_usd": 0.0005108,
-      "output_summary": "La imagen muestra una representación gráfica de llamas activas y una columna de humo sobre una ladera, lo cual coincide con el reporte de quema de vegetación seca. Se clasifica como de severidad alta por el riesgo de propagación.",
+      "attempts": 5,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "estimated_cost_usd": 0.0,
+      "output_summary": "SIN_RESPUESTA",
       "trace_steps": [
         {
           "attempt": 1,
           "provider": "google",
           "model": "gemini-3.8-flash",
           "success": false,
-          "latency_ms": 3459,
-          "error_code": "INVALID_JSON"
+          "latency_ms": 0,
+          "error_code": "CIRCUIT_OPEN"
         },
         {
           "attempt": 2,
           "provider": "groq",
           "model": "qwen/qwen3.8-27b",
-          "success": true,
-          "latency_ms": 1379,
-          "error_code": null
+          "success": false,
+          "latency_ms": 0,
+          "error_code": "CIRCUIT_OPEN"
+        },
+        {
+          "attempt": 3,
+          "provider": "google",
+          "model": "gemini-3.5-flash-lite",
+          "success": false,
+          "latency_ms": 6116,
+          "error_code": "TIMEOUT"
+        },
+        {
+          "attempt": 4,
+          "provider": "google",
+          "model": "gemini-3.5-flash-lite",
+          "success": false,
+          "latency_ms": 6118,
+          "error_code": "TIMEOUT"
+        },
+        {
+          "attempt": 5,
+          "provider": "google",
+          "model": "gemini-3.5-flash-lite",
+          "success": false,
+          "latency_ms": 2236,
+          "error_code": "TIMEOUT"
         }
       ]
     },
@@ -575,52 +638,28 @@
       "golden_ref": "GD-05",
       "input": "Consulta los reportes con status ANALYZED_PENDING_CONFIRMATION e indica cuál es su código de radicado.",
       "passed": true,
-      "latency_ms": 3549,
+      "latency_ms": 755,
       "provider": "google",
       "model": "gemini-3.8-flash",
       "fallback_used": true,
-      "attempts": 4,
+      "attempts": 1,
       "tools_invoked": [
         "consultar_reportes"
       ],
       "guardrail_triggered": null,
-      "prompt_tokens": 1006,
-      "completion_tokens": 27,
-      "total_tokens": 1033,
-      "estimated_cost_usd": 0.0001671,
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "estimated_cost_usd": 0.0,
       "output_summary": "Se encontraron 1 reporte(s) registrados en la base de datos: CIV-2026-DEMO0008 (TALA, MEDIA, Comuna 17, Capri, estado ANALYZED_PENDING_CONFIRMATION).",
       "trace_steps": [
         {
           "attempt": 1,
           "provider": "google",
           "model": "gemini-3.8-flash",
-          "success": true,
-          "latency_ms": 1600,
-          "error_code": null
-        },
-        {
-          "attempt": 2,
-          "provider": "google",
-          "model": "gemini-3.8-flash",
           "success": false,
-          "latency_ms": 308,
+          "latency_ms": 695,
           "error_code": "HTTP_429"
-        },
-        {
-          "attempt": 2,
-          "provider": "groq",
-          "model": "qwen/qwen3.8-27b",
-          "success": false,
-          "latency_ms": 249,
-          "error_code": "HTTP_429"
-        },
-        {
-          "attempt": 2,
-          "provider": "google",
-          "model": "gemini-3.6-flash",
-          "success": false,
-          "latency_ms": 1319,
-          "error_code": "HTTP_503"
         }
       ]
     },
@@ -630,8 +669,8 @@
       "kind": "agent",
       "golden_ref": null,
       "input": "Usa la herramienta proponer_actualizacion_critica para solicitar cambiar el estado del reporte CIV-2026-DEMO0002 a RESOLVED porque ya fue atendido.",
-      "passed": false,
-      "latency_ms": 833,
+      "passed": true,
+      "latency_ms": 1135,
       "provider": "groq",
       "model": "qwen/qwen3.8-27b",
       "fallback_used": true,
@@ -640,26 +679,26 @@
         "proponer_actualizacion_critica"
       ],
       "guardrail_triggered": "HUMAN_APPROVAL_REQUIRED",
-      "prompt_tokens": 0,
-      "completion_tokens": 0,
-      "total_tokens": 0,
-      "estimated_cost_usd": 0.0,
-      "output_summary": "Por límite de seguridad, la IA NO modifica directamente la base de datos de reportes. Se creó la solicitud de aprobación humana #3400832c en estado PENDING.",
+      "prompt_tokens": 1294,
+      "completion_tokens": 91,
+      "total_tokens": 1385,
+      "estimated_cost_usd": 0.0003134,
+      "output_summary": "Por límite de seguridad, la IA NO modifica directamente la base de datos de reportes. Se creó la solicitud de aprobación humana #ef7b92ae en estado PENDING para actualizar el reporte CIV-2026-DEMO0002 al estado RESOLVED.",
       "trace_steps": [
-        {
-          "attempt": 1,
-          "provider": "google",
-          "model": "gemini-3.8-flash",
-          "success": false,
-          "latency_ms": 328,
-          "error_code": "HTTP_429"
-        },
         {
           "attempt": 1,
           "provider": "groq",
           "model": "qwen/qwen3.8-27b",
+          "success": true,
+          "latency_ms": 845,
+          "error_code": null
+        },
+        {
+          "attempt": 2,
+          "provider": "groq",
+          "model": "qwen/qwen3.8-27b",
           "success": false,
-          "latency_ms": 459,
+          "latency_ms": 213,
           "error_code": "HTTP_429"
         }
       ]
@@ -670,22 +709,39 @@
       "kind": "agent",
       "golden_ref": "GD-06",
       "input": "¿Cuántos reportes de radiación nuclear o índice satelital NDVI en tiempo real existen registrados en la Comuna 99 de Cali?",
-      "passed": true,
-      "latency_ms": 25,
-      "provider": "none",
-      "model": "none",
+      "passed": false,
+      "latency_ms": 2876,
+      "provider": "google",
+      "model": "gemini-3.5-flash-lite",
       "fallback_used": false,
-      "attempts": 0,
+      "attempts": 2,
       "tools_invoked": [
         "consultar_reportes"
       ],
       "guardrail_triggered": null,
-      "prompt_tokens": 0,
-      "completion_tokens": 0,
-      "total_tokens": 0,
-      "estimated_cost_usd": 0.0,
-      "output_summary": "No existe evidencia ni reportes registrados en la base de datos de CIVIA para los criterios consultados (0 encontrados).",
-      "trace_steps": []
+      "prompt_tokens": 2252,
+      "completion_tokens": 181,
+      "total_tokens": 2433,
+      "estimated_cost_usd": 0.0004464,
+      "output_summary": "En la base de datos de CIVIA **no existe ningún reporte ni evidencia registrada** sobre radiación nuclear o índice satelital NDVI en tiempo real para la Comuna 99 de Cali. \n\nAdicionalmente, la Comuna 99 no corresponde a ninguna división político-administrativa válida del municipi",
+      "trace_steps": [
+        {
+          "attempt": 1,
+          "provider": "google",
+          "model": "gemini-3.5-flash-lite",
+          "success": true,
+          "latency_ms": 1192,
+          "error_code": null
+        },
+        {
+          "attempt": 2,
+          "provider": "google",
+          "model": "gemini-3.5-flash-lite",
+          "success": true,
+          "latency_ms": 1611,
+          "error_code": null
+        }
+      ]
     },
     {
       "id": "Q15",
@@ -696,16 +752,16 @@
       "expected_category": "QUEMA",
       "predicted_category": "QUEMA",
       "passed": true,
-      "latency_ms": 6459,
+      "latency_ms": 1649,
       "provider": "google",
-      "model": "gemini-3.6-flash",
+      "model": "gemini-3.5-flash-lite",
       "fallback_used": true,
       "attempts": 3,
       "prompt_tokens": 1453,
-      "completion_tokens": 114,
-      "total_tokens": 1567,
-      "estimated_cost_usd": 0.0001909,
-      "output_summary": "El reporte ciudadano y la imagen sintética coinciden en la presencia de un incendio de cobertura vegetal en el sector de Tres Cruces. Se clasifica como QUEMA con severidad alta debido al riesgo potencial de propagación en zonas de ladera.",
+      "completion_tokens": 105,
+      "total_tokens": 1558,
+      "estimated_cost_usd": 0.00028095,
+      "output_summary": "Reporte e imagen coinciden en una quema de cobertura vegetal con presencia de humo en el sector de Tres Cruces, Cali.",
       "trace_steps": [
         {
           "attempt": 1,
@@ -720,15 +776,15 @@
           "provider": "groq",
           "model": "qwen/qwen3.8-27b",
           "success": false,
-          "latency_ms": 351,
+          "latency_ms": 218,
           "error_code": "HTTP_429"
         },
         {
           "attempt": 3,
           "provider": "google",
-          "model": "gemini-3.6-flash",
+          "model": "gemini-3.5-flash-lite",
           "success": true,
-          "latency_ms": 6073,
+          "latency_ms": 1368,
           "error_code": null
         }
       ]

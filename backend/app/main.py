@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, Upload
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.agent import decide_pending_approval, list_pending_approvals, run_civia_agent
 from app.ai_router import (
@@ -48,6 +49,7 @@ from app.schemas import (
 )
 from app.security import (
     CitizenValidationError,
+    get_trusted_client_ip,
     rate_limiter,
     sanitize_text,
     validate_and_store_audio,
@@ -170,7 +172,7 @@ async def create_citizen_report(
     audio: UploadFile | None = File(default=None),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_trusted_client_ip(request)
     rate_limiter.check(client_ip)
 
     clean_desc = sanitize_text(
@@ -235,19 +237,20 @@ async def create_citizen_report(
 
     written_files: list[Path] = []
     try:
-        photo_meta = validate_and_store_photo(raw_photo, declared_filename=photo.filename)
+        photo_meta = await run_in_threadpool(validate_and_store_photo, raw_photo, declared_filename=photo.filename)
         written_files.append(settings.UPLOAD_DIR / Path(photo_meta["photo_path"]).name)
 
         audio_meta = None
         audio_transcript = None
         if raw_audio:
-            audio_meta = validate_and_store_audio(
-                raw_audio, declared_filename=audio.filename if audio else None
+            audio_meta = await run_in_threadpool(
+                validate_and_store_audio, raw_audio, declared_filename=audio.filename if audio else None
             )
             written_files.append(settings.UPLOAD_DIR / Path(audio_meta["audio_path"]).name)
             if auto_analyze:
                 try:
-                    audio_transcript = transcribe_audio_optional(
+                    audio_transcript = await run_in_threadpool(
+                        transcribe_audio_optional,
                         raw_audio,
                         audio.filename if audio and audio.filename else "audio.wav",
                         audio_meta["audio_mime"],
@@ -270,7 +273,7 @@ async def create_citizen_report(
             "idempotency_key": eff_idem_key,
             "request_fingerprint": req_fingerprint,
         }
-        row = create_report(**create_kwargs)
+        row = await run_in_threadpool(create_report, **create_kwargs)
     except Exception:
         for orphan_file in written_files:
             orphan_file.unlink(missing_ok=True)
@@ -289,7 +292,8 @@ async def create_citizen_report(
             stored_photo_bytes = (
                 safe_photo_file.read_bytes() if safe_photo_file.exists() else raw_photo
             )
-            contract, _ = classify_evidence_with_router(
+            contract, _ = await run_in_threadpool(
+                classify_evidence_with_router,
                 description=clean_desc,
                 latitude=lat,
                 longitude=lon,
@@ -300,7 +304,8 @@ async def create_citizen_report(
                 report_id=row["id"],
             )
             if contract is not None:
-                updated = update_report_ai_analysis(
+                updated = await run_in_threadpool(
+                    update_report_ai_analysis,
                     row["id"],
                     ai_category=contract.category,
                     ai_severity=contract.severity,
@@ -325,7 +330,7 @@ async def create_citizen_report(
 
 @app.post("/api/reports/{report_id}/analyze", response_model=ReportPublicResponse)
 def analyze_existing_report(request: Request, report_id: UUID):
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_trusted_client_ip(request)
     rate_limiter.check(f"analyze:{client_ip}")
     row = get_report_raw(report_id)
     if not row:
@@ -520,7 +525,7 @@ def change_report_status(report_id: UUID, payload: ReportStatusUpdateRequest):
 
 @app.post("/api/agent/query", response_model=AgentQueryResponse)
 def query_civia_agent(request: Request, payload: AgentQueryRequest):
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_trusted_client_ip(request)
     rate_limiter.check(f"agent:{client_ip}")
     clean_q = sanitize_text(
         payload.query,

@@ -101,8 +101,8 @@ class ReportListResponse(BaseModel):
 
 class AgentQueryRequest(BaseModel):
     query: str = Field(min_length=3, max_length=1000)
-    max_iterations: int | None = Field(default=None, ge=1, le=10)
-    max_tokens_budget: int | None = Field(default=None, ge=50, le=20000)
+    max_iterations: int | None = Field(default=None, ge=1, le=5)
+    max_tokens_budget: int | None = Field(default=None, ge=50, le=6000)
     tool_timeout_seconds: float | None = Field(default=None, gt=0.05, le=15.0)
     total_timeout_seconds: float | None = Field(default=None, gt=0.1, le=30.0)
 

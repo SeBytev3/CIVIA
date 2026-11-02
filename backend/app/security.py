@@ -1,6 +1,7 @@
 from collections import defaultdict, deque
 import hashlib
 import io
+import ipaddress
 import math
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import wave
 from typing import Any
 
 from PIL import Image, UnidentifiedImageError
+from starlette.requests import Request
 
 from app.config import settings
 
@@ -213,12 +215,60 @@ def _detect_audio_magic(raw_bytes: bytes) -> tuple[str, str] | None:
         return ("audio/ogg", "ogg")
     if len(raw_bytes) >= 64 and raw_bytes.startswith(b"\x1a\x45\xdf\xa3"):
         return ("audio/webm", "webm")
-    if len(raw_bytes) >= 64 and (
+    if len(raw_bytes) >= 10 and (
         (raw_bytes.startswith(b"ID3") and raw_bytes[3] <= 4)
         or (raw_bytes[0] == 0xFF and (raw_bytes[1] & 0xE0) == 0xE0)
     ):
         return ("audio/mpeg", "mp3")
     return None
+
+
+def _validate_mp3_payload(raw_bytes: bytes) -> tuple[int, float]:
+    """
+    Verifica que el archivo contenga tramas de audio MP3 reales más allá del encabezado ID3 (M-01).
+    Retorna (tamaño_payload_audio, duracion_estimada_segundos).
+    """
+    offset = 0
+    if raw_bytes.startswith(b"ID3") and len(raw_bytes) >= 10:
+        ver = raw_bytes[3]
+        if ver > 4:
+            raise CitizenValidationError("Versión de ID3 no compatible.", status_code=415, code="INVALID_AUDIO")
+        tag_size = (
+            ((raw_bytes[6] & 0x7F) << 21)
+            | ((raw_bytes[7] & 0x7F) << 14)
+            | ((raw_bytes[8] & 0x7F) << 7)
+            | (raw_bytes[9] & 0x7F)
+        )
+        offset = 10 + tag_size
+        if raw_bytes[5] & 0x10:
+            offset += 10
+
+    payload = raw_bytes[offset:]
+    if len(payload) < 256:
+        raise CitizenValidationError(
+            "El archivo de audio no contiene tramas de audio válidas (payload insuficiente).",
+            status_code=415,
+            code="INVALID_AUDIO",
+        )
+
+    # Buscar sincronización de trama MPEG (11 bits en 1: 0xFF seguido de (byte & 0xE0) == 0xE0)
+    has_sync = False
+    for i in range(min(len(payload) - 1, 4096)):
+        if payload[i] == 0xFF and (payload[i + 1] & 0xE0) == 0xE0:
+            layer_bits = (payload[i + 1] >> 1) & 0x03
+            if layer_bits != 0:
+                has_sync = True
+                break
+
+    if not has_sync:
+        raise CitizenValidationError(
+            "El archivo de audio no contiene tramas de audio MP3 reproducibles.",
+            status_code=415,
+            code="INVALID_AUDIO",
+        )
+
+    duration = round(max(0.1, len(payload) / 16000.0), 2)
+    return len(payload), duration
 
 
 def validate_and_store_audio(
@@ -252,16 +302,22 @@ def validate_and_store_audio(
             with wave.open(io.BytesIO(raw_bytes), "rb") as wf:
                 frames = wf.getnframes()
                 rate = wf.getframerate()
-                if rate <= 0:
-                    raise CitizenValidationError("Audio WAV con frecuencia de muestreo inválida.")
+                if rate <= 0 or frames <= 0:
+                    raise CitizenValidationError("Audio WAV sin tramas de audio reproducibles.", status_code=415)
                 duration_seconds = round(frames / float(rate), 2)
+                if duration_seconds < 0.1:
+                    raise CitizenValidationError("Audio WAV con duración inferior al mínimo reproducible.", status_code=415)
         except CitizenValidationError:
             raise
         except Exception as exc:
             raise CitizenValidationError("El archivo WAV está corrupto o es inválido.", status_code=415) from exc
+    elif ext == "mp3":
+        _, duration_seconds = _validate_mp3_payload(raw_bytes)
     else:
-        # Estimación conservadora para audio comprimido (~16 KB/s a 128 kbps)
-        duration_seconds = round(max(1.0, len(raw_bytes) / 16000.0), 2)
+        # Para OGG / WEBM verificar que no sean archivos vacíos o de solo relleno
+        if len(raw_bytes) < 512:
+            raise CitizenValidationError("El archivo de audio comprimido no contiene datos suficientes.", status_code=415)
+        duration_seconds = round(max(0.1, len(raw_bytes) / 16000.0), 2)
 
     if duration_seconds > settings.MAX_AUDIO_DURATION_SECONDS:
         raise CitizenValidationError(
@@ -280,6 +336,50 @@ def validate_and_store_audio(
         "audio_size_bytes": len(raw_bytes),
         "audio_duration_seconds": max(0.1, duration_seconds),
     }
+
+
+_TRUSTED_PROXY_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+]
+
+
+def is_trusted_proxy_ip(ip_str: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(ip_str.strip())
+        return any(ip in net for net in _TRUSTED_PROXY_NETWORKS)
+    except ValueError:
+        return False
+
+
+def get_trusted_client_ip(request: Request) -> str:
+    """
+    Resuelve de forma segura la IP real del cliente evitando spoofing (M-06).
+    Si la conexión proviene de un proxy inverso confiable (Nginx local o red de Docker),
+    extrae la IP del cliente de la cabecera X-Forwarded-For o X-Real-IP.
+    Si la conexión no proviene de un proxy confiable, usa la IP del peer directamente.
+    """
+    peer_ip = request.client.host if request.client else "unknown"
+    if not is_trusted_proxy_ip(peer_ip):
+        return peer_ip
+
+    xff = request.headers.get("x-forwarded-for")
+    if xff:
+        parts = [p.strip() for p in xff.split(",") if p.strip()]
+        for cand in reversed(parts):
+            if not is_trusted_proxy_ip(cand):
+                return cand
+        if parts:
+            return parts[0]
+
+    x_real = request.headers.get("x-real-ip")
+    if x_real and x_real.strip():
+        return x_real.strip()
+
+    return peer_ip
 
 
 class RateLimiter:

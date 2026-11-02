@@ -1,7 +1,9 @@
 from contextlib import contextmanager
+import contextvars
 import logging
 from pathlib import Path
 import re
+import time
 from typing import Any, Generator
 from urllib.parse import urlparse, urlunparse
 
@@ -14,6 +16,19 @@ from app.config import settings
 logger = logging.getLogger("civia.db")
 
 _SAFE_DB_NAME_RE = re.compile(r"^[a-zA-Z0-9_]+$")
+_CURRENT_DEADLINE: contextvars.ContextVar[float | None] = contextvars.ContextVar("_CURRENT_DEADLINE", default=None)
+
+
+def set_deadline_context(deadline: float | None) -> contextvars.Token[float | None]:
+    return _CURRENT_DEADLINE.set(deadline)
+
+
+def reset_deadline_context(token: contextvars.Token[float | None]) -> None:
+    _CURRENT_DEADLINE.reset(token)
+
+
+def get_deadline_context() -> float | None:
+    return _CURRENT_DEADLINE.get()
 
 
 def get_database_name(db_url: str | None = None) -> str:
@@ -76,10 +91,47 @@ def ensure_isolated_database(target_db_name: str = "civia_test", base_url: str |
     return target_url
 
 
+def checked_commit(conn: psycopg.Connection[Any]) -> None:
+    dl_check = get_deadline_context()
+    if dl_check is not None and time.monotonic() >= dl_check:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
+    conn.commit()
+
+
 @contextmanager
-def get_conn() -> Generator[psycopg.Connection[ dict[str, Any]], None, None]:
+def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Connection[dict[str, Any]], None, None]:
+    dl = get_deadline_context()
+    if dl is not None:
+        rem_sec = dl - time.monotonic()
+        if rem_sec <= 0:
+            raise TimeoutError("Deadline de base de datos expirado antes de abrir conexión.")
+        if statement_timeout_ms is None:
+            statement_timeout_ms = max(10, int(rem_sec * 1000))
+
     conn = psycopg.connect(settings.DATABASE_URL, row_factory=dict_row, connect_timeout=5)
+    orig_commit = conn.commit
+
+    def _wrapped_commit() -> None:
+        dl_check = get_deadline_context()
+        if dl_check is not None and time.monotonic() >= dl_check:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
+        return orig_commit()
+
+    conn.commit = _wrapped_commit  # type: ignore[assignment]
+
     try:
+        if statement_timeout_ms is not None:
+            with conn.cursor() as cur:
+                cur.execute(f"SET LOCAL statement_timeout = {int(statement_timeout_ms)};")
+                cur.execute(f"SET LOCAL lock_timeout = {int(statement_timeout_ms)};")
         yield conn
     finally:
         conn.close()

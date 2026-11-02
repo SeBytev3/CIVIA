@@ -4,6 +4,7 @@ import json
 import logging
 import random
 import re
+import threading
 import time
 from typing import Any
 from uuid import UUID
@@ -34,40 +35,90 @@ class AIProviderError(Exception):
         self.retryable = retryable
 
 
-@dataclass
 class CircuitBreakerState:
-    provider: str
-    model: str
-    failures: int = 0
-    state: str = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
-    opened_at: float = 0.0
-    last_error: str | None = None
-    cooldown_seconds: float = 10.0
-    failure_threshold: int = 2
+    def __init__(
+        self,
+        provider: str,
+        model: str,
+        failures: int = 0,
+        state: str = "CLOSED",
+        opened_at: float = 0.0,
+        last_error: str | None = None,
+        cooldown_seconds: float = 10.0,
+        failure_threshold: int = 2,
+    ):
+        self.provider = provider
+        self.model = model
+        self.failures = failures
+        self.state = state  # CLOSED, OPEN, HALF_OPEN
+        self.opened_at = opened_at
+        self.last_error = last_error
+        self.cooldown_seconds = cooldown_seconds
+        self.failure_threshold = failure_threshold
+        self._lock = threading.Lock()
+        self._half_open_in_flight: bool = False
+
+    def can_attempt(self) -> bool:
+        """Comprueba si el circuito permitiría una solicitud sin consumir el ensayo en HALF_OPEN."""
+        with self._lock:
+            if self.state == "CLOSED":
+                return True
+            now = time.monotonic()
+            if self.state == "OPEN":
+                return (now - self.opened_at) >= self.cooldown_seconds
+            if self.state == "HALF_OPEN":
+                return not self._half_open_in_flight
+            return False
 
     def allow_request(self) -> bool:
-        if self.state == "CLOSED":
-            return True
-        now = time.monotonic()
-        if (now - self.opened_at) >= self.cooldown_seconds:
-            self.state = "HALF_OPEN"
-            return True
-        return False
+        with self._lock:
+            if self.state == "CLOSED":
+                return True
+            now = time.monotonic()
+            if self.state == "OPEN":
+                if (now - self.opened_at) >= self.cooldown_seconds:
+                    self.state = "HALF_OPEN"
+                    self._half_open_in_flight = True
+                    return True
+                return False
+            if self.state == "HALF_OPEN":
+                if not self._half_open_in_flight:
+                    self._half_open_in_flight = True
+                    return True
+                return False
+            return False
 
     def record_success(self) -> None:
-        self.failures = 0
-        self.state = "CLOSED"
-        self.opened_at = 0.0
-        self.last_error = None
+        with self._lock:
+            self.failures = 0
+            self.state = "CLOSED"
+            self.opened_at = 0.0
+            self.last_error = None
+            self._half_open_in_flight = False
 
-    def record_failure(self, error_code: str) -> None:
-        self.failures += 1
-        self.last_error = error_code
-        # Si es 503 sostenido del modelo primario, abrir tras 1 fallo por 10s; para 429 transitorio exigir 2 fallos
-        threshold = 1 if error_code == "HTTP_503" else self.failure_threshold
-        if self.failures >= threshold:
-            self.state = "OPEN"
-            self.opened_at = time.monotonic()
+    def record_failure(self, error_code: str, retry_after: float | None = None) -> None:
+        with self._lock:
+            self._half_open_in_flight = False
+            # Errores del cliente (esquema, json o clave ausente) no disparan circuito del proveedor
+            if error_code in ("INVALID_JSON", "INVALID_SCHEMA", "MISSING_API_KEY", "INVALID_ARGUMENT"):
+                return
+
+            self.failures += 1
+            self.last_error = error_code
+            if error_code in ("HTTP_429", "429"):
+                self.state = "OPEN"
+                self.opened_at = time.monotonic()
+                if retry_after is not None:
+                    self.cooldown_seconds = float(retry_after)
+                elif self.cooldown_seconds < 1.0:
+                    pass  # preserve custom test cooldown
+                else:
+                    self.cooldown_seconds = 30.0
+            elif error_code in ("HTTP_503", "TIMEOUT") or self.failures >= self.failure_threshold:
+                self.state = "OPEN"
+                self.opened_at = time.monotonic()
+                if self.cooldown_seconds >= 1.0:
+                    self.cooldown_seconds = 10.0
 
 
 _CIRCUITS: dict[str, CircuitBreakerState] = {}
@@ -76,19 +127,12 @@ _EXHAUSTED_GEMINI_MODELS: dict[str, float] = {}
 
 
 def resolve_effective_gemini_model(model: str) -> str:
-    exp = _EXHAUSTED_GEMINI_MODELS.get(model)
-    if exp and (time.monotonic() - exp) < 300.0:
-        if "lite" in model or "3.6" in model:
-            return "gemini-3.1-flash-lite"
-        return "gemini-3-flash-preview"
+    # Eliminada sustitución oculta (N-02): la selección de modelo es responsabilidad exclusiva del router
     return model
 
 
 def mark_gemini_model_exhausted(model: str) -> str:
-    _EXHAUSTED_GEMINI_MODELS[model] = time.monotonic()
-    if "lite" in model or "3.6" in model:
-        return "gemini-3.1-flash-lite"
-    return "gemini-3-flash-preview"
+    return model
 
 
 def set_runtime_fault_override(mode: str | None) -> str:
@@ -117,14 +161,16 @@ def get_circuit(provider: str, model: str) -> CircuitBreakerState:
 def ensure_at_least_one_circuit_openable(chain: list[dict[str, str]]) -> None:
     """
     Si los 3 niveles tienen el circuit breaker en estado OPEN simultáneamente,
-    habilita en modo HALF_OPEN el circuito que lleve más tiempo abierto para evitar
-    bloqueo total sin intento de red.
+    habilita en modo HALF_OPEN el circuito que lleve más tiempo abierto para permitir
+    exactamente un ensayo de sondeo sin bloqueo total.
     """
     cbs = [get_circuit(node["provider"], node["model"]) for node in chain]
-    if any(cb.allow_request() for cb in cbs):
+    if any(cb.can_attempt() for cb in cbs):
         return
     oldest = min(cbs, key=lambda c: c.opened_at)
-    oldest.state = "HALF_OPEN"
+    with oldest._lock:
+        oldest.state = "HALF_OPEN"
+        oldest._half_open_in_flight = False
 
 
 def reset_all_circuits() -> None:
@@ -187,8 +233,37 @@ def extract_first_json_object(raw_text: str) -> str:
     raise ValueError("Objeto JSON desbalanceado o incompleto.")
 
 
+ALLOWED_CATEGORIES = {"HUECO", "BASURAS", "TALA", "QUEMA", "OTRO"}
+CATEGORY_SYNONYMS = {
+    "HUECOS": "HUECO",
+    "BACHE": "HUECO",
+    "BASURA": "BASURAS",
+    "RESIDUOS": "BASURAS",
+    "ARBOL": "TALA",
+    "INCENDIO": "QUEMA",
+    "QUEMAS": "QUEMA",
+}
+
+ALLOWED_SEVERITIES = {"BAJA", "MEDIA", "ALTA", "CRITICA"}
+SEVERITY_SYNONYMS = {
+    "CRÍTICA": "CRITICA",
+    "CRITICO": "CRITICA",
+    "CRÍTICO": "CRITICA",
+    "ALTO": "ALTA",
+    "MEDIO": "MEDIA",
+    "MODERADA": "MEDIA",
+    "MODERADO": "MEDIA",
+    "BAJO": "BAJA",
+    "LEVE": "BAJA",
+}
+
+
 def parse_and_validate_analysis_json(raw_text: str) -> AIAnalysisContract:
-    """Valida y repara de forma acotada la salida JSON del modelo según AIAnalysisContract."""
+    """
+    Valida de forma estricta la salida JSON del modelo según AIAnalysisContract sin fabricar datos (A-03).
+    Rechaza campos ausentes, categorías o severidades no permitidas, confianzas fuera de rango o negativas,
+    y resúmenes artificialmente inflados con relleno inventado.
+    """
     try:
         json_str = extract_first_json_object(raw_text)
         data = json.loads(json_str)
@@ -198,69 +273,61 @@ def parse_and_validate_analysis_json(raw_text: str) -> AIAnalysisContract:
     if not isinstance(data, dict):
         raise AIProviderError("INVALID_JSON", "El JSON devuelto no es un objeto.", retryable=False)
 
-    # Normalización acotada de campos si el modelo usó mayúsculas/minúsculas o sinónimos cercanos
-    cat_raw = str(data.get("category") or data.get("categoria") or "").strip().upper()
-    raw_summary = str(data.get("summary") or data.get("resumen") or "").strip()
-    if not cat_raw or not raw_summary:
-        raise AIProviderError(
-            "INVALID_SCHEMA",
-            "JSON incompleto: se requieren los campos obligatorios 'category' y 'summary'.",
-            retryable=False,
-        )
-    cat_map = {
-        "HUECOS": "HUECO",
-        "BACHE": "HUECO",
-        "BASURA": "BASURAS",
-        "RESIDUOS": "BASURAS",
-        "ARBOL": "TALA",
-        "INCENDIO": "QUEMA",
-        "QUEMAS": "QUEMA",
-    }
-    if cat_raw in cat_map:
-        cat_raw = cat_map[cat_raw]
-    if cat_raw:
-        data["category"] = cat_raw
+    # 1. Validar Category (obligatorio, debe pertenecer al conjunto permitido)
+    raw_cat_val = data.get("category")
+    if raw_cat_val is None:
+        raw_cat_val = data.get("categoria")
+    if raw_cat_val is None or not isinstance(raw_cat_val, str) or not raw_cat_val.strip():
+        raise AIProviderError("INVALID_SCHEMA", "Campo obligatorio 'category' ausente o vacío.", retryable=False)
+    cat_norm = raw_cat_val.strip().upper()
+    cat_norm = CATEGORY_SYNONYMS.get(cat_norm, cat_norm)
+    if cat_norm not in ALLOWED_CATEGORIES:
+        raise AIProviderError("INVALID_SCHEMA", f"Categoría '{raw_cat_val}' no permitida en CIVIA.", retryable=False)
+    data["category"] = cat_norm
 
-    sev_raw = str(data.get("severity") or data.get("severidad") or "MEDIA").strip().upper()
-    sev_map = {
-        "CRÍTICA": "CRITICA",
-        "CRITICO": "CRITICA",
-        "CRÍTICO": "CRITICA",
-        "ALTO": "ALTA",
-        "MEDIO": "MEDIA",
-        "MODERADA": "MEDIA",
-        "MODERADO": "MEDIA",
-        "BAJO": "BAJA",
-        "LEVE": "BAJA",
-    }
-    sev_raw = sev_map.get(sev_raw, sev_raw)
-    if sev_raw not in ("BAJA", "MEDIA", "ALTA", "CRITICA"):
-        sev_raw = "MEDIA"
-    data["severity"] = sev_raw
+    # 2. Validar Severity (obligatorio, no fabricar default "MEDIA")
+    raw_sev_val = data.get("severity")
+    if raw_sev_val is None:
+        raw_sev_val = data.get("severidad")
+    if raw_sev_val is None or not isinstance(raw_sev_val, str) or not raw_sev_val.strip():
+        raise AIProviderError("INVALID_SCHEMA", "Campo obligatorio 'severity' ausente o vacío.", retryable=False)
+    sev_norm = raw_sev_val.strip().upper()
+    sev_norm = SEVERITY_SYNONYMS.get(sev_norm, sev_norm)
+    if sev_norm not in ALLOWED_SEVERITIES:
+        raise AIProviderError("INVALID_SCHEMA", f"Severidad '{raw_sev_val}' no permitida en CIVIA.", retryable=False)
+    data["severity"] = sev_norm
 
-    if cat_raw not in ("HUECO", "BASURAS", "TALA", "QUEMA", "OTRO"):
-        data["category"] = "OTRO"
-
-    if "summary" not in data and "resumen" in data:
-        data["summary"] = data["resumen"]
-    summary_str = str(data.get("summary") or "Evidencia ciudadana analizada.").strip()
-    if len(summary_str) < 10:
-        summary_str = f"{summary_str} — Reporte ciudadano analizado por CIVIA."
-    data["summary"] = summary_str[:445]
-
-    if "confidence" not in data and "confianza" in data:
-        data["confidence"] = data["confianza"]
+    # 3. Validar Confidence (obligatorio, numérico en rango 0.0 - 1.0, no fabricar default ni aceptar negativos)
+    raw_conf_val = data.get("confidence")
+    if raw_conf_val is None:
+        raw_conf_val = data.get("confianza")
+    if raw_conf_val is None or isinstance(raw_conf_val, bool):
+        raise AIProviderError("INVALID_SCHEMA", "Campo obligatorio 'confidence' ausente o booleano.", retryable=False)
     try:
-        conf_val = float(data.get("confidence", 0.8))
-        if conf_val > 1.0 and conf_val <= 100.0:
-            conf_val = conf_val / 100.0
-        data["confidence"] = max(0.0, min(1.0, conf_val))
-    except Exception:
-        data["confidence"] = 0.8
+        conf_float = float(raw_conf_val)
+    except (ValueError, TypeError) as exc:
+        raise AIProviderError("INVALID_SCHEMA", f"Campo 'confidence' no numérico: {raw_conf_val}", retryable=False) from exc
+    if conf_float < 0.0 or conf_float > 100.0:
+        raise AIProviderError("INVALID_SCHEMA", f"Campo 'confidence' fuera de rango (0.0 a 1.0): {conf_float}", retryable=False)
+    if conf_float > 1.0:
+        conf_float = conf_float / 100.0
+    data["confidence"] = round(conf_float, 4)
 
-    if "keywords" not in data and "palabras_clave" in data:
-        data["keywords"] = data["palabras_clave"]
+    # 4. Validar Summary (obligatorio, >= 10 caracteres reales, no inventar padding)
+    raw_sum_val = data.get("summary")
+    if raw_sum_val is None:
+        raw_sum_val = data.get("resumen")
+    if raw_sum_val is None or not isinstance(raw_sum_val, str):
+        raise AIProviderError("INVALID_SCHEMA", "Campo obligatorio 'summary' ausente o no textual.", retryable=False)
+    clean_summary = raw_sum_val.strip()
+    if len(clean_summary) < 10:
+        raise AIProviderError("INVALID_SCHEMA", f"Campo 'summary' demasiado corto ({len(clean_summary)} < 10 caracteres).", retryable=False)
+    data["summary"] = clean_summary[:500]
+
+    # 5. Keywords (opcional, lista de strings)
     kw = data.get("keywords")
+    if kw is None:
+        kw = data.get("palabras_clave")
     if isinstance(kw, list):
         data["keywords"] = [str(x)[:40] for x in kw[:8]]
     else:
@@ -269,7 +336,7 @@ def parse_and_validate_analysis_json(raw_text: str) -> AIAnalysisContract:
     try:
         return AIAnalysisContract.model_validate(data)
     except ValidationError as exc:
-        raise AIProviderError("INVALID_SCHEMA", f"Contrato JSON incumplido: {exc.error_count()} errores", retryable=False) from exc
+        raise AIProviderError("INVALID_SCHEMA", f"Violación de esquema en contrato AI: {exc}", retryable=False) from exc
 
 
 def get_provider_chain() -> list[dict[str, str]]:
@@ -329,8 +396,7 @@ def _call_gemini_multimodal(
     if not api_key:
         raise AIProviderError("MISSING_API_KEY", "Clave de Google no configurada.", retryable=False)
 
-    eff_model = resolve_effective_gemini_model(model)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{eff_model}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     parts: list[dict[str, Any]] = [{"text": prompt_text}]
     if image_bytes and image_mime:
         b64_img = base64.b64encode(image_bytes).decode("ascii")
@@ -348,11 +414,6 @@ def _call_gemini_multimodal(
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout_sec, connect=min(4.0, timeout_sec))) as client:
             resp = client.post(url, json=payload)
-            if resp.status_code in (429, 503):
-                alt_model = mark_gemini_model_exhausted(model)
-                if alt_model != eff_model:
-                    alt_url = f"https://generativelanguage.googleapis.com/v1beta/models/{alt_model}:generateContent?key={api_key}"
-                    resp = client.post(alt_url, json=payload)
     except httpx.TimeoutException as exc:
         raise AIProviderError("TIMEOUT", "Tiempo de espera agotado en llamada a Gemini.", retryable=True) from exc
     except httpx.HTTPError as exc:
@@ -431,7 +492,7 @@ def _call_groq_multimodal(
     if resp.status_code >= 500:
         raise AIProviderError(f"HTTP_{resp.status_code}", f"Error de servidor Groq ({resp.status_code}).", retryable=True)
     if resp.status_code >= 400:
-        raise AIProviderError(f"HTTP_{resp.status_code}", f"Solicitud rechazada en Groq ({resp.status_code}).", retryable=False)
+        raise AIProviderError(f"HTTP_{resp.status_code}", f"Solicitud rechazada en Groq ({resp.status_code}): {resp.text[:200]}", retryable=False)
 
     body = resp.json()
     choices = body.get("choices") or []
@@ -503,12 +564,18 @@ def classify_evidence_with_router(
     chain = get_provider_chain()
     ensure_at_least_one_circuit_openable(chain)
     max_retries = max(0, min(settings.AI_MAX_RETRIES, 2))
-    per_call_timeout = max(2.0, min(settings.AI_TIMEOUT_SECONDS, 6.0))
+    per_call_timeout = max(1.0, min(settings.AI_TIMEOUT_SECONDS, 6.0))
+    t_start = time.perf_counter()
+    total_timeout = float(settings.AI_TIMEOUT_SECONDS)
 
     attempt_global = 0
     provider_switches = 0
 
     for idx, node in enumerate(chain):
+        elapsed_router = time.perf_counter() - t_start
+        if elapsed_router >= total_timeout:
+            break
+
         provider = node["provider"]
         model = node["model"]
         api_key = node["api_key"]
@@ -536,6 +603,11 @@ def classify_evidence_with_router(
         # Si falla por error no reintentable (ej. INVALID_JSON o 400), pasamos directo al siguiente proveedor
         max_node_attempts = 1 + max_retries
         for node_try in range(max_node_attempts):
+            remaining_for_call = total_timeout - (time.perf_counter() - t_start)
+            if remaining_for_call <= 0.1:
+                break
+
+            effective_timeout = max(0.5, min(per_call_timeout, remaining_for_call))
             attempt_global += 1
             t0 = time.perf_counter()
             try:
@@ -549,7 +621,7 @@ def classify_evidence_with_router(
                         prompt_text=prompt_text,
                         image_bytes=image_bytes,
                         image_mime=image_mime,
-                        timeout_sec=per_call_timeout,
+                        timeout_sec=effective_timeout,
                     )
                 else:
                     raw_text, in_tok, out_tok = _call_groq_multimodal(
@@ -558,7 +630,7 @@ def classify_evidence_with_router(
                         prompt_text=prompt_text,
                         image_bytes=image_bytes,
                         image_mime=image_mime,
-                        timeout_sec=per_call_timeout,
+                        timeout_sec=effective_timeout,
                     )
 
                 contract = parse_and_validate_analysis_json(raw_text)

@@ -111,3 +111,34 @@ Durante las corridas iterativas de `eval/evaluar.py` detectamos y corregimos tre
 
 - El guion estructurado minuto a minuto (6 minutos de demostración en vivo sobre `http://localhost:5173` sin diapositivas teóricas + 3 minutos de preguntas y respuestas) se encuentra documentado en [`docs/guion_sustentacion.md`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/docs/guion_sustentacion.md).
 - El mapeo completo contra los 5 criterios de evaluación del Momento 2 se encuentra en [`docs/checklist_rubrica.md`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/docs/checklist_rubrica.md).
+
+---
+
+## 6. Decisiones de Ingeniería — Remediación Bloque G2 (2026-11-02)
+
+1. **Contexto monotónico y rollback ante timeouts de herramientas (`A-02`, `M-03`)**:
+   - Para evitar escrituras huérfanas o commits retardados en hilos secundarios cuando el hilo principal cancela una herramienta por timeout, se diseñó `_CURRENT_DEADLINE` (`contextvars.ContextVar[float | None]`).
+   - Las conexiones de PostgreSQL en `get_conn()` comprueban el tiempo restante antes de abrirse y aplican dinámicamente `SET LOCAL statement_timeout` y `lock_timeout`.
+   - La función `checked_commit(conn)` verifica que el deadline monotónico no haya vencido; si venció, aborta de inmediato con `conn.rollback()` y lanza `TimeoutError`.
+   - `run_civia_agent()` propaga el deadline global a lo largo de todas las iteraciones y herramientas, garantizando interrupción limpia con el guardrail `"TIMEOUT"` sin dejar transacciones abiertas.
+
+2. **Cotas del lado del servidor y reserva previa de tokens (`M-02`)**:
+   - Para impedir agotamiento de recursos o elusión de límites desde el cliente, `AgentQueryRequest` impone cotas Pydantic (`max_iterations <= 5`, `max_tokens_budget <= 6000`).
+   - El servidor acota forzosamente cualquier valor con `min(req, settings.MAX)`.
+   - Se añadió reserva previa de tokens: si el presupuesto remanente es menor a 60 tokens, el agente detiene el ciclo antes de iniciar la llamada al LLM, marcando `guardrail_triggered = "MAX_TOKENS"`.
+   - Se delimita `maxOutputTokens` en llamadas a Gemini y `max_tokens` en Groq al saldo remanente.
+
+3. **Validación estricta de esquemas sin falseo ni coerciones silenciosas (`A-03`, `N-02`)**:
+   - Se prohibió la coerción de categorías desconocidas a `OTRO`, la asignación por defecto de severidad `MEDIA` ante valores inventados o faltantes, el relleno de resúmenes artificiales y la admisión de confianzas negativas o fuera de rango. Payloads no conformes levantan `AIProviderError("INVALID_SCHEMA")`.
+   - Se eliminó el diccionario `_EXHAUSTED_GEMINI_MODELS` para evitar sustituciones no declaradas de modelos en tiempo de ejecución.
+
+4. **Prevención de tormentas en Circuit Breaker (`M-04`)**:
+   - Al transicionar de `OPEN` a `HALF_OPEN`, `CircuitBreakerState` utiliza un candado `threading.Lock()` y la bandera `_half_open_in_flight` para admitir estrictamente un único ensayo concurrentemente, bloqueando ráfagas hacia proveedores en recuperación.
+
+5. **Frontera de seguridad para encabezados de red y asincronía (`M-06`, `A-05`, `M-01`)**:
+   - `get_trusted_client_ip()` confía en `X-Forwarded-For` únicamente si la conexión TCP directa proviene de una IP perteneciente a subredes privadas confiables (loopback, redes Docker, RFC1918). Si proviene de un peer externo no confiable, se utiliza su IP real descartando cualquier cabecera spoofed.
+   - Operaciones pesadas de CPU/IO se envolvieron con `await run_in_threadpool(...)` para proteger la respuesta del bucle de eventos asíncrono de FastAPI.
+   - `validate_and_store_audio()` valida tramas reales de sincronización MP3 y cuadros WAV, rechazando con HTTP 415 archivos falsificados consistentes únicamente en etiquetas `ID3`.
+
+6. **Verificación y ajuste de modelo terciario (`gemini-3.5-flash-lite`)**:
+   - Tras comprobar el agotamiento de la cuota diaria gratuita en `gemini-3.6-flash` (`20 req/day`), se verificó mediante API la disponibilidad y capacidades de visión de `gemini-3.5-flash-lite`, adoptándolo como el modelo terciario oficial en configuración y Compose.

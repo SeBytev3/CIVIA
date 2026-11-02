@@ -10,7 +10,8 @@ import uuid
 import psycopg
 
 from app.db import get_conn
-from app.security import CitizenValidationError
+from app.observability import sanitize_secret_text
+from app.security import _CO_PHONE_RE, _EMAIL_RE, CitizenValidationError
 
 _ON_REPORT_CREATED_HOOK: Callable[[UUID], None] | None = None
 
@@ -18,6 +19,30 @@ _ON_REPORT_CREATED_HOOK: Callable[[UUID], None] | None = None
 def set_report_created_hook(hook: Callable[[UUID], None] | None) -> None:
     global _ON_REPORT_CREATED_HOOK
     _ON_REPORT_CREATED_HOOK = hook
+
+
+def _sanitize_public_text(text: str | None) -> str | None:
+    if not text:
+        return text
+    import re
+
+    cleaned = sanitize_secret_text(text) or ""
+    cleaned = _EMAIL_RE.sub("[CORREO_PROTEGIDO]", cleaned)
+    cleaned = _CO_PHONE_RE.sub("[TELEFONO_PROTEGIDO]", cleaned)
+    cleaned = re.sub(
+        r"\b(?:gemini|groq|google\s+api|google|anthropic|openai|qwen|api|traceback|valueerror|typeerror|runtimeerror|connectionerror|httperror)\b",
+        "[SISTEMA_IA]",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\bHTTP[_\s-]*(?:4\d\d|5\d\d)\b", "[SERVICIO_OCUPADO]", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"\b(?:status[_\s-]*code|status|error[_\s-]*code)\s*[:=]?\s*(?:4\d\d|5\d\d)\b",
+        "[ERROR_SERVICIO]",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    return cleaned.strip()
 
 STATUS_MESSAGES: dict[str, str] = {
     "PENDING_ANALYSIS": "Reporte recibido y almacenado de forma segura. El análisis automático está pendiente de procesamiento.",
@@ -48,8 +73,8 @@ def row_to_public_dict(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": row["id"],
         "tracking_code": row["tracking_code"],
-        "title": row["title"],
-        "description": row["description"],
+        "title": _sanitize_public_text(row["title"]) or row["title"],
+        "description": _sanitize_public_text(row["description"]) or row["description"],
         "latitude": float(row["latitude"]),
         "longitude": float(row["longitude"]),
         "in_service_area": bool(row["in_service_area"]),
@@ -61,18 +86,18 @@ def row_to_public_dict(row: dict[str, Any]) -> dict[str, Any]:
         "photo_width": int(row["photo_width"]),
         "photo_height": int(row["photo_height"]),
         "has_audio": bool(row.get("audio_path")),
-        "audio_transcript": row.get("audio_transcript"),
+        "audio_transcript": _sanitize_public_text(row.get("audio_transcript")),
         "ai_category": row.get("ai_category"),
         "ai_severity": row.get("ai_severity"),
         "ai_confidence": float(row["ai_confidence"]) if row.get("ai_confidence") is not None else None,
-        "ai_summary": row.get("ai_summary"),
+        "ai_summary": _sanitize_public_text(row.get("ai_summary")),
         "ai_keywords": ai_keywords,
         "final_category": row.get("final_category"),
         "final_severity": row.get("final_severity"),
         "effective_category": effective_cat,
         "effective_severity": effective_sev,
         "human_confirmed": bool(row["human_confirmed"]),
-        "human_override_note": row.get("human_override_note"),
+        "human_override_note": _sanitize_public_text(row.get("human_override_note")),
         "status": status,
         "status_message": STATUS_MESSAGES.get(status, "Reporte registrado."),
         "distance_km": round(float(dist), 3) if dist is not None else None,

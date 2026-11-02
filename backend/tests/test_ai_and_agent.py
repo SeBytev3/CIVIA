@@ -160,7 +160,7 @@ def test_router_resilience_and_fallback_across_providers(fault_mode: str):
     assert "traceback" not in serialized
     assert "groq" not in serialized
     assert "gemini" not in serialized
-    time.sleep(1.2)
+    time.sleep(4.0)
 
 
 def test_total_provider_outage_graceful_degradation():

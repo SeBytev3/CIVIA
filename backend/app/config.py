@@ -48,7 +48,7 @@ class Settings:
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     AI_PRIMARY_MODEL: str = os.getenv("AI_PRIMARY_MODEL", "gemini-3.8-flash")
     AI_FALLBACK_MODEL: str = os.getenv("AI_FALLBACK_MODEL", "qwen/qwen3.8-27b")
-    AI_TERTIARY_MODEL: str = os.getenv("AI_TERTIARY_MODEL", "gemini-3.6-flash")
+    AI_TERTIARY_MODEL: str = os.getenv("AI_TERTIARY_MODEL", "gemini-3.5-flash-lite")
     AI_TIMEOUT_SECONDS: float = float(os.getenv("AI_TIMEOUT_SECONDS", "15"))
     AI_MAX_RETRIES: int = int(os.getenv("AI_MAX_RETRIES", "2"))
     AGENT_MAX_ITERATIONS: int = int(os.getenv("AGENT_MAX_ITERATIONS", "5"))

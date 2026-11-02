@@ -121,3 +121,22 @@
 - **Verificación**:
   - Prueba adversarial añadida: `tests/test_audit_g1_security.py::test_g1_2_c01_rejects_contextual_project_role_year_demo_token`.
   - Suite completa ejecutada sobre PostgreSQL 17 real: **`34 passed`** (`14/14` en `tests/test_audit_g1_security.py`).
+
+### Bloque G2 — Agente, límites efectivos y proveedores IA completado (2026-11-02)
+- **Detalle completo por hallazgo, corrección, pruebas adversariales, resultados y límites**: documentado en [`docs/remediacion_g2.md`](remediacion_g2.md).
+- **Resumen de los hallazgos cerrados**:
+  1. **`A-02`**: Implementación de deadline monotónico con `contextvars` y aborto estricto con rollback en `checked_commit(conn)` ante timeouts de herramientas (`execute_tool_with_timeout`), previniendo escrituras huérfanas en BD.
+  2. **`M-03`**: Propagación del deadline global del agente (`deadline_monotonic = time.monotonic() + eff_total_timeout`), abortando turnos e iteraciones subsiguientes si el tiempo asignado expiró.
+  3. **`M-02`**: Acotación en esquema Pydantic (`max_iterations <= 5`, `max_tokens_budget <= 6000`), límites forzados en servidor, reserva previa de tokens (< 60 tokens interrumpe antes de llamar al LLM) y cota a tokens de salida según saldo remanente.
+  4. **`A-03`**: Validación estricta en `parse_and_validate_analysis_json()`; rechazo con `AIProviderError("INVALID_SCHEMA")` de categorías desconocidas, severidades ausentes, confianzas negativas o fuera de rango, resúmenes sin contenido sustantivo y objetos vacíos `{}` sin coerciones silenciosas.
+  5. **`A-04`**: Sanitización de PII (correos y teléfonos colombianos) y nombres técnicos internos (`Google`, `API`, `Groq`, `HTTP 401`, `ValueError`, `Traceback`) tanto en salidas ciudadanas del agente como en campos textuales del repositorio público.
+  6. **`M-04`**: Circuit Breaker con candado de concurrencia `threading.Lock()` y admisión de ensayo único estricto en `HALF_OPEN` (`_half_open_in_flight`), bloqueando tormentas concurrentes hacia proveedores degradados.
+  7. **`N-02`**: Eliminada la sustitución oculta de modelos Gemini en fallback (`_EXHAUSTED_GEMINI_MODELS`); el router respeta estrictamente los modelos configurados en `.env`.
+  8. **`M-01`**: Validación profunda de audio (`_validate_mp3_payload`) inspeccionando palabras de sincronización y tramas reales más allá de metadatos `ID3`, rechazando con HTTP 415 archivos sin audio y WAVs vacíos.
+  9. **`A-05`**: Descarga de llamadas síncronas pesadas (validación/almacenamiento de fotos y audio, transcripción, creación y actualización en BD) del event loop de FastAPI hacia hilos de trabajo mediante `await run_in_threadpool(...)`.
+  10. **`M-06`**: Frontera estricta de confianza para `X-Forwarded-For` y `X-Real-IP` en `get_trusted_client_ip()`; solo se confía en proxies de subredes privadas conocidas (Docker, loopback, RFC1918), evitando spoofing de IP. Banderas `--proxy-headers --forwarded-allow-ips=*` en Dockerfile.
+  11. **`Q13`**: Garantizada la presencia de `tracking_code`, `estado_propuesto` y código de aprobación en `tool_proponer_actualizacion_critica` y fallback determinista ante contingencias.
+  12. **Actualización de modelo terciario**: Verificada la accesibilidad de `gemini-3.5-flash-lite` como reemplazo verificado de `gemini-3.6-flash` (cuota agotada), garantizando conmutación exitosa en pruebas de contingencia (`GROQ_FAIL`).
+- **Verificación de la suite completa + suite adversarial G2 en PostgreSQL 17 real**:
+  - `docker compose exec -T api pytest -v`: **`57 passed in 52.94s`** (`23/23` en `tests/test_audit_g2_resilience.py`, `14/14` en `tests/test_audit_g1_security.py`, `12/12` en `tests/test_ai_and_agent.py`, `7/7` en `test_reports_crud.py` y `test_health.py`, `1/1` en `test_e2e_frontend_proxy.py`).
+  - Suite dorada (`eval/evaluar.py`): **`6/6` casos dorados verificados por SQL (`100%`)**, **`11/15` consultas representativas aprobadas (`73.33%`)**, Q13 superada.

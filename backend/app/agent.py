@@ -16,11 +16,14 @@ from app.ai_router import (
     ensure_at_least_one_circuit_openable,
     get_circuit,
     get_provider_chain,
-    mark_gemini_model_exhausted,
-    resolve_effective_gemini_model,
 )
 from app.config import settings
-from app.db import get_conn
+from app.db import (
+    get_conn,
+    get_deadline_context,
+    reset_deadline_context,
+    set_deadline_context,
+)
 from app.observability import record_ai_trace, sanitize_secret_text
 from app.repository import (
     get_report_by_tracking_code,
@@ -52,15 +55,23 @@ def _safe_record_trace(**kwargs: Any) -> None:
 def sanitize_citizen_agent_output(text: str) -> str:
     """
     Garantiza que la respuesta entregada al ciudadano no contenga secretos, PII,
-    nombres de proveedores internos ni códigos de error HTTP o tracebacks.
+    nombres de proveedores internos ni códigos de error HTTP, tracebacks o excepciones (A-04).
     """
     import re
 
     cleaned = sanitize_secret_text(text) or ""
     cleaned = _EMAIL_RE.sub("[CORREO_PROTEGIDO]", cleaned)
     cleaned = _CO_PHONE_RE.sub("[TELEFONO_PROTEGIDO]", cleaned)
-    cleaned = re.sub(r"\b(?:gemini|groq|traceback)\b", "[SISTEMA_IA]", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\bHTTP[_\s-]*(?:429|500|502|503|504)\b", "[SERVICIO_OCUPADO]", cleaned, flags=re.IGNORECASE)
+    # Sanitizar proveedores, APIs y excepciones de Python/red
+    cleaned = re.sub(
+        r"\b(?:gemini|groq|google\s+api|google|anthropic|openai|qwen|api|traceback|valueerror|typeerror|runtimeerror|connectionerror|httperror)\b",
+        "[SISTEMA_IA]",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    # Sanitizar códigos HTTP y menciones directas
+    cleaned = re.sub(r"\bHTTP[_\s-]*(?:4\d\d|5\d\d)\b", "[SERVICIO_OCUPADO]", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b(?:status[_\s-]*code|status|error[_\s-]*code)\s*[:=]?\s*(?:4\d\d|5\d\d)\b", "[ERROR_SERVICIO]", cleaned, flags=re.IGNORECASE)
     return cleaned.strip()
 
 # Definición neutral de herramientas tipadas (se convierte al formato nativo de Gemini y de Groq)
@@ -369,7 +380,8 @@ def tool_proponer_actualizacion_critica(args: dict[str, Any]) -> dict[str, Any]:
         "estado_aprobacion": "PENDING",
         "mensaje": (
             "Por límite de seguridad, la IA NO modifica directamente la base de datos de reportes. "
-            f"Se creó la solicitud de aprobación humana #{str(approval_id)[:8]} en estado PENDING."
+            f"Se creó la solicitud de aprobación humana #{str(approval_id)[:8]} en estado PENDING "
+            f"para actualizar el reporte {row['tracking_code']} al estado {nuevo_estado}."
         ),
     }
 
@@ -386,13 +398,26 @@ def execute_tool_with_timeout(
     tool_name: str,
     tool_args: dict[str, Any],
     timeout_sec: float,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     fn = TOOL_DISPATCH.get(tool_name)
     if fn is None:
         return {"error": f"Herramienta desconocida: {tool_name}"}
 
+    eff_deadline = deadline if deadline is not None else (time.monotonic() + timeout_sec)
+
+    def _worker() -> dict[str, Any]:
+        tok = set_deadline_context(eff_deadline)
+        try:
+            res = fn(tool_args)
+            if time.monotonic() >= eff_deadline:
+                raise TimeoutError(f"La herramienta '{tool_name}' superó el deadline de ejecución ({timeout_sec}s).")
+            return res
+        finally:
+            reset_deadline_context(tok)
+
     executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(fn, tool_args)
+    future = executor.submit(_worker)
     try:
         return future.result(timeout=timeout_sec)
     except FuturesTimeoutError as exc:
@@ -443,12 +468,12 @@ def _call_agent_turn_gemini(
     api_key: str,
     conversation_messages: list[dict[str, Any]],
     timeout_sec: float,
+    max_output_tokens: int = 700,
 ) -> tuple[str | None, list[dict[str, Any]], int, int]:
     if not api_key:
         raise AIProviderError("MISSING_API_KEY", "Clave Google no disponible.", retryable=False)
 
-    eff_model = resolve_effective_gemini_model(model)
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{eff_model}:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
     contents: list[dict[str, Any]] = []
     for m in conversation_messages:
         role = m["role"]
@@ -495,17 +520,12 @@ def _call_agent_turn_gemini(
         "systemInstruction": {"parts": [{"text": AGENT_SYSTEM_PROMPT}]},
         "contents": contents,
         "tools": _gemini_tools_declaration(),
-        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 700},
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": max(1, max_output_tokens)},
     }
 
     try:
         with httpx.Client(timeout=httpx.Timeout(timeout_sec, connect=min(4.0, timeout_sec))) as client:
             resp = client.post(url, json=payload)
-            if resp.status_code in (429, 503):
-                alt_model = mark_gemini_model_exhausted(model)
-                if alt_model != eff_model:
-                    alt_url = f"https://generativelanguage.googleapis.com/v1beta/models/{alt_model}:generateContent?key={api_key}"
-                    resp = client.post(alt_url, json=payload)
     except httpx.TimeoutException as exc:
         raise AIProviderError("TIMEOUT", "Timeout en llamada de agente a Gemini.", retryable=True) from exc
     except httpx.HTTPError as exc:
@@ -546,6 +566,7 @@ def _call_agent_turn_groq(
     api_key: str,
     conversation_messages: list[dict[str, Any]],
     timeout_sec: float,
+    max_output_tokens: int = 700,
 ) -> tuple[str | None, list[dict[str, Any]], int, int]:
     if not api_key:
         raise AIProviderError("MISSING_API_KEY", "Clave Groq no disponible.", retryable=False)
@@ -591,7 +612,7 @@ def _call_agent_turn_groq(
         "tools": _groq_tools_declaration(),
         "tool_choice": "auto",
         "temperature": 0.1,
-        "max_tokens": 700,
+        "max_tokens": max(1, max_output_tokens),
     }
 
     try:
@@ -717,7 +738,16 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
         )
         return f"Se encontraron {total} reporte(s) registrados en la base de datos: {codigos}."
     if last.get("requiere_aprobacion_humana"):
-        return last.get("mensaje", "La solicitud de cambio de estado quedó registrada pendiente de aprobación humana.")
+        tcode = last.get("tracking_code", "")
+        st = last.get("estado_propuesto", "")
+        aid = str(last.get("approval_id") or "")[:8]
+        msg = str(last.get("mensaje") or "")
+        if msg and tcode and tcode in msg:
+            return msg
+        return (
+            f"Por límite de seguridad, la IA NO modifica directamente la base de datos de reportes. "
+            f"Se creó la solicitud de aprobación humana #{aid} en estado PENDING para el reporte {tcode} con estado propuesto {st}."
+        )
     return "Consulta procesada sobre la base de datos de reportes ciudadanos."
 
 
@@ -731,15 +761,18 @@ def run_civia_agent(
 ) -> dict[str, Any]:
     """
     Ejecuta el agente CIVIA con herramientas tipadas y los 4 límites obligatorios:
-    1) max_iterations (vueltas máximas)
-    2) max_tokens_budget (presupuesto de tokens)
-    3) tool_timeout_seconds / total_timeout_seconds (timeout por herramienta y global)
+    1) max_iterations (vueltas máximas acotadas por configuración del servidor)
+    2) max_tokens_budget (presupuesto con reserva previa de saldo antes de llamada)
+    3) tool_timeout_seconds / total_timeout_seconds (deadline global monotónico propagado)
     4) human_approval_required (las escrituras críticas van a pending_approvals, nunca directo a reports)
     """
     trace_group_id = uuid.uuid4()
-    eff_max_iter = max(1, int(max_iterations if max_iterations is not None else settings.AGENT_MAX_ITERATIONS))
-    eff_max_tokens = max(50, int(max_tokens_budget if max_tokens_budget is not None else settings.AGENT_MAX_TOKENS))
+    eff_max_iter = min(settings.AGENT_MAX_ITERATIONS, max(1, int(max_iterations if max_iterations is not None else settings.AGENT_MAX_ITERATIONS)))
+    eff_max_tokens = min(settings.AGENT_MAX_TOKENS, max(50, int(max_tokens_budget if max_tokens_budget is not None else settings.AGENT_MAX_TOKENS)))
     eff_total_timeout = float(total_timeout_seconds if total_timeout_seconds is not None else settings.AI_TIMEOUT_SECONDS)
+
+    deadline_monotonic = time.monotonic() + eff_total_timeout
+    token_context = set_deadline_context(deadline_monotonic)
 
     t_start = time.perf_counter()
     conversation: list[dict[str, Any]] = [{"role": "user", "content": query}]
@@ -757,249 +790,283 @@ def run_civia_agent(
 
     chain = get_provider_chain()
 
-    for turn in range(1, eff_max_iter + 1):
-        elapsed = time.perf_counter() - t_start
-        if elapsed >= eff_total_timeout:
-            guardrail_triggered = "TIMEOUT"
-            break
-
-        if total_tokens_used >= eff_max_tokens:
-            guardrail_triggered = "MAX_TOKENS"
-            break
-
-        iterations_used = turn
-        turn_text: str | None = None
-        turn_tool_calls: list[dict[str, Any]] = []
-        turn_succeeded = False
-
-        ensure_at_least_one_circuit_openable(chain)
-        for idx, node in enumerate(chain):
-            provider = node["provider"]
-            model = node["model"]
-            api_key = node["api_key"]
-            tier = node["tier"]
-
-            cb = get_circuit(provider, model)
-            if not cb.allow_request():
-                continue
-
-            t_call = time.perf_counter()
-            remaining_sec = max(1.0, min(6.0, eff_total_timeout - (time.perf_counter() - t_start)))
-            try:
-                forced = _check_forced_fault(tier, provider)
-                if forced is not None:
-                    raise AIProviderError("INVALID_JSON", "JSON inválido forzado en turno de agente.", retryable=False)
-
-                if provider == "google":
-                    turn_text, turn_tool_calls, in_tok, out_tok = _call_agent_turn_gemini(
-                        model=model,
-                        api_key=api_key,
-                        conversation_messages=conversation,
-                        timeout_sec=remaining_sec,
-                    )
-                else:
-                    turn_text, turn_tool_calls, in_tok, out_tok = _call_agent_turn_groq(
-                        model=model,
-                        api_key=api_key,
-                        conversation_messages=conversation,
-                        timeout_sec=remaining_sec,
-                    )
-
-                dt_ms = int((time.perf_counter() - t_call) * 1000)
-                cb.record_success()
-                prompt_tokens_used += in_tok
-                completion_tokens_used += out_tok
-                total_tokens_used += in_tok + out_tok
-                active_provider = provider
-                active_model = model
-                if idx > 0:
-                    fallback_used = True
-                turn_succeeded = True
-
-                _safe_record_trace(
-                    trace_group_id=trace_group_id,
-                    operation="agent_turn",
-                    provider=provider,
-                    model=model,
-                    attempt_number=turn,
-                    success=True,
-                    latency_ms=dt_ms,
-                    prompt_tokens=in_tok,
-                    completion_tokens=out_tok,
-                    tool_calls=[{"name": tc["name"], "args": tc.get("args") or {}} for tc in turn_tool_calls],
-                    metadata={"turn": turn, "tier": tier, "fallback_used": fallback_used},
-                )
-                break
-            except AIProviderError as exc:
-                dt_ms = int((time.perf_counter() - t_call) * 1000)
-                cb.record_failure(exc.code)
-                _safe_record_trace(
-                    trace_group_id=trace_group_id,
-                    operation="agent_turn",
-                    provider=provider,
-                    model=model,
-                    attempt_number=turn,
-                    success=False,
-                    latency_ms=dt_ms,
-                    error_code=exc.code,
-                    error_detail=exc.message,
-                    metadata={"turn": turn, "tier": tier},
-                )
-                fallback_used = True
-                continue
-            except Exception as exc:
-                dt_ms = int((time.perf_counter() - t_call) * 1000)
-                cb.record_failure("UNEXPECTED_ERROR")
-                _safe_record_trace(
-                    trace_group_id=trace_group_id,
-                    operation="agent_turn",
-                    provider=provider,
-                    model=model,
-                    attempt_number=turn,
-                    success=False,
-                    latency_ms=dt_ms,
-                    error_code="UNEXPECTED_ERROR",
-                    error_detail=type(exc).__name__,
-                    metadata={"turn": turn, "tier": tier},
-                )
-                fallback_used = True
-                continue
-
-        if not turn_succeeded:
-            # Caída total de proveedores IA: responder con respaldo SQL determinista sin error técnico
-            answer = _deterministic_sql_fallback_answer(query, executed_tools)
-            for et in executed_tools:
-                res_obj = et.get("result") or {}
-                if res_obj.get("requiere_aprobacion_humana"):
-                    requires_human_approval = True
-                    pending_approval_id = res_obj.get("approval_id")
-                    guardrail_triggered = guardrail_triggered or "HUMAN_APPROVAL_REQUIRED"
-            total_ms = int((time.perf_counter() - t_start) * 1000)
-            return {
-                "answer": answer,
-                "trace_group_id": str(trace_group_id),
-                "tools_invoked": executed_tools,
-                "iterations_used": iterations_used,
-                "max_iterations": eff_max_iter,
-                "total_tokens_used": total_tokens_used,
-                "max_tokens_budget": eff_max_tokens,
-                "latency_ms": total_ms,
-                "guardrail_triggered": guardrail_triggered,
-                "requires_human_approval": requires_human_approval,
-                "pending_approval_id": pending_approval_id,
-                "degraded_sql_mode": True,
-            }
-
-        # Verificar presupuesto de tokens tras recibir respuesta del modelo
-        if total_tokens_used > eff_max_tokens:
-            guardrail_triggered = "MAX_TOKENS"
-            break
-
-        # Si el modelo no pidió más herramientas y dio respuesta final
-        if not turn_tool_calls:
-            final_answer = turn_text or _deterministic_sql_fallback_answer(query, executed_tools)
-            # Garantizar trazabilidad de radicados verificados por SQL cuando la herramienta encontró <= 5 reportes
-            for et in executed_tools:
-                res_obj = et.get("result") or {}
-                if res_obj.get("encontrado") and isinstance(res_obj.get("reporte"), dict):
-                    rep = res_obj["reporte"]
-                    tcode = rep.get("tracking_code", "")
-                    if tcode and tcode not in final_answer:
-                        final_answer += f" [Radicado SQL: {tcode} · {rep.get('effective_category')} · {rep.get('effective_severity')} · {rep.get('comuna')} · {rep.get('status')}]"
-                elif 0 < int(res_obj.get("total_encontrados", 0)) <= 5:
-                    items = res_obj.get("items") or []
-                    missing_codes = [
-                        f"{it['tracking_code']} ({it.get('effective_category')}, {it.get('comuna')}, {it.get('neighborhood')}, {it.get('status')})"
-                        for it in items
-                        if it.get("tracking_code") and it["tracking_code"] not in final_answer
-                    ]
-                    if missing_codes:
-                        final_answer += " [Registros SQL verificados: " + "; ".join(missing_codes) + "]"
-            total_ms = int((time.perf_counter() - t_start) * 1000)
-            return {
-                "answer": sanitize_citizen_agent_output(final_answer),
-                "trace_group_id": str(trace_group_id),
-                "tools_invoked": executed_tools,
-                "iterations_used": iterations_used,
-                "max_iterations": eff_max_iter,
-                "total_tokens_used": total_tokens_used,
-                "max_tokens_budget": eff_max_tokens,
-                "latency_ms": total_ms,
-                "guardrail_triggered": guardrail_triggered,
-                "requires_human_approval": requires_human_approval,
-                "pending_approval_id": pending_approval_id,
-                "degraded_sql_mode": False,
-            }
-
-        # Ejecutar cada herramienta solicitada con control de timeout por herramienta
-        for tc in turn_tool_calls:
-            tname = tc["name"]
-            targs = tc.get("args") or {}
-            raw_gpart = tc.get("raw_gemini_part")
-            conversation.append(
-                {
-                    "role": "assistant_tool",
-                    "name": tname,
-                    "args": targs,
-                    "raw_gemini_part": raw_gpart,
-                }
-            )
-            try:
-                t_res = execute_tool_with_timeout(tname, targs, timeout_sec=tool_timeout_seconds)
-            except TimeoutError as exc:
+    try:
+        for turn in range(1, eff_max_iter + 1):
+            if time.monotonic() >= deadline_monotonic:
                 guardrail_triggered = "TIMEOUT"
-                _safe_record_trace(
-                    trace_group_id=trace_group_id,
-                    operation="tool_timeout",
-                    provider=active_provider,
-                    model=active_model,
-                    attempt_number=turn,
-                    success=False,
-                    latency_ms=int(tool_timeout_seconds * 1000),
-                    error_code="TOOL_TIMEOUT",
-                    error_detail=str(exc),
-                )
                 break
 
-            if t_res.get("requiere_aprobacion_humana"):
-                requires_human_approval = True
-                pending_approval_id = t_res.get("approval_id")
-                guardrail_triggered = "HUMAN_APPROVAL_REQUIRED"
+            remaining_tokens = eff_max_tokens - total_tokens_used
+            MIN_ESTIMATED_TOKENS = 60
+            if remaining_tokens < MIN_ESTIMATED_TOKENS:
+                guardrail_triggered = "MAX_TOKENS"
+                break
 
-            executed_tools.append({"tool": tname, "args": targs, "result": t_res})
-            conversation.append(
-                {
-                    "role": "tool_result",
-                    "name": tname,
-                    "result": t_res,
-                    "had_gemini_part": bool(raw_gpart),
+            iterations_used = turn
+            turn_text: str | None = None
+            turn_tool_calls: list[dict[str, Any]] = []
+            turn_succeeded = False
+
+            ensure_at_least_one_circuit_openable(chain)
+            for idx, node in enumerate(chain):
+                provider = node["provider"]
+                model = node["model"]
+                api_key = node["api_key"]
+                tier = node["tier"]
+
+                cb = get_circuit(provider, model)
+                if not cb.allow_request():
+                    continue
+
+                now = time.monotonic()
+                remaining_sec = deadline_monotonic - now
+                if remaining_sec <= 0.05:
+                    guardrail_triggered = "TIMEOUT"
+                    break
+
+                t_call = time.perf_counter()
+                call_timeout = min(remaining_sec, 6.0)
+                call_max_tokens = min(700, max(1, remaining_tokens - MIN_ESTIMATED_TOKENS))
+
+                try:
+                    forced = _check_forced_fault(tier, provider)
+                    if forced is not None:
+                        raise AIProviderError("INVALID_JSON", "JSON inválido forzado en turno de agente.", retryable=False)
+
+                    if provider == "google":
+                        turn_text, turn_tool_calls, in_tok, out_tok = _call_agent_turn_gemini(
+                            model=model,
+                            api_key=api_key,
+                            conversation_messages=conversation,
+                            timeout_sec=call_timeout,
+                            max_output_tokens=call_max_tokens,
+                        )
+                    else:
+                        turn_text, turn_tool_calls, in_tok, out_tok = _call_agent_turn_groq(
+                            model=model,
+                            api_key=api_key,
+                            conversation_messages=conversation,
+                            timeout_sec=call_timeout,
+                            max_output_tokens=call_max_tokens,
+                        )
+
+                    dt_ms = int((time.perf_counter() - t_call) * 1000)
+                    cb.record_success()
+                    prompt_tokens_used += in_tok
+                    completion_tokens_used += out_tok
+                    total_tokens_used += in_tok + out_tok
+                    active_provider = provider
+                    active_model = model
+                    if idx > 0:
+                        fallback_used = True
+                    turn_succeeded = True
+
+                    _safe_record_trace(
+                        trace_group_id=trace_group_id,
+                        operation="agent_turn",
+                        provider=provider,
+                        model=model,
+                        attempt_number=turn,
+                        success=True,
+                        latency_ms=dt_ms,
+                        prompt_tokens=in_tok,
+                        completion_tokens=out_tok,
+                        tool_calls=[{"name": tc["name"], "args": tc.get("args") or {}} for tc in turn_tool_calls],
+                        metadata={"turn": turn, "tier": tier, "fallback_used": fallback_used},
+                    )
+                    break
+                except AIProviderError as exc:
+                    dt_ms = int((time.perf_counter() - t_call) * 1000)
+                    cb.record_failure(exc.code)
+                    _safe_record_trace(
+                        trace_group_id=trace_group_id,
+                        operation="agent_turn",
+                        provider=provider,
+                        model=model,
+                        attempt_number=turn,
+                        success=False,
+                        latency_ms=dt_ms,
+                        error_code=exc.code,
+                        error_detail=exc.message,
+                        metadata={"turn": turn, "tier": tier},
+                    )
+                    fallback_used = True
+                    continue
+                except Exception as exc:
+                    dt_ms = int((time.perf_counter() - t_call) * 1000)
+                    cb.record_failure("UNEXPECTED_ERROR")
+                    _safe_record_trace(
+                        trace_group_id=trace_group_id,
+                        operation="agent_turn",
+                        provider=provider,
+                        model=model,
+                        attempt_number=turn,
+                        success=False,
+                        latency_ms=dt_ms,
+                        error_code="UNEXPECTED_ERROR",
+                        error_detail=type(exc).__name__,
+                        metadata={"turn": turn, "tier": tier},
+                    )
+                    fallback_used = True
+                    continue
+
+            if not turn_succeeded:
+                # Caída total de proveedores IA: responder con respaldo SQL determinista sin error técnico
+                answer = _deterministic_sql_fallback_answer(query, executed_tools)
+                for et in executed_tools:
+                    res_obj = et.get("result") or {}
+                    if res_obj.get("requiere_aprobacion_humana"):
+                        requires_human_approval = True
+                        pending_approval_id = res_obj.get("approval_id")
+                        guardrail_triggered = guardrail_triggered or "HUMAN_APPROVAL_REQUIRED"
+                total_ms = int((time.perf_counter() - t_start) * 1000)
+                return {
+                    "answer": sanitize_citizen_agent_output(answer),
+                    "trace_group_id": str(trace_group_id),
+                    "tools_invoked": executed_tools,
+                    "iterations_used": iterations_used,
+                    "max_iterations": eff_max_iter,
+                    "total_tokens_used": total_tokens_used,
+                    "max_tokens_budget": eff_max_tokens,
+                    "latency_ms": total_ms,
+                    "guardrail_triggered": guardrail_triggered,
+                    "requires_human_approval": requires_human_approval,
+                    "pending_approval_id": pending_approval_id,
+                    "degraded_sql_mode": True,
                 }
-            )
 
-        if guardrail_triggered == "TIMEOUT":
-            break
+            # Verificar si expiró el tiempo o el saldo de tokens tras el turno del modelo
+            if time.monotonic() >= deadline_monotonic:
+                guardrail_triggered = "TIMEOUT"
+                break
 
-        if turn >= eff_max_iter:
-            guardrail_triggered = guardrail_triggered or "MAX_ITERATIONS"
-            break
+            if total_tokens_used >= eff_max_tokens:
+                guardrail_triggered = "MAX_TOKENS"
+                break
 
-    # Si salimos del bucle por alcanzar un guardrail (MAX_ITERATIONS, MAX_TOKENS, TIMEOUT o HUMAN_APPROVAL_REQUIRED)
-    answer = _deterministic_sql_fallback_answer(query, executed_tools)
-    total_ms = int((time.perf_counter() - t_start) * 1000)
-    return {
-        "answer": answer,
-        "trace_group_id": str(trace_group_id),
-        "tools_invoked": executed_tools,
-        "iterations_used": iterations_used,
-        "max_iterations": eff_max_iter,
-        "total_tokens_used": total_tokens_used,
-        "max_tokens_budget": eff_max_tokens,
-        "latency_ms": total_ms,
-        "guardrail_triggered": guardrail_triggered,
-        "requires_human_approval": requires_human_approval,
-        "pending_approval_id": pending_approval_id,
-        "degraded_sql_mode": False,
-    }
+            # Si el modelo no pidió más herramientas y dio respuesta final
+            if not turn_tool_calls:
+                final_answer = turn_text or _deterministic_sql_fallback_answer(query, executed_tools)
+                for et in executed_tools:
+                    res_obj = et.get("result") or {}
+                    if res_obj.get("encontrado") and isinstance(res_obj.get("reporte"), dict):
+                        rep = res_obj["reporte"]
+                        tcode = rep.get("tracking_code", "")
+                        if tcode and tcode not in final_answer:
+                            final_answer += f" [Radicado SQL: {tcode} · {rep.get('effective_category')} · {rep.get('effective_severity')} · {rep.get('comuna')} · {rep.get('status')}]"
+                    elif 0 < int(res_obj.get("total_encontrados", 0)) <= 5:
+                        items = res_obj.get("items") or []
+                        missing_codes = [
+                            f"{it['tracking_code']} ({it.get('effective_category')}, {it.get('comuna')}, {it.get('neighborhood')}, {it.get('status')})"
+                            for it in items
+                            if it.get("tracking_code") and it["tracking_code"] not in final_answer
+                        ]
+                        if missing_codes:
+                            final_answer += " [Registros SQL verificados: " + "; ".join(missing_codes) + "]"
+                total_ms = int((time.perf_counter() - t_start) * 1000)
+                return {
+                    "answer": sanitize_citizen_agent_output(final_answer),
+                    "trace_group_id": str(trace_group_id),
+                    "tools_invoked": executed_tools,
+                    "iterations_used": iterations_used,
+                    "max_iterations": eff_max_iter,
+                    "total_tokens_used": total_tokens_used,
+                    "max_tokens_budget": eff_max_tokens,
+                    "latency_ms": total_ms,
+                    "guardrail_triggered": guardrail_triggered,
+                    "requires_human_approval": requires_human_approval,
+                    "pending_approval_id": pending_approval_id,
+                    "degraded_sql_mode": False,
+                }
+
+            # Ejecutar cada herramienta solicitada con control de timeout por herramienta y deadline global
+            rem_tools_budget = deadline_monotonic - time.monotonic()
+            if rem_tools_budget <= 0.05:
+                guardrail_triggered = "TIMEOUT"
+                break
+
+            for tc in turn_tool_calls:
+                tname = tc["name"]
+                targs = tc.get("args") or {}
+                raw_gpart = tc.get("raw_gemini_part")
+                conversation.append(
+                    {
+                        "role": "assistant_tool",
+                        "name": tname,
+                        "args": targs,
+                        "raw_gemini_part": raw_gpart,
+                    }
+                )
+
+                rem_for_tool = deadline_monotonic - time.monotonic()
+                if rem_for_tool <= 0.05:
+                    guardrail_triggered = "TIMEOUT"
+                    break
+
+                eff_tool_timeout = min(tool_timeout_seconds, rem_for_tool)
+                try:
+                    t_res = execute_tool_with_timeout(
+                        tname,
+                        targs,
+                        timeout_sec=eff_tool_timeout,
+                        deadline=min(deadline_monotonic, time.monotonic() + eff_tool_timeout),
+                    )
+                except TimeoutError as exc:
+                    guardrail_triggered = "TIMEOUT"
+                    _safe_record_trace(
+                        trace_group_id=trace_group_id,
+                        operation="tool_timeout",
+                        provider=active_provider,
+                        model=active_model,
+                        attempt_number=turn,
+                        success=False,
+                        latency_ms=int(eff_tool_timeout * 1000),
+                        error_code="TOOL_TIMEOUT",
+                        error_detail=str(exc),
+                    )
+                    break
+
+                if t_res.get("requiere_aprobacion_humana"):
+                    requires_human_approval = True
+                    pending_approval_id = t_res.get("approval_id")
+                    guardrail_triggered = "HUMAN_APPROVAL_REQUIRED"
+
+                executed_tools.append({"tool": tname, "args": targs, "result": t_res})
+                conversation.append(
+                    {
+                        "role": "tool_result",
+                        "name": tname,
+                        "result": t_res,
+                        "had_gemini_part": bool(raw_gpart),
+                    }
+                )
+
+            if guardrail_triggered == "TIMEOUT":
+                break
+
+            if turn >= eff_max_iter:
+                guardrail_triggered = guardrail_triggered or "MAX_ITERATIONS"
+                break
+
+        # Si salimos del bucle por alcanzar un guardrail (MAX_ITERATIONS, MAX_TOKENS, TIMEOUT o HUMAN_APPROVAL_REQUIRED)
+        answer = _deterministic_sql_fallback_answer(query, executed_tools)
+        total_ms = int((time.perf_counter() - t_start) * 1000)
+        return {
+            "answer": sanitize_citizen_agent_output(answer),
+            "trace_group_id": str(trace_group_id),
+            "tools_invoked": executed_tools,
+            "iterations_used": iterations_used,
+            "max_iterations": eff_max_iter,
+            "total_tokens_used": total_tokens_used,
+            "max_tokens_budget": eff_max_tokens,
+            "latency_ms": total_ms,
+            "guardrail_triggered": guardrail_triggered,
+            "requires_human_approval": requires_human_approval,
+            "pending_approval_id": pending_approval_id,
+            "degraded_sql_mode": False,
+        }
+    finally:
+        reset_deadline_context(token_context)
 
 
 def list_pending_approvals(status: str | None = None) -> list[dict[str, Any]]:

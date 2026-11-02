@@ -317,7 +317,7 @@ def get_latest_trace_info(trace_group_id: str) -> dict[str, Any]:
     }
 
 
-def run_evaluation(mode: str = "all", pause_sec: float = 0.7) -> dict[str, Any]:
+def run_evaluation(mode: str = "all", pause_sec: float = 2.5) -> dict[str, Any]:
     import os
     import shutil
     import tempfile
@@ -615,6 +615,6 @@ def run_evaluation(mode: str = "all", pause_sec: float = 0.7) -> dict[str, Any]:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Ejecuta la suite de evaluación de CIVIA.")
     parser.add_argument("--mode", choices=["all", "deterministic", "offline", "live"], default="all")
-    parser.add_argument("--pause", type=float, default=0.7)
+    parser.add_argument("--pause", type=float, default=2.5)
     args = parser.parse_args()
     run_evaluation(mode=args.mode, pause_sec=args.pause)
