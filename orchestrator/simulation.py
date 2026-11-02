@@ -72,7 +72,8 @@ class SimulationDriver:
         instructions: str,
         commit_sha: str | None = None,
     ) -> tuple[dict[str, Any], ProcessResult]:
-        active_sha = cls.injected_sha or commit_sha or "5b36fb55"
+        valid_40_sha = "5b36fb55f87dc49e3256f9814cddb47e3cb3b800"
+        active_sha = cls.injected_sha or commit_sha or valid_40_sha
 
         if cls.current_scenario == "CLI_UNAUTHENTICATED_AUDITOR":
             dummy = ProcessResult(
@@ -99,7 +100,7 @@ class SimulationDriver:
                 "status": "PASS",
                 "commit_sha": active_sha,
                 "findings": [{"id": finding_id, "status": "PASS", "summary": "Fix ok"}],
-                "evidence": ["Evidencia sustantiva pero proceso falló al salir."],
+                "evidence": ["Evidencia de ejecución de prueba test_remediation_worker_timeout."],
                 "summary": "PASS emitido pero exit code 1",
                 "tests_executed": 3,
             }
@@ -107,14 +108,27 @@ class SimulationDriver:
             return pass_report, proc
 
         if cls.current_scenario == "AUDITOR_PASS_EMPTY_EVIDENCE":
-            # Escenario 2: Codex emite PASS sin evidencias o con tests_executed=0
+            # Escenario 2: Codex emite PASS sin evidencias o con evidencias genéricas fabricadas
             pass_report = {
                 "status": "PASS",
                 "commit_sha": active_sha,
                 "findings": [{"id": finding_id, "status": "PASS", "summary": "Fix ok"}],
-                "evidence": [],  # Vacío
-                "summary": "PASS sin evidencia.",
-                "tests_executed": 0,
+                "evidence": ["Contraejemplos ejecutados con resultado limpio."],  # Frase genérica prohibida
+                "summary": "PASS con evidencia genérica vacía.",
+                "tests_executed": 1,
+            }
+            proc = ProcessResult(returncode=0, stdout=json.dumps(pass_report), stderr="", elapsed_seconds=1.0)
+            return pass_report, proc
+
+        if cls.current_scenario == "AUDITOR_PASS_BOOLEAN_TESTS":
+            # Escenario: Codex emite PASS pero con tests_executed=True (trampa de tipo booleano)
+            pass_report = {
+                "status": "PASS",
+                "commit_sha": active_sha,
+                "findings": [{"id": finding_id, "status": "PASS", "summary": "Fix ok"}],
+                "evidence": ["Ejecución de prueba test_adversarial_timeout_rollback en base desechable."],
+                "summary": "PASS con tests_executed booleano.",
+                "tests_executed": True,  # Trampa booleana
             }
             proc = ProcessResult(returncode=0, stdout=json.dumps(pass_report), stderr="", elapsed_seconds=1.0)
             return pass_report, proc
@@ -127,7 +141,7 @@ class SimulationDriver:
                 "findings": [
                     {"id": finding_id, "status": "FAIL", "summary": "Worker timeout still fails.", "blocking_issue": "Timeout"}
                 ],
-                "evidence": ["Contraejemplo falló."],
+                "evidence": ["Contraejemplo de prueba test_worker falló con timeout."],
                 "summary": "Incoherencia global PASS con individual FAIL.",
                 "tests_executed": 2,
             }
@@ -135,12 +149,12 @@ class SimulationDriver:
             return incoherent_report, proc
 
         if cls.current_scenario == "AUDITOR_SHA_MISMATCH":
-            # Escenario 4: Codex audita un SHA diferente al generado
+            # Escenario 4: Codex audita un SHA diferente de 40 caracteres
             mismatch_report = {
                 "status": "PASS",
-                "commit_sha": "deadbeef12345678",  # SHA diferente
+                "commit_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",  # SHA diferente de 40 caracteres
                 "findings": [{"id": finding_id, "status": "PASS", "summary": "Aprobado en commit equivocado"}],
-                "evidence": ["Evidencia de commit viejo."],
+                "evidence": ["Prueba test_sha_mismatch ejecutada en checkout anterior."],
                 "summary": "Aprobado en SHA viejo.",
                 "tests_executed": 3,
             }
@@ -202,12 +216,15 @@ class SimulationDriver:
                     "id": finding_id,
                     "status": "PASS",
                     "summary": f"Hallazgo {finding_id} remediado satisfactoriamente.",
-                    "evidence": "Contraejemplos ejecutados con resultado limpio sin escrituras posteriores.",
+                    "evidence": "Prueba adversarial de trigger diferido ejecutada con rollback confirmado en 0.25s.",
                     "blocking_issue": None,
                 }
             ],
-            "evidence": ["Pruebas adversariales aprobadas sin escrituras posteriores en PostgreSQL 17."],
-            "summary": f"Dictamen PASS para {finding_id}.",
+            "evidence": [
+                "Prueba test_adversarial_deferred_trigger ejecutada contra civia_test_db con rollback confirmado.",
+                "Consulta de verificación confirmó cero escrituras posteriores a la señal de cancelación.",
+            ],
+            "summary": f"Dictamen PASS verificado para {finding_id}.",
             "tests_executed": 3,
         }
         mock_tokens = {"input_tokens": 2500, "output_tokens": 300, "total_tokens": 2800}

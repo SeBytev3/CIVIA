@@ -16,7 +16,11 @@ import shutil
 import time
 from typing import Any, Generator
 
-from orchestrator.security import StateCorruptionError
+from orchestrator.security import (
+    LockAcquisitionError,
+    SecurityViolationError,
+    StateCorruptionError,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -43,7 +47,7 @@ class IterationLog:
 
 @contextmanager
 def file_lock(lock_file_path: Path, timeout: float = 10.0) -> Generator[None, None, None]:
-    """Bloqueo de archivo multiplataforma con espera acotada."""
+    """Bloqueo de archivo multiplataforma con espera acotada y adquisición estricta."""
     start_time = time.monotonic()
     acquired = False
 
@@ -61,14 +65,22 @@ def file_lock(lock_file_path: Path, timeout: float = 10.0) -> Generator[None, No
             time.sleep(0.05)
 
     if not acquired:
-        # Si el lock es muy viejo (> 30s), asumir proceso muerto y recuperar
+        # Intentar recuperar solo si el lock supera 60s de antigüedad (proceso muerto)
         try:
             mtime = lock_file_path.stat().st_mtime
-            if time.time() - mtime > 30.0:
+            if time.time() - mtime > 60.0:
                 lock_file_path.unlink(missing_ok=True)
+                fd = os.open(str(lock_file_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                os.close(fd)
                 acquired = True
         except Exception:
             pass
+
+    if not acquired:
+        raise LockAcquisitionError(
+            f"No se pudo adquirir el bloqueo exclusivo en '{lock_file_path}' tras {timeout}s. "
+            "Operación abortada para evitar condiciones de carrera o escrituras concurrentes."
+        )
 
     try:
         yield
@@ -134,9 +146,17 @@ class OrchestratorState:
     @classmethod
     def load(cls, state_path: Path | None = None, simulation_mode: bool = False) -> OrchestratorState:
         target_path = state_path or cls.get_default_path(simulation_mode)
+
+        # Separación irreversible entre SIMULATED y REAL
+        if simulation_mode and (target_path == DEFAULT_STATE_PATH or not target_path.name.startswith("simulation_")):
+            raise SecurityViolationError("Prohibido cargar el estado de producción en modo simulación.")
+        if not simulation_mode and (target_path == DEFAULT_SIMULATION_STATE_PATH or target_path.name.startswith("simulation_")):
+            raise SecurityViolationError("Prohibido cargar el estado de simulación en modo producción.")
+
         if not target_path.exists():
             instance = cls()
             instance.is_simulation = simulation_mode
+            instance._state_path = target_path
             return instance
 
         lock_path = target_path.with_suffix(".lock")
@@ -178,6 +198,20 @@ class OrchestratorState:
 
     def save(self, state_path: Path | None = None) -> None:
         target_path = state_path or getattr(self, "_state_path", None) or self.get_default_path(self.is_simulation)
+
+        # Separación irreversible entre estado SIMULATED y REAL
+        if self.is_simulation:
+            if target_path == DEFAULT_STATE_PATH or not target_path.name.startswith("simulation_"):
+                raise SecurityViolationError(
+                    f"Contaminación de estado bloqueada: una ejecución en modo simulación intentó guardar "
+                    f"en el estado real de producción '{target_path}'."
+                )
+        else:
+            if target_path == DEFAULT_SIMULATION_STATE_PATH or target_path.name.startswith("simulation_"):
+                raise SecurityViolationError(
+                    f"Contaminación de estado bloqueada: una ejecución real intentó guardar en '{target_path}'."
+                )
+
         if state_path:
             self._state_path = state_path
         target_path.parent.mkdir(parents=True, exist_ok=True)

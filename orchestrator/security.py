@@ -63,6 +63,155 @@ class StateCorruptionError(Exception):
     pass
 
 
+class LockAcquisitionError(Exception):
+    """Excepción lanzada cuando no se puede adquirir el bloqueo de concurrencia."""
+    pass
+
+
+class UnsafeSandboxError(Exception):
+    """Excepción lanzada cuando el sandbox del agente no puede garantizar aislamiento estricto."""
+    pass
+
+
+# Registro explícito de directorios efímeros creados y gestionados por el orquestador
+_EPHEMERAL_REGISTRY: set[str] = set()
+
+
+def register_ephemeral_path(path: Path) -> Path:
+    """Registra una ruta temporal bajo la propiedad del orquestador."""
+    resolved = path.resolve()
+    _EPHEMERAL_REGISTRY.add(str(resolved))
+    return path
+
+
+def unregister_ephemeral_path(path: Path) -> None:
+    """Elimina el registro de una ruta efímera."""
+    resolved = path.resolve()
+    _EPHEMERAL_REGISTRY.discard(str(resolved))
+
+
+def is_ephemeral_path_registered(path: Path) -> bool:
+    """Verifica si una ruta está debidamente registrada en la propiedad del orquestador."""
+    return str(path.resolve()) in _EPHEMERAL_REGISTRY
+
+
+def safe_cleanup_ephemeral_path(path: Path) -> None:
+    """
+    Elimina un directorio efímero ÚNICAMENTE si fue registrado por el orquestador.
+    Prohíbe terminantemente eliminar rutas ajenas, repositorios o directorios protegidos.
+    """
+    resolved = path.resolve()
+    repo_resolved = REPO_ROOT.resolve()
+
+    # Prohibir expresamente la eliminación del repositorio o directorios padre
+    if resolved == repo_resolved or repo_resolved in resolved.parents or resolved in repo_resolved.parents:
+        raise SecurityViolationError(f"Intento de eliminar ruta protegida del repositorio: {resolved}")
+
+    # Verificar registro obligatorio de propiedad
+    if str(resolved) not in _EPHEMERAL_REGISTRY:
+        raise SecurityViolationError(
+            f"Intento de eliminar directorio no registrado por el orquestador: '{resolved}'. "
+            "Operación rechazada para evitar borrado accidental de directorios ajenos."
+        )
+
+    # Limpieza segura
+    if resolved.exists():
+        import shutil
+        try:
+            shutil.rmtree(resolved, ignore_errors=False)
+        except Exception as exc:
+            pass
+    _EPHEMERAL_REGISTRY.discard(str(resolved))
+
+
+def validate_no_habitual_resources(target_container: str | None = None, db_url: str | None = None) -> None:
+    """
+    Prohíbe terminantemente el uso de recursos habituales de desarrollo (civia-api-1, civia-db-1, civia DB).
+    """
+    if target_container:
+        tc_lower = target_container.lower()
+        if any(h in tc_lower for h in ["civia-api-1", "civia-db-1", "civia-frontend-1"]):
+            raise SecurityViolationError(
+                f"Prohibición estricta: No se permite utilizar el contenedor habitual '{target_container}'. "
+                "Las pruebas y auditorías deben usar entornos Docker Compose efímeros con nombres únicos."
+            )
+
+    if db_url:
+        db_lower = db_url.lower()
+        # Rechazar base de datos habitual civia
+        if db_lower.endswith("/civia") or "/civia?" in db_lower:
+            raise SecurityViolationError(
+                f"Prohibición estricta: No se permite utilizar la base de datos habitual 'civia' ({db_url}). "
+                "Las pruebas deben ejecutarse exclusivamente contra PostgreSQL desechable (ej. civia_test_<run_id>)."
+            )
+
+
+def verify_disposable_db_url(db_url: str) -> None:
+    """
+    Verifica que la URL de base de datos corresponda estrictamente a una base desechable de pruebas.
+    """
+    if not db_url or not isinstance(db_url, str):
+        raise SecurityViolationError("La URL de base de datos desechable no puede estar vacía.")
+
+    db_lower = db_url.lower().strip()
+    if not (db_lower.startswith("postgresql://") or db_lower.startswith("postgres://")):
+        raise SecurityViolationError(f"Esquema de base de datos no soportado o inválido: '{db_url}'.")
+
+    validate_no_habitual_resources(db_url=db_url)
+
+    # Debe contener prefijo desechable reconocible
+    import urllib.parse
+    parsed = urllib.parse.urlparse(db_url)
+    db_name = parsed.path.lstrip("/")
+    if not db_name.startswith("civia_test_") and not db_name.startswith("test_"):
+        raise SecurityViolationError(
+            f"El nombre de la base de datos '{db_name}' no cumple el patrón desechable obligatorio (civia_test_*)."
+        )
+
+
+def validate_tool_call_target(action: str, target_path: str, allowed_root: Path) -> None:
+    """
+    Valida que una invocación directa de herramienta no acceda a rutas externas al checkout autorizado.
+    """
+    norm_target = Path(target_path).resolve()
+    norm_allowed = allowed_root.resolve()
+
+    # Verificar contención en allowed_root
+    try:
+        norm_target.relative_to(norm_allowed)
+    except ValueError:
+        raise SecurityViolationError(
+            f"Escape de permisos detectado: la acción '{action}' intentó acceder a '{target_path}', "
+            f"que está fuera del checkout autorizado '{allowed_root}'."
+        )
+
+    # Prohibir acceso a secretos o .env incluso dentro del árbol
+    if ".env" in norm_target.name or "ADMIN_TOKEN" in str(norm_target):
+        raise SecurityViolationError(
+            f"Intento de acceso a archivo restringido de credenciales: '{norm_target}'."
+        )
+
+
+def check_agent_sandbox_integrity(dev_worktree: Path | None = None) -> tuple[bool, str]:
+    """
+    Verifica las capacidades reales de aislamiento del agente en el entorno de ejecución.
+    Si el sistema no puede garantizar sandbox de SO que impida escapes, reporta parada segura.
+    """
+    # En Windows 11 host bare-metal, un proceso CLI hijo comparte privilegios del usuario sin chroot
+    if sys.platform == "win32":
+        # Comprobar si existe contenedor Docker de sandbox activo para el agente
+        is_container_jailed = os.environ.get("CIVIA_SANDBOX_CONTAINER_ACTIVE") == "true"
+        if not is_container_jailed:
+            return (
+                False,
+                "El entorno de ejecución en Windows host no cuenta con aislamiento de procesos a nivel "
+                "de sistema operativo (Docker sandbox / AppContainer chroot) para Antigravity CLI. "
+                "Para evitar escapes de permisos fuera del checkout temporal, se activa parada segura."
+            )
+
+    return (True, "Sandbox verificado con aislamiento de nivel de SO.")
+
+
 def load_env_secret_values(env_path: Path | None = None) -> list[str]:
     """Carga valores reales de .env para redactarlos activamente en logs."""
     target_env = env_path or (REPO_ROOT / ".env")

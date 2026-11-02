@@ -27,11 +27,14 @@ from orchestrator.preflight import (
 )
 from orchestrator.security import (
     QuotaExceededError,
+    SecurityViolationError,
     StalledAgentError,
     TestSyncError,
     get_sanitized_agent_env,
     kill_process_tree,
     redact_secrets,
+    validate_no_habitual_resources,
+    verify_disposable_db_url,
 )
 
 
@@ -123,7 +126,7 @@ def run_subprocess_safe(
 
 
 class DeveloperRunner:
-    """Invoca a Antigravity CLI (`agy`) para implementar correcciones."""
+    """Invoca a Antigravity CLI (`agy`) para implementar correcciones en un worktree aislado."""
 
     def __init__(self, config: OrchestratorConfig) -> None:
         self.config = config
@@ -132,11 +135,19 @@ class DeveloperRunner:
         self,
         finding_id: str,
         instructions: str,
+        dev_worktree: Path | None = None,
         context_files: list[Path] | None = None,
     ) -> ProcessResult:
         if self.config.simulation_mode:
             from orchestrator.simulation import SimulationDriver
             return SimulationDriver.run_developer_turn(finding_id, instructions)
+
+        target_dir = dev_worktree or REPO_ROOT
+        if target_dir.resolve() == REPO_ROOT.resolve():
+            raise SecurityViolationError(
+                "Aislamiento obligatorio violado: Antigravity no puede ejecutarse directamente en REPO_ROOT. "
+                "Debe utilizar un checkout independiente (dev_worktree)."
+            )
 
         binary = resolve_binary_path(self.config.agy_binary, WELL_KNOWN_AGY_PATHS)
         if not binary:
@@ -153,7 +164,21 @@ class DeveloperRunner:
             "Reglas: Trabajar sobre una única tarea, aplicar cambios con pruebas y verificar en base desechable."
         )
 
-        # Utilizar la interfaz real confirmada de agy
+        # Configuración estricta de permisos por sesión: NUNCA --dangerously-skip-permissions
+        # Se restringen las operaciones de archivo al worktree temporal autorizado
+        allowed_prefix = target_dir.as_posix()
+        settings_payload = json.dumps(
+            {
+                "permissions": {
+                    "allow": [
+                        f"read_file({allowed_prefix}/*)",
+                        f"write_file({allowed_prefix}/*)",
+                        f"edit_file({allowed_prefix}/*)",
+                    ]
+                }
+            }
+        )
+
         cmd = [
             binary,
             "-p",
@@ -162,10 +187,12 @@ class DeveloperRunner:
             self.config.developer_model,
             "--output-format",
             "json",
-            "--dangerously-skip-permissions",
+            "--sandbox",
+            "--settings",
+            settings_payload,
         ]
 
-        result = run_subprocess_safe(cmd, timeout=self.config.agent_timeout_seconds)
+        result = run_subprocess_safe(cmd, cwd=target_dir, timeout=self.config.agent_timeout_seconds)
 
         # Extraer métricas de tokens y validar status si agy emitió JSON
         tokens_used = {}
@@ -325,7 +352,11 @@ class AuditorRunner:
 
 
 class TestRunner:
-    """Ejecuta pruebas deterministas con recursos desechables y validación de SHA sincronizado."""
+    """
+    Ejecuta pruebas deterministas con recursos efímeros y verificación de PostgreSQL desechable.
+    Prohíbe terminantemente el uso del contenedor habitual civia-api-1 o la base de datos de producción.
+    """
+    __test__ = False
 
     def __init__(self, config: OrchestratorConfig) -> None:
         self.config = config
@@ -335,70 +366,33 @@ class TestRunner:
         target_pattern: str | None = None,
         expected_commit_sha: str | None = None,
         disposable_db_url: str | None = None,
+        target_container: str | None = None,
     ) -> ProcessResult:
         if self.config.simulation_mode:
             return ProcessResult(0, "SIMULATED: All tests passed successfully.", "", 0.05)
 
-        # Generar nombre de base de datos desechable por corrida
         run_id = uuid.uuid4().hex[:8]
-        test_db_name = f"{self.config.disposable_db_prefix}{run_id}"
+        effective_db_url = disposable_db_url or f"postgresql://civia:local_dev_change_me@localhost:5432/{self.config.disposable_db_prefix}{run_id}"
 
-        # Sincronizar archivos modificados con civia-api-1
-        try:
-            subprocess.run(
-                ["docker", "cp", "backend/app", "civia-api-1:/app/"],
-                cwd=str(REPO_ROOT),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-            subprocess.run(
-                ["docker", "cp", "backend/tests", "civia-api-1:/app/"],
-                cwd=str(REPO_ROOT),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
-        except Exception as exc:
-            raise TestSyncError(f"Error sincronizando código de pruebas al contenedor: {exc}") from exc
+        # 1. Prohibición estricta de contenedor habitual civia-api-1 y BD civia
+        validate_no_habitual_resources(target_container=target_container, db_url=effective_db_url)
 
-        # Validar sincronización de SHA si se especificó
+        # 2. Verificación rigurosa de base de datos desechable
+        verify_disposable_db_url(effective_db_url)
+
+        # 3. Ejecución de pruebas aisladas en entorno local o contenedor efímero
+        # Se inyecta la URL de base de datos desechable verificada
+        local_env = os.environ.copy()
+        local_env["DATABASE_URL"] = effective_db_url
+        local_env["TEST_DATABASE_URL"] = effective_db_url
+        local_env["TEST_RUN_ID"] = run_id
         if expected_commit_sha:
-            sha_marker = expected_commit_sha.strip()
-            # Escribir marcador de SHA en contenedor y comprobar
-            marker_file = Path(tempfile.gettempdir()) / f"civia_sha_{run_id}.txt"
-            marker_file.write_text(sha_marker, encoding="utf-8")
-            try:
-                subprocess.run(
-                    ["docker", "cp", str(marker_file), "civia-api-1:/app/.commit_sha"],
-                    check=False,
-                )
-            finally:
-                marker_file.unlink(missing_ok=True)
+            local_env["EXPECTED_COMMIT_SHA"] = expected_commit_sha
 
-        cmd = [
-            "docker",
-            "exec",
-            "-e",
-            f"TEST_RUN_ID={run_id}",
-            "civia-api-1",
-            "pytest",
-            "-v",
-        ]
+        # Ejecución determinista mediante pytest aislado
+        cmd = ["python", "-m", "pytest", "backend/tests", "-v"]
         if target_pattern:
             cmd.extend(["-k", target_pattern])
 
-        result = run_subprocess_safe(cmd, timeout=self.config.test_timeout_seconds)
-        if result.returncode == 0:
-            return result
-
-        # Si Docker no está corriendo, ejecutar en python local contra base desechable
-        if "no such container" in result.stderr.lower() or "docker" in result.stderr.lower():
-            local_env = os.environ.copy()
-            local_env["TEST_RUN_ID"] = run_id
-            local_cmd = ["python", "-m", "pytest", "backend/tests", "-v"]
-            if target_pattern:
-                local_cmd.extend(["-k", target_pattern])
-            return run_subprocess_safe(local_cmd, timeout=self.config.test_timeout_seconds, env=local_env)
-
+        result = run_subprocess_safe(cmd, cwd=REPO_ROOT, timeout=self.config.test_timeout_seconds, env=local_env)
         return result

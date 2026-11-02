@@ -18,6 +18,17 @@ class AuditReportValidationError(Exception):
 
 
 VALID_STATUSES = {"PASS", "FAIL", "PARCIAL"}
+HEX_40_REGEX = re.compile(r"^[0-9a-fA-F]{40}$")
+
+FORBIDDEN_GENERIC_EVIDENCE = [
+    "contraejemplos ejecutados con resultado limpio",
+    "dictamen pass para",
+    "sin problemas",
+    "pruebas aprobadas",
+    "hallazgo remediado satisfactoriamente",
+    "evidencia satisfactoria",
+    "todo ok",
+]
 
 
 def extract_json_from_text(raw_text: str) -> dict[str, Any] | None:
@@ -89,19 +100,28 @@ def validate_audit_report(
         )
     data["status"] = status_upper
 
-    # Validar coherencia de SHA si se exige verificación
+    # Validar coherencia de SHA exacto de 40 caracteres si se exige verificación
     reported_sha = data.get("commit_sha")
     if expected_commit_sha:
         if not reported_sha or not isinstance(reported_sha, str):
             raise AuditReportValidationError(
                 f"El informe no incluye 'commit_sha' pero se esperaba verificación del commit '{expected_commit_sha}'."
             )
-        # Comparar por prefijo de al menos 7 caracteres o coincidencia exacta
         norm_expected = expected_commit_sha.lower().strip()
         norm_reported = reported_sha.lower().strip()
-        if not (norm_expected.startswith(norm_reported) or norm_reported.startswith(norm_expected)):
+
+        # Exigir longitud exacta de 40 caracteres hexadecimales
+        if not HEX_40_REGEX.match(norm_expected):
             raise AuditReportValidationError(
-                f"Discrepancia de SHA: el auditor evaluó '{reported_sha}' pero el desarrollador generó '{expected_commit_sha}'."
+                f"El commit esperado '{expected_commit_sha}' no es un SHA hexadecimal válido de 40 caracteres."
+            )
+        if not HEX_40_REGEX.match(norm_reported):
+            raise AuditReportValidationError(
+                f"El commit auditado '{reported_sha}' no es un SHA hexadecimal válido de 40 caracteres."
+            )
+        if norm_expected != norm_reported:
+            raise AuditReportValidationError(
+                f"Discrepancia exacta de SHA de 40 caracteres: el auditor evaluó '{reported_sha}' pero el commit esperado es '{expected_commit_sha}'."
             )
 
     findings = data.get("findings")
@@ -148,23 +168,33 @@ def validate_audit_report(
     if not isinstance(evidence, list):
         raise AuditReportValidationError("El campo 'evidence' debe ser una lista de evidencias reproducibles.")
 
-    # Si el dictamen es PASS, exigir evidencias obligatorias no vacías y pruebas ejecutadas
+    # Si el dictamen es PASS, exigir evidencias obligatorias no vacías, no genéricas y pruebas ejecutadas
     if status_upper == "PASS":
         if len(evidence) == 0:
             raise AuditReportValidationError("Rechazo de PASS: lista de evidencias vacía.")
 
-        has_substantive_evidence = any(
-            isinstance(e, str) and len(e.strip()) >= 10 for e in evidence
-        )
-        if not has_substantive_evidence:
+        valid_evidence_items = []
+        for e in evidence:
+            if not isinstance(e, str):
+                continue
+            e_clean = e.strip()
+            if len(e_clean) < 15:
+                continue
+            e_lower = e_clean.lower()
+            if any(forbidden in e_lower for forbidden in FORBIDDEN_GENERIC_EVIDENCE):
+                continue
+            valid_evidence_items.append(e_clean)
+
+        if not valid_evidence_items:
             raise AuditReportValidationError(
-                "Rechazo de PASS: las evidencias no contienen descripciones técnicas reproducibles sustantivas."
+                "Rechazo de PASS: las evidencias presentadas son vacías, genéricas o no respaldadas por artefactos verificables."
             )
 
         tests_executed = data.get("tests_executed")
-        if tests_executed is None or not isinstance(tests_executed, int) or tests_executed < 1:
+        # Rechazar categóricamente booleanos (en Python isinstance(True, int) == True)
+        if isinstance(tests_executed, bool) or not isinstance(tests_executed, int) or tests_executed < 1:
             raise AuditReportValidationError(
-                f"Rechazo de PASS: tests_executed debe ser un entero >= 1 (reportado: {tests_executed})."
+                f"Rechazo de PASS: 'tests_executed' debe ser un entero estrictamente numérico >= 1 (recibido: {repr(tests_executed)})."
             )
 
     return data

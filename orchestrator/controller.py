@@ -22,11 +22,13 @@ from orchestrator.config import OrchestratorConfig, REPO_ROOT
 from orchestrator.git_ops import (
     create_audit_worktree,
     create_checkpoint_commit,
+    create_dev_worktree,
     get_current_branch,
     get_current_head,
     get_diff_since,
     get_uncommitted_changes,
     remove_audit_worktree,
+    remove_dev_worktree,
 )
 from orchestrator.preflight import PreflightChecker
 from orchestrator.runner import AuditorRunner, DeveloperRunner, ProcessResult, TestRunner
@@ -36,7 +38,9 @@ from orchestrator.security import (
     SecurityViolationError,
     StalledAgentError,
     TestSyncError,
+    UnsafeSandboxError,
     WorktreeCreationError,
+    check_agent_sandbox_integrity,
     detect_zero_diff,
     redact_secrets,
 )
@@ -74,7 +78,8 @@ class OrchestratorController:
 
         # 1. Preflight
         preflight = PreflightChecker(self.config)
-        if not preflight.check_all():
+        preflight_passed = preflight.check_all()
+        if not preflight_passed:
             preflight.print_diagnostics_report()
             print("[CIVIA-AUTOPILOT] [ALERTA] Preflight no superado. Deteniendo ejecución de forma segura.")
             self.state.status = "PREFLIGHT_FAILED"
@@ -83,6 +88,15 @@ class OrchestratorController:
             return {"status": "PREFLIGHT_FAILED", "diagnostics": preflight.diagnostics}
 
         preflight.print_diagnostics_report()
+
+        # Verificación estricta de capacidades de Sandbox antes de permitir ejecución del agente
+        is_sandbox_safe, sandbox_msg = check_agent_sandbox_integrity()
+        if not is_sandbox_safe and not self.config.simulation_mode:
+            print(f"[CIVIA-AUTOPILOT] [PARADA SEGURA] {sandbox_msg}")
+            self.state.status = "UNSAFE_AGENT_SANDBOX"
+            self.state.save()
+            self._generate_reports(f"Parada segura: {sandbox_msg}")
+            return {"status": "UNSAFE_AGENT_SANDBOX", "error": sandbox_msg}
 
         # Si se especificó un hallazgo objetivo exclusivo, enfocar la lista en él
         if self.single_finding_target:
@@ -117,16 +131,31 @@ class OrchestratorController:
             # A. Preparar instrucciones para el Agente Desarrollador (inyectando fallo de test si existe)
             dev_instructions = self._build_developer_prompt(finding)
 
-            # B. Invocación del Agente Desarrollador
+            # B. Invocación del Agente Desarrollador en checkout independiente (NUNCA REPO_ROOT)
             print(f"[CIVIA-AUTOPILOT] Invocando desarrollador para {finding}...")
+            dev_worktree = None
+            if not self.config.simulation_mode:
+                try:
+                    dev_worktree = create_dev_worktree(self.state.current_commit)
+                    print(f"[CIVIA-AUTOPILOT] Worktree de desarrollo aislado creado en: {dev_worktree}")
+                except Exception as dw_exc:
+                    msg = f"Fallo crítico al crear worktree de desarrollo: {dw_exc}."
+                    print(f"[CIVIA-AUTOPILOT] [ABORT] {msg}")
+                    self.state.status = "WORKTREE_CREATION_FAILED"
+                    self.state.save()
+                    self._generate_reports(msg)
+                    return {"status": "WORKTREE_CREATION_FAILED", "error": msg}
+
             try:
-                dev_result = self.dev_runner.execute_turn(finding, dev_instructions)
+                dev_result = self.dev_runner.execute_turn(finding, dev_instructions, dev_worktree=dev_worktree)
             except QuotaExceededError as q_err:
                 msg = f"Cuota excedida durante invocación de desarrollador: {q_err}"
                 print(f"[CIVIA-AUTOPILOT] [PAUSA] {msg}")
                 self.state.status = "HALTED_QUOTA"
                 self.state.save()
                 self._generate_reports(msg)
+                if dev_worktree:
+                    remove_dev_worktree(dev_worktree)
                 return {"status": "HALTED_QUOTA", "error": str(q_err)}
 
             if not dev_result.success:
@@ -145,24 +174,28 @@ class OrchestratorController:
                     tokens_used=dev_result.tokens_used,
                 )
                 self.state.save()
+                if dev_worktree:
+                    remove_dev_worktree(dev_worktree)
                 continue
 
-            # C. Detección de estancamiento (diff nulo y sin cambios no confirmados)
+            # C. Detección de estancamiento en el worktree del desarrollador
             if self.config.simulation_mode:
                 from orchestrator.simulation import SimulationDriver
                 diff = SimulationDriver.injected_diff
             else:
-                diff = get_diff_since(self.config.base_commit)
-                uncommitted = get_uncommitted_changes()
+                diff = get_diff_since(self.config.base_commit, repo_path=dev_worktree)
+                uncommitted = get_uncommitted_changes(dev_worktree)
                 if not uncommitted and detect_zero_diff(diff) and self.state.iteration > 1:
                     msg = f"Detección de estancamiento: el agente no introdujo ningún diff ni cambios en iteración {self.state.iteration}."
                     print(f"[CIVIA-AUTOPILOT] [STALL] {msg}")
                     self.state.status = "STALLED"
                     self.state.save()
                     self._generate_reports(msg)
+                    if dev_worktree:
+                        remove_dev_worktree(dev_worktree)
                     return {"status": "STALLED", "finding": finding}
 
-            # D. Ejecutar pruebas automatizadas deterministas
+            # D. Ejecutar pruebas automatizadas deterministas sobre recursos efímeros y BD desechable
             print("[CIVIA-AUTOPILOT] Ejecutando pruebas deterministas sobre recurso de prueba...")
             try:
                 if self.config.simulation_mode and getattr(self, "_simulate_test_failure", False):
@@ -175,6 +208,8 @@ class OrchestratorController:
                 self.state.status = "TEST_SYNC_ERROR"
                 self.state.save()
                 self._generate_reports(msg)
+                if dev_worktree:
+                    remove_dev_worktree(dev_worktree)
                 return {"status": "TEST_SYNC_ERROR", "error": str(sync_exc)}
 
             if not test_result.success:
@@ -193,17 +228,22 @@ class OrchestratorController:
                     tokens_used=dev_result.tokens_used,
                 )
                 self.state.save()
+                if dev_worktree:
+                    remove_dev_worktree(dev_worktree)
                 continue
 
             # Pruebas superadas: limpiar último diagnóstico de fallo
             self.last_test_failure = None
             print("[CIVIA-AUTOPILOT] [TEST PASS] Pruebas automatizadas aprobadas.")
 
-            # E. Checkpoint commit selectivo
+            # E. Checkpoint commit selectivo mediante índice Git aislado
             commit_msg = f"fix({self.state.active_block.lower()}): remediate {finding} (autopilot cycle {self.state.iteration})"
             if not self.config.simulation_mode:
-                new_sha = create_checkpoint_commit(commit_msg)
+                new_sha = create_checkpoint_commit(commit_msg, repo_path=dev_worktree)
                 self.state.current_commit = new_sha
+                if dev_worktree:
+                    remove_dev_worktree(dev_worktree)
+                    dev_worktree = None
             else:
                 new_sha = self.state.current_commit
 
@@ -291,7 +331,18 @@ class OrchestratorController:
             )
             self.state.save()
 
-            if audit_status == "PASS":
+            # I. Comprobación obligatoria multifactor antes de permitir cerrar un hallazgo
+            mandatory_checks_passed = (
+                preflight_passed
+                and dev_result.success
+                and test_result.success
+                and bool(new_sha and len(new_sha) == 40)
+                and audit_proc.returncode == 0
+                and audit_status == "PASS"
+                and not self.config.simulation_mode
+            )
+
+            if mandatory_checks_passed:
                 print(f"[CIVIA-AUTOPILOT] [ÉXITO] Hallazgo '{finding}' verificado y APROBADO por auditoría.")
                 self.state.mark_finding_closed(finding)
                 self.state.save()
@@ -299,7 +350,14 @@ class OrchestratorController:
                     print(f"[CIVIA-AUTOPILOT] Finalizando ejecución tras completar el hallazgo objetivo '{finding}'.")
                     break
             else:
-                print(f"[CIVIA-AUTOPILOT] [REINTENTO] Auditoría dictaminó {audit_status}. Reintentando corrección...")
+                if self.config.simulation_mode and audit_status == "PASS":
+                    print(f"[CIVIA-AUTOPILOT] [SIMULACIÓN] Dictamen PASS registrado exclusivamente en estado simulado.")
+                    self.state.mark_finding_closed(finding)
+                    self.state.save()
+                    if self.single_finding_target:
+                        break
+                else:
+                    print(f"[CIVIA-AUTOPILOT] [REINTENTO] Auditoría dictaminó {audit_status} o faltan verificaciones obligatorias. Reintentando...")
 
         # Fin del ciclo
         if not self.state.open_findings or (self.single_finding_target and self.single_finding_target in self.state.closed_findings):
