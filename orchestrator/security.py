@@ -1,5 +1,5 @@
 """
-Módulo de seguridad, guardrails y sanitización de datos del orquestador.
+Módulo de seguridad, guardrails, sanitización de datos y control de procesos del orquestador.
 """
 
 from __future__ import annotations
@@ -7,6 +7,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
+import subprocess
+import sys
+import time
 from typing import Any
 
 
@@ -42,6 +45,21 @@ class StalledAgentError(Exception):
 
 class MaxIterationsError(Exception):
     """Excepción lanzada cuando se alcanza el límite máximo de iteraciones."""
+    pass
+
+
+class WorktreeCreationError(Exception):
+    """Excepción lanzada cuando falla la creación del worktree aislado."""
+    pass
+
+
+class TestSyncError(Exception):
+    """Excepción lanzada cuando el código del entorno de pruebas no coincide con el commit auditado."""
+    __test__ = False
+
+
+class StateCorruptionError(Exception):
+    """Excepción lanzada cuando el archivo de estado contiene JSON corrupto o inválido."""
     pass
 
 
@@ -100,6 +118,7 @@ def validate_git_command(command: list[str] | str) -> None:
     Prohíbe terminantemente:
     - git push
     - merge hacia main o master
+    - eliminación de ramas principales
     """
     cmd_str = " ".join(command) if isinstance(command, list) else command
     cmd_lower = cmd_str.lower().strip()
@@ -112,6 +131,11 @@ def validate_git_command(command: list[str] | str) -> None:
     if "merge" in cmd_lower and ("main" in cmd_lower or "master" in cmd_lower):
         raise SecurityViolationError(
             f"Operación prohibida por seguridad: '{cmd_str}'. No se permite merge hacia main sin aprobación humana."
+        )
+
+    if "branch" in cmd_lower and ("-d" in cmd_lower or "-D" in cmd_lower) and ("main" in cmd_lower or "master" in cmd_lower):
+        raise SecurityViolationError(
+            f"Operación prohibida por seguridad: '{cmd_str}'. No se permite eliminar ramas principales."
         )
 
 
@@ -134,3 +158,48 @@ def validate_database_command(sql: str, db_name: str, allowed_test_prefix: str =
 def detect_zero_diff(diff_output: str) -> bool:
     """Determina si un ciclo no generó ningún cambio en el código."""
     return not bool(diff_output and diff_output.strip())
+
+
+def kill_process_tree(pid: int) -> None:
+    """Termina de forma forzada un árbol completo de procesos por PID."""
+    if pid <= 0:
+        return
+
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            import signal
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except Exception:
+            try:
+                os.kill(pid, 9)
+            except Exception:
+                pass
+
+
+def get_sanitized_agent_env() -> dict[str, str]:
+    """
+    Retorna un diccionario de variables de entorno saneado para invocar subagentes.
+    Elimina secretos administrativos y credenciales no necesarias para la tarea del agente.
+    """
+    env = os.environ.copy()
+    # Variables de alta sensibilidad a eliminar del entorno hijo del subagente
+    forbidden_vars = [
+        "ADMIN_TOKEN",
+        "POSTGRES_PASSWORD",
+        "SECRET_KEY",
+        "DATABASE_URL",
+    ]
+    for var in forbidden_vars:
+        env.pop(var, None)
+
+    return env

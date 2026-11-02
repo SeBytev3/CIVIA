@@ -1,9 +1,11 @@
 """
-Módulo de preflight: verificación de herramientas, autenticación, modelos y entorno.
+Módulo de preflight: verificación exhaustiva de herramientas, autenticación real,
+modelos y estado del repositorio sin suposiciones superficiales de --version.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -15,15 +17,16 @@ from orchestrator.git_ops import get_current_branch, get_current_head, is_workin
 from orchestrator.security import redact_secrets
 
 
-WELL_KNOWN_CODEX_PATHS = [
-    Path.home() / ".codex" / "plugins" / ".plugin-appserver" / "codex.exe",
-    Path.home() / ".codex" / "bin" / "codex.exe",
-]
-
 WELL_KNOWN_AGY_PATHS = [
+    Path.home() / "AppData" / "Local" / "agy" / "bin" / "agy.exe",
     Path.home() / "AppData" / "Roaming" / "Antigravity" / "bin" / "agy.cmd",
     Path.home() / ".gemini" / "antigravity" / "bin" / "agy.cmd",
     Path.home() / ".gemini" / "bin" / "agy.cmd",
+]
+
+WELL_KNOWN_CODEX_PATHS = [
+    Path.home() / ".codex" / "plugins" / ".plugin-appserver" / "codex.exe",
+    Path.home() / ".codex" / "bin" / "codex.exe",
 ]
 
 
@@ -41,11 +44,16 @@ def resolve_binary_path(binary_name: str, well_known_list: list[Path] | None = N
     return None
 
 
-def run_simple_command(cmd: list[str], timeout: int = 10) -> tuple[int, str]:
+def run_simple_command(
+    cmd: list[str],
+    timeout: int = 15,
+    input_text: str | None = None,
+) -> tuple[int, str]:
     """Ejecuta un comando con timeout acotado y retorna código de salida y stdout sanitizado."""
     try:
         proc = subprocess.run(
             cmd,
+            input=input_text,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -85,11 +93,11 @@ class PreflightChecker:
         compose_ok = self._check_docker_compose()
         all_passed = all_passed and docker_ok and compose_ok
 
-        # 4. Agente Desarrollador (Antigravity / agy)
+        # 4. Agente Desarrollador (Antigravity / agy) con autenticación real
         agy_ok = self._check_agy()
         all_passed = all_passed and (agy_ok or self.config.simulation_mode)
 
-        # 5. Agente Auditor (Codex / codex exec)
+        # 5. Agente Auditor (Codex / codex exec) con autenticación real
         codex_ok = self._check_codex()
         all_passed = all_passed and (codex_ok or self.config.simulation_mode)
 
@@ -132,7 +140,6 @@ class PreflightChecker:
     def _check_docker(self) -> bool:
         code, out = run_simple_command(["docker", "--version"])
         if code == 0:
-            # Comprobar si el demonio responde
             daemon_code, daemon_out = run_simple_command(["docker", "info"], timeout=5)
             if daemon_code == 0:
                 self.diagnostics.append({"tool": "docker", "status": "OK", "version": out})
@@ -187,48 +194,70 @@ class PreflightChecker:
             return True
 
         agy_path = resolve_binary_path(self.config.agy_binary, WELL_KNOWN_AGY_PATHS)
-        if agy_path:
-            # Comprobar versión o ayuda sin interactividad
-            code, out = run_simple_command([agy_path, "--version"])
-            if code == 0:
-                self.diagnostics.append(
-                    {
-                        "tool": "agy",
-                        "status": "OK",
-                        "path": agy_path,
-                        "version": out,
-                        "model": self.config.developer_model,
-                    }
-                )
-                return True
-            # Intentar con --help
-            code_h, out_h = run_simple_command([agy_path, "--help"])
-            if code_h == 0:
-                self.diagnostics.append(
-                    {
-                        "tool": "agy",
-                        "status": "OK",
-                        "path": agy_path,
-                        "version": "disponible",
-                        "model": self.config.developer_model,
-                    }
-                )
-                return True
+        if not agy_path:
+            self.diagnostics.append(
+                {
+                    "tool": "agy",
+                    "status": "FAIL",
+                    "error": f"No se encontró el ejecutable '{self.config.agy_binary}' en PATH ni en rutas conocidas.",
+                    "solution": (
+                        "Para instalar Antigravity CLI (`agy`), consulte https://antigravity.google/docs/cli "
+                        "o agregue `C:\\Users\\<usuario>\\AppData\\Local\\agy\\bin` a su PATH."
+                    ),
+                }
+            )
+            return False
 
-        self.diagnostics.append(
-            {
-                "tool": "agy",
-                "status": "FAIL",
-                "error": f"No se encontró el ejecutable '{self.config.agy_binary}' en PATH ni en rutas conocidas.",
-                "solution": (
-                    "Para instalar Antigravity CLI (`agy`), consulte la documentación en "
-                    "https://antigravity.google/docs/cli o configure la ruta exacta en `orchestrator/config.json`. "
-                    "Si desea verificar el orquestador sin la CLI, ejecute en modo simulación: "
-                    "`pwsh -File scripts/civia-autopilot.ps1 -Simulate`."
-                ),
-            }
+        # Comprobar versión básica
+        code_v, out_v = run_simple_command([agy_path, "--version"])
+        if code_v != 0:
+            self.diagnostics.append(
+                {
+                    "tool": "agy",
+                    "status": "FAIL",
+                    "error": f"El binario de agy en '{agy_path}' falló al responder a --version.",
+                    "solution": "Verifique los permisos de ejecución del binario agy.",
+                }
+            )
+            return False
+
+        # Prueba de autenticación real no destructiva
+        probe_code, probe_out = run_simple_command(
+            [agy_path, "-p", "preflight probe", "--model", self.config.developer_model, "--output-format", "json"],
+            timeout=25,
         )
-        return False
+
+        is_authenticated = False
+        try:
+            probe_data = json.loads(probe_out)
+            if probe_data.get("status") == "SUCCESS":
+                is_authenticated = True
+        except Exception:
+            if probe_code == 0 and "not logged into" not in probe_out.lower():
+                is_authenticated = True
+
+        if is_authenticated:
+            self.diagnostics.append(
+                {
+                    "tool": "agy",
+                    "status": "OK",
+                    "path": agy_path,
+                    "version": out_v,
+                    "model": self.config.developer_model,
+                    "authenticated": True,
+                }
+            )
+            return True
+        else:
+            self.diagnostics.append(
+                {
+                    "tool": "agy",
+                    "status": "FAIL",
+                    "error": "Antigravity CLI está instalado pero no se encuentra autenticado con Google/Gemini.",
+                    "solution": "Ejecute 'agy' interactivamente en su terminal para iniciar sesión con su cuenta autorizada.",
+                }
+            )
+            return False
 
     def _check_codex(self) -> bool:
         if self.config.simulation_mode:
@@ -243,34 +272,60 @@ class PreflightChecker:
             return True
 
         codex_path = resolve_binary_path(self.config.codex_binary, WELL_KNOWN_CODEX_PATHS)
-        if codex_path:
-            code, out = run_simple_command([codex_path, "--version"])
-            if code == 0 and "codex" in out.lower():
-                self.diagnostics.append(
-                    {
-                        "tool": "codex",
-                        "status": "OK",
-                        "path": codex_path,
-                        "version": out,
-                    }
-                )
-                return True
+        if not codex_path:
+            self.diagnostics.append(
+                {
+                    "tool": "codex",
+                    "status": "FAIL",
+                    "error": f"No se encontró el ejecutable '{self.config.codex_binary}' en PATH ni en rutas conocidas.",
+                    "solution": "Instale Codex CLI o agregue `~/.codex/plugins/.plugin-appserver/` a su PATH.",
+                }
+            )
+            return False
 
-        self.diagnostics.append(
-            {
-                "tool": "codex",
-                "status": "FAIL",
-                "error": f"No se encontró el ejecutable '{self.config.codex_binary}' en PATH ni en rutas estándar.",
-                "solution": (
-                    "Para instalar Codex CLI, consulte la documentación oficial o agregue el binario "
-                    f"a su PATH o configure 'codex_binary' en `orchestrator/config.json`. "
-                    "Ruta detectada en el perfil: `~/.codex/plugins/.plugin-appserver/codex.exe`. "
-                    "Para probar el flujo sin Codex real, use el modo simulación: "
-                    "`pwsh -File scripts/civia-autopilot.ps1 -Simulate`."
-                ),
-            }
+        # Comprobar versión
+        code_v, out_v = run_simple_command([codex_path, "--version"])
+        if code_v != 0:
+            self.diagnostics.append(
+                {
+                    "tool": "codex",
+                    "status": "FAIL",
+                    "error": f"El binario de Codex en '{codex_path}' falló al responder a --version.",
+                    "solution": "Verifique los permisos de ejecución de Codex.",
+                }
+            )
+            return False
+
+        # Prueba de autenticación real no destructiva con stdin nulo
+        probe_code, probe_out = run_simple_command(
+            [codex_path, "exec", "--sandbox", "read-only", "preflight probe"],
+            input_text="",
+            timeout=25,
         )
-        return False
+
+        is_authenticated = probe_code == 0 and "auth error" not in probe_out.lower() and "unauthenticated" not in probe_out.lower()
+
+        if is_authenticated:
+            self.diagnostics.append(
+                {
+                    "tool": "codex",
+                    "status": "OK",
+                    "path": codex_path,
+                    "version": out_v,
+                    "authenticated": True,
+                }
+            )
+            return True
+        else:
+            self.diagnostics.append(
+                {
+                    "tool": "codex",
+                    "status": "FAIL",
+                    "error": "Codex CLI está instalado pero la sesión no está autenticada con OpenAI/Codex.",
+                    "solution": "Ejecute 'codex login' en su terminal para autenticar la CLI.",
+                }
+            )
+            return False
 
     def _check_repo_state(self) -> bool:
         try:

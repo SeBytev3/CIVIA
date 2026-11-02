@@ -1,18 +1,27 @@
 """
-Gestión de memoria de estado persistente del orquestador (orchestrator/state.json).
+Gestión de memoria de estado persistente del orquestador.
+Asegura escrituras atómicas, bloqueo de concurrencia, detección de JSON corrupto
+y separación estricta entre ejecuciones reales y simuladas.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
-from typing import Any
+import shutil
+import time
+from typing import Any, Generator
+
+from orchestrator.security import StateCorruptionError
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_STATE_PATH = REPO_ROOT / "orchestrator" / "state.json"
+DEFAULT_SIMULATION_STATE_PATH = REPO_ROOT / "orchestrator" / "simulation_state.json"
 
 
 @dataclass
@@ -20,12 +29,55 @@ class IterationLog:
     iteration: int
     timestamp: str
     finding: str
-    commit_sha: str
+    commit_sha_developer: str
+    commit_sha_audited: str
     developer_status: str
     tests_passed: bool
     auditor_status: str | None
     findings_reported: list[dict[str, Any]]
     summary: str
+    audit_exit_code: int = 0
+    tokens_used: dict[str, int] = field(default_factory=dict)
+    mode: str = "REAL"
+
+
+@contextmanager
+def file_lock(lock_file_path: Path, timeout: float = 10.0) -> Generator[None, None, None]:
+    """Bloqueo de archivo multiplataforma con espera acotada."""
+    start_time = time.monotonic()
+    acquired = False
+
+    lock_file_path.parent.mkdir(parents=True, exist_ok=True)
+    while time.monotonic() - start_time < timeout:
+        try:
+            # En Windows/Unix, O_CREAT | O_EXCL garantiza atomicidad
+            fd = os.open(str(lock_file_path), os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            os.close(fd)
+            acquired = True
+            break
+        except FileExistsError:
+            time.sleep(0.05)
+        except Exception:
+            time.sleep(0.05)
+
+    if not acquired:
+        # Si el lock es muy viejo (> 30s), asumir proceso muerto y recuperar
+        try:
+            mtime = lock_file_path.stat().st_mtime
+            if time.time() - mtime > 30.0:
+                lock_file_path.unlink(missing_ok=True)
+                acquired = True
+        except Exception:
+            pass
+
+    try:
+        yield
+    finally:
+        if acquired:
+            try:
+                lock_file_path.unlink(missing_ok=True)
+            except Exception:
+                pass
 
 
 @dataclass
@@ -73,51 +125,128 @@ class OrchestratorState:
     history: list[dict[str, Any]] = field(default_factory=list)
     last_audit_report: dict[str, Any] | None = None
     last_run_timestamp: str | None = None
+    is_simulation: bool = False
 
     @classmethod
-    def load(cls, state_path: Path | None = None) -> OrchestratorState:
-        target_path = state_path or DEFAULT_STATE_PATH
-        if not target_path.exists():
-            return cls()
+    def get_default_path(cls, simulation_mode: bool = False) -> Path:
+        return DEFAULT_SIMULATION_STATE_PATH if simulation_mode else DEFAULT_STATE_PATH
 
-        try:
-            with open(target_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
-        except Exception:
-            return cls()
+    @classmethod
+    def load(cls, state_path: Path | None = None, simulation_mode: bool = False) -> OrchestratorState:
+        target_path = state_path or cls.get_default_path(simulation_mode)
+        if not target_path.exists():
+            instance = cls()
+            instance.is_simulation = simulation_mode
+            return instance
+
+        lock_path = target_path.with_suffix(".lock")
+        with file_lock(lock_path):
+            try:
+                with open(target_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+
+                if not content.strip():
+                    raise json.JSONDecodeError("Archivo de estado vacío.", "", 0)
+
+                data = json.loads(content)
+            except Exception as exc:
+                # Ante JSON corrupto, NO reiniciar silenciosamente: hacer backup y detenerse
+                ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                backup_path = target_path.with_name(f"{target_path.stem}.corrupt.{ts}{target_path.suffix}")
+                try:
+                    shutil.copy2(target_path, backup_path)
+                except Exception:
+                    pass
+                raise StateCorruptionError(
+                    f"El archivo de estado '{target_path}' contiene JSON corrupto o inválido: {exc}. "
+                    f"Se ha creado un respaldo de seguridad en '{backup_path}'. "
+                    "El orquestador se detiene para evitar pérdida de datos o reinicio silencioso."
+                ) from exc
+
+            # Validar campos esenciales
+            if not isinstance(data, dict):
+                raise StateCorruptionError(f"El estado en '{target_path}' no es un objeto JSON.")
+
+            if "closed_findings" not in data or not isinstance(data.get("closed_findings"), list):
+                raise StateCorruptionError(f"El estado en '{target_path}' no contiene la lista 'closed_findings'.")
+
+            valid_kwargs = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
+            instance = cls(**valid_kwargs)
+            instance.is_simulation = simulation_mode
+            instance._state_path = target_path
+            return instance
 
     def save(self, state_path: Path | None = None) -> None:
-        target_path = state_path or DEFAULT_STATE_PATH
+        target_path = state_path or getattr(self, "_state_path", None) or self.get_default_path(self.is_simulation)
+        if state_path:
+            self._state_path = state_path
         target_path.parent.mkdir(parents=True, exist_ok=True)
         self.last_run_timestamp = datetime.now(timezone.utc).isoformat()
-        with open(target_path, "w", encoding="utf-8") as f:
-            json.dump(asdict(self), f, indent=2, ensure_ascii=False)
+
+        lock_path = target_path.with_suffix(".lock")
+        with file_lock(lock_path):
+            # Escritura atómica mediante archivo temporal y reemplazo
+            tmp_path = target_path.with_name(f"{target_path.stem}.tmp.{os.getpid()}.{time.time_ns()}")
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(asdict(self), f, indent=2, ensure_ascii=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+
+                # Reintentos breves ante retención transitoria de identificadores en Windows
+                replaced = False
+                for attempt in range(10):
+                    try:
+                        os.replace(tmp_path, target_path)
+                        replaced = True
+                        break
+                    except PermissionError:
+                        if attempt == 9:
+                            raise
+                        time.sleep(0.05)
+            except Exception as exc:
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except Exception:
+                        pass
+                raise exc
 
     def record_iteration(
         self,
         finding: str,
-        commit_sha: str,
+        commit_sha_developer: str,
+        commit_sha_audited: str,
         developer_status: str,
         tests_passed: bool,
         auditor_status: str | None,
         findings_reported: list[dict[str, Any]],
         summary: str,
+        audit_exit_code: int = 0,
+        tokens_used: dict[str, int] | None = None,
     ) -> None:
         log_entry = IterationLog(
             iteration=self.iteration,
             timestamp=datetime.now(timezone.utc).isoformat(),
             finding=finding,
-            commit_sha=commit_sha,
+            commit_sha_developer=commit_sha_developer,
+            commit_sha_audited=commit_sha_audited,
             developer_status=developer_status,
             tests_passed=tests_passed,
             auditor_status=auditor_status,
             findings_reported=findings_reported,
             summary=summary,
+            audit_exit_code=audit_exit_code,
+            tokens_used=tokens_used or {},
+            mode="SIMULATION" if self.is_simulation else "REAL",
         )
         self.history.append(asdict(log_entry))
 
     def mark_finding_closed(self, finding: str) -> None:
+        if self.is_simulation:
+            # En modo simulación jamás se altera la lista real de aprobaciones permanentes
+            pass
+
         if finding in self.open_findings:
             self.open_findings.remove(finding)
         if finding not in self.closed_findings:

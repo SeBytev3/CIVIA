@@ -63,14 +63,18 @@ def main() -> int:
         checker.print_diagnostics_report()
         return 0 if ok else 1
 
-    state = OrchestratorState() if args.reset else OrchestratorState.load()
+    state = OrchestratorState() if args.reset else OrchestratorState.load(simulation_mode=args.simulate)
 
     if args.block:
         state.active_block = args.block
     if args.finding:
         state.current_finding = args.finding
 
-    controller = OrchestratorController(config=config, state=state)
+    controller = OrchestratorController(
+        config=config,
+        state=state,
+        single_finding_target=args.finding,
+    )
     result = controller.run(max_cycles_override=args.max_cycles)
 
     status = result.get("status")
