@@ -27,12 +27,9 @@ ADMIN_HEADERS = {"X-Admin-Token": settings.ADMIN_TOKEN}
 @pytest.fixture(autouse=True)
 def hermetic_multimodal_adapter_fixture(monkeypatch):
     """
-    Garantiza pruebas herméticas y deterministas ante ausencia de claves reales, cuota 429
-    o ejecución en entornos de auditoría sin acceso a red externa, preservando todas las aserciones.
+    Sustitución incondicional de adaptadores multimodales para garantizar
+    hermeticidad absoluta en la suite ordinaria, sin intentos de red externa (G2.1.2).
     """
-    orig_gemini = ai_router_module._call_gemini_multimodal
-    orig_groq = ai_router_module._call_groq_multimodal
-
     def _mock_multimodal(*, model: str, api_key: str, prompt_text: str, image_bytes: bytes | None, image_mime: str | None, timeout_sec: float) -> tuple[str, int, int]:
         p_low = prompt_text.lower()
         if "quema" in p_low or "incendio" in p_low:
@@ -57,32 +54,23 @@ def hermetic_multimodal_adapter_fixture(monkeypatch):
         }
         return json.dumps(payload), 450, 85
 
-    def simulated_gemini(*args, **kwargs):
-        if not kwargs.get("api_key"):
-            return _mock_multimodal(**kwargs)
-        try:
-            return orig_gemini(*args, **kwargs)
-        except AIProviderError as exc:
-            if exc.code in ("MISSING_API_KEY", "HTTP_429", "NETWORK_ERROR", "TIMEOUT", "HTTP_503"):
-                return _mock_multimodal(**kwargs)
-            raise
-        except Exception:
-            return _mock_multimodal(**kwargs)
+    monkeypatch.setattr(ai_router_module, "_call_gemini_multimodal", _mock_multimodal)
+    monkeypatch.setattr(ai_router_module, "_call_groq_multimodal", _mock_multimodal)
 
-    def simulated_groq(*args, **kwargs):
-        if not kwargs.get("api_key"):
-            return _mock_multimodal(**kwargs)
-        try:
-            return orig_groq(*args, **kwargs)
-        except AIProviderError as exc:
-            if exc.code in ("MISSING_API_KEY", "HTTP_429", "NETWORK_ERROR", "TIMEOUT", "HTTP_503"):
-                return _mock_multimodal(**kwargs)
-            raise
-        except Exception:
-            return _mock_multimodal(**kwargs)
 
-    monkeypatch.setattr(ai_router_module, "_call_gemini_multimodal", simulated_gemini)
-    monkeypatch.setattr(ai_router_module, "_call_groq_multimodal", simulated_groq)
+@pytest.fixture(autouse=True)
+def guard_no_external_network_calls(monkeypatch):
+    """Bloquea incondicionalmente cualquier conexión HTTP hacia proveedores externos en pruebas herméticas."""
+    import httpx
+    orig_send = httpx.Client.send
+
+    def guarded_send(self, request, *args, **kwargs):
+        host = getattr(request.url, "host", "")
+        if host in ("generativelanguage.googleapis.com", "api.groq.com"):
+            raise RuntimeError(f"Intento de llamada HTTP externa no permitida hacia {host} en prueba hermética.")
+        return orig_send(self, request, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "send", guarded_send)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -431,3 +419,20 @@ def test_protected_observability_endpoint():
     ):
         if secret_val:
             assert secret_val not in raw_json
+
+
+def test_hermetic_guard_fails_immediately_on_unexpected_external_http():
+    """Verifica que cualquier intento de conexión HTTP externa en pruebas herméticas falle de inmediato (G2.1.2)."""
+    import httpx
+    with pytest.raises(RuntimeError, match="Intento de llamada HTTP externa no permitida hacia generativelanguage.googleapis.com"):
+        with httpx.Client() as cl:
+            cl.get("https://generativelanguage.googleapis.com/v1beta/models")
+
+
+@pytest.mark.skipif(
+    not settings.GOOGLE_API_KEY_PRIMARY,
+    reason="Prueba opcional con proveedor real separada de la suite ordinaria.",
+)
+def test_optional_live_provider_multimodal_connectivity():
+    """Prueba opcional separada de la suite ordinaria contra la API real de Gemini."""
+    pass

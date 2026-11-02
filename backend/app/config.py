@@ -36,7 +36,7 @@ class Settings:
     RATE_LIMIT_MAX_REQUESTS: int = int(os.getenv("RATE_LIMIT_MAX_REQUESTS", "30"))
     RATE_LIMIT_WINDOW_SECONDS: int = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "60"))
     # Solo proxies con identidad de red verificable explícita (M-06, jamás rangos amplios como 172.16.0.0/12)
-    TRUSTED_PROXIES: str = os.getenv("TRUSTED_PROXIES", "172.28.0.2,172.18.0.2")
+    TRUSTED_PROXIES: str = os.getenv("TRUSTED_PROXIES", "172.28.0.2")
 
     # Auto-seed de datos sintéticos identificados al arrancar si la tabla está vacía
     AUTO_SEED_SYNTHETIC: bool = os.getenv("AUTO_SEED_SYNTHETIC", "true").lower() in ("1", "true", "yes")

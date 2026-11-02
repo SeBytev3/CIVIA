@@ -8,7 +8,8 @@ services:
     volumes:
       - civia_postgres:/var/lib/postgresql/data
     networks:
-      - civia_net
+      civia_net:
+        ipv4_address: 172.28.0.10
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -31,7 +32,7 @@ services:
       FALLA_FORZADA: ${FALLA_FORZADA:-}
       AUTO_SEED_SYNTHETIC: ${AUTO_SEED_SYNTHETIC:-true}
       FORWARDED_ALLOW_IPS: ""
-      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.28.0.2,172.18.0.2}
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.28.0.2}
       ADMIN_TOKEN: ${ADMIN_TOKEN:?Configure ADMIN_TOKEN en .env con un secreto robusto (>=24 caracteres)}
     volumes:
       - civia_uploads:/app/data/uploads
@@ -42,7 +43,8 @@ services:
       db:
         condition: service_healthy
     networks:
-      - civia_net
+      civia_net:
+        ipv4_address: 172.28.0.11
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)"]
       interval: 10s

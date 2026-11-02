@@ -191,3 +191,28 @@
     - `test_ai_and_agent.py`: 12/12 passed.
     - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
     - Cero regresiones en controles aprobados G1, A-02 o N-02. Cero commits en `main` ni push remoto.
+
+### Bloque G2.1.2 — Cierre Definitivo de Bloqueos de Cursor, Carrera de Archivos, Topología Compose y Hermeticidad (`docs/auditoria_codex_g2_1_1_a745a1c.md`) completado (2026-11-02)
+- **Detalle completo por hallazgo, diagnóstico, corrección, pruebas adversariales y límites**: documentado en [`docs/remediacion_g2_1.md`](remediacion_g2_1.md).
+- **Cierres aplicados**:
+  1. **`M-03` (Preservación de identidad de proxies de cursor en llamadas encadenadas, `copy()`, `stream()` y serialización en promoción de archivos)**:
+     - `backend/app/db.py`: `_CapabilityCursorProxy.execute()` y `executemany()` retornan `self`, evitando que llamadas encadenadas (`conn.cursor().execute(...)`) devuelvan el cursor nativo de psycopg desprotegido. Se envolvieron `cur.copy()` y `conn.copy()` con `_CapabilityCopyProxy` y se protegieron lecturas en streaming. En `get_conn()`, `conn.execute` se delegó directamente al proxy protegido de la capacidad.
+     - `backend/app/db.py` y `security.py`: `ExecutionCapability.authorized_replace(src, dst)` y `atomic_publish_file()` ejecutan la comprobación de revocación y `os.replace` bajo el cerrojo `self._lock`, eliminando la carrera TOCTOU entre revocación y publicación de archivos. Si la capacidad fue revocada, el archivo temporal se elimina y se levanta `TimeoutError`. Se preservan estrictamente los controles de rollback de commit diferido de A-02.
+  2. **`M-06` (Asignación estática de IPs en Compose y purga de IP heredada)**:
+     - `docker-compose.yml`: Red `civia_net` con subred `172.28.0.0/16` y asignación disjunta y estática: `frontend` (Nginx) en `172.28.0.2`, `db` en `172.28.0.10` y `api` en `172.28.0.11`.
+     - `backend/app/config.py`: `TRUSTED_PROXIES` fijado a `"172.28.0.2"`. Se purgó completamente `172.18.0.2` del código y de las suites.
+     - Verificado mediante `docker network inspect` y reinicios limpios que `172.28.0.2` pertenece única y exclusivamente a Nginx. Conexiones directas desde otros contenedores o la red reciben rate limiting estricto (`201 / 201 / 429`), y clientes independientes detrás de Nginx conservan cuotas aisladas.
+  3. **`M-02` (Reserva y conciliación de tokens por intento individual en el Router IA)**:
+     - `backend/app/ai_router.py`: `classify_evidence_with_router` realiza la reserva atómica `token_tracker.try_reserve(est_attempt_tokens)` por intento individual dentro del bucle de proveedores. Concilia inmediatamente el uso real al finalizar el intento y, si los tokens consumidos agotan el saldo disponible (`remaining < est_attempt`), interrumpe de inmediato (`break`) sin invocar a proveedores subsiguientes (como Groq).
+     - Se marcaron `INVALID_JSON` e `INVALID_SCHEMA` como errores no reintentables sobre el mismo modelo y se eliminó la duplicación redundante de acumulación de tokens en bloques de excepción.
+  4. **Hermeticidad incondicional de pruebas**:
+     - `backend/tests/test_ai_and_agent.py`: Adaptadores de proveedores IA reemplazados incondicionalmente mediante `hermetic_multimodal_adapter_fixture`. Fixture `guard_no_external_network_calls` que intercepta llamadas HTTP externas a dominios de Google y Groq y falla inmediatamente ante tráfico imprevisto (`test_hermetic_guard_fails_immediately_on_unexpected_external_http`).
+- **Verificación oficial de la suite completa en PostgreSQL 17 real (`civia-api-1`)**:
+  - `docker exec civia-api-1 pytest -v`:
+    - **`83 PASSED`** (100% de éxito, 0 fallos, 1 warning en 9.39 s).
+    - `test_audit_g2_1_remediation.py`: 24/24 passed (incluyendo los 4 nuevos tests de regresión G2.1.2).
+    - `test_audit_g2_resilience.py`: 23/23 passed.
+    - `test_audit_g1_security.py`: 14/14 passed.
+    - `test_ai_and_agent.py`: 14/14 passed.
+    - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
+    - Cero regresiones en controles aprobados G1, A-02 o N-02. Cero commits en `main` ni push remoto.

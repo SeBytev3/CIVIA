@@ -115,6 +115,10 @@ class TokenBudgetTracker:
             if unknown:
                 self.has_unknown_consumption = True
 
+    def record_estimate(self, tokens: int, is_unknown: bool = True) -> None:
+        """Registra una estimación conservadora de tokens cuando no se conocen con exactitud (M-02)."""
+        self.record_usage(tokens, 0, estimated=True, unknown=is_unknown)
+
     def remaining(self) -> int:
         with self._lock:
             effective_usage = self.total_tokens + self.reserved_tokens
@@ -128,6 +132,16 @@ class TokenBudgetTracker:
 _ACTIVE_TOKEN_TRACKER: contextvars.ContextVar[TokenBudgetTracker | None] = contextvars.ContextVar(
     "_ACTIVE_TOKEN_TRACKER", default=None
 )
+
+
+def get_active_token_tracker() -> TokenBudgetTracker | None:
+    """Retorna el TokenBudgetTracker activo en el contexto actual (M-02)."""
+    return _ACTIVE_TOKEN_TRACKER.get()
+
+
+def set_active_token_tracker(tracker: TokenBudgetTracker | None) -> contextvars.Token[TokenBudgetTracker | None]:
+    """Establece el TokenBudgetTracker en el contexto actual."""
+    return _ACTIVE_TOKEN_TRACKER.set(tracker)
 
 
 def estimate_prompt_tokens(conversation: list[dict[str, Any]], tools_spec: list[dict[str, Any]]) -> int:
@@ -411,6 +425,7 @@ def tool_clasificar_evidencia(args: dict[str, Any]) -> dict[str, Any]:
     est_total_multimodal = est_input_tokens + est_image_tokens + est_output_tokens
 
     tracker = _ACTIVE_TOKEN_TRACKER.get()
+    reserved_upfront = 0
     if tracker is not None:
         if not tracker.try_reserve(est_total_multimodal):
             return {
@@ -421,6 +436,7 @@ def tool_clasificar_evidencia(args: dict[str, Any]) -> dict[str, Any]:
                 "mensaje": f"Presupuesto de tokens del agente insuficiente para clasificación multimodal (requiere ~{est_total_multimodal} tokens, saldo restante {tracker.remaining()}).",
                 "guardrail_triggered": "MAX_TOKENS",
             }
+        reserved_upfront = est_total_multimodal
 
     try:
         contract, meta = classify_evidence_with_router(
@@ -432,36 +448,37 @@ def tool_clasificar_evidencia(args: dict[str, Any]) -> dict[str, Any]:
             address_hint=row.get("address_hint"),
             audio_transcript=row.get("audio_transcript"),
             report_id=row["id"],
+            token_tracker=tracker,
+            already_reserved=reserved_upfront,
         )
     finally:
-        if tracker is not None:
+        if tracker is not None and reserved_upfront > 0 and tracker.reserved_tokens >= reserved_upfront:
             p_tok = int(meta.get("prompt_tokens") or 0) if "meta" in locals() else 0
             c_tok = int(meta.get("completion_tokens") or 0) if "meta" in locals() else 0
-            is_unk = bool(meta.get("unknown_consumption", False)) if "meta" in locals() else True
             if p_tok > 0 or c_tok > 0:
                 tracker.reconcile_usage(
-                    reserved=est_total_multimodal,
+                    reserved=reserved_upfront,
                     actual_prompt=p_tok,
                     actual_completion=c_tok,
                     estimated=False,
-                    unknown=is_unk,
+                    unknown=bool(meta.get("unknown_consumption", False)),
                 )
             else:
-                tracker.reconcile_usage(
-                    reserved=est_total_multimodal,
-                    actual_prompt=est_input_tokens + est_image_tokens,
-                    actual_completion=est_output_tokens,
-                    estimated=True,
-                    unknown=True,
-                )
+                tracker.release_reservation(reserved_upfront)
+                if tracker.total_tokens == 0:
+                    tracker.record_estimate(est_total_multimodal, is_unknown=True)
 
     if contract is None:
+        guardrail = None
+        if meta.get("insufficient_budget") or (tracker is not None and tracker.is_exhausted()):
+            guardrail = "MAX_TOKENS"
         return {
             "encontrado": True,
             "tracking_code": row["tracking_code"],
             "analisis_completado": False,
             "status": row["status"],
             "mensaje": "El análisis automático no pudo completarse en este momento; el reporte conserva su estado actual.",
+            "guardrail_triggered": guardrail,
         }
 
     updated = update_report_ai_analysis(
@@ -995,14 +1012,12 @@ def run_civia_agent(
             rem_tokens = tracker.remaining()
             est_prompt_tokens = estimate_prompt_tokens(conversation, AGENT_TOOLS_SPEC)
             est_turn_total = est_prompt_tokens + 20
-            # Reserva dinámica y atómica de tokens de entrada + margen mínimo de respuesta (M-02)
-            if not tracker.try_reserve(est_turn_total):
+            if rem_tokens < est_turn_total:
                 guardrail_triggered = "MAX_TOKENS"
                 break
 
             call_max_tokens = min(700, max(1, rem_tokens - est_prompt_tokens))
             if call_max_tokens < 10:
-                tracker.release_reservation(est_turn_total)
                 guardrail_triggered = "MAX_TOKENS"
                 break
 
@@ -1028,8 +1043,16 @@ def run_civia_agent(
                     guardrail_triggered = "TIMEOUT"
                     break
 
+                # Reserva atómica para este intento individual (M-02)
+                if not tracker.try_reserve(est_turn_total):
+                    guardrail_triggered = "MAX_TOKENS"
+                    break
+
                 t_call = time.perf_counter()
                 call_timeout = min(remaining_sec, 6.0)
+                reserved_node_try = True
+                in_tok = 0
+                out_tok = 0
 
                 try:
                     forced = _check_forced_fault(tier, provider)
@@ -1068,6 +1091,7 @@ def run_civia_agent(
                         actual_completion=out_tok,
                         estimated=est,
                     )
+                    reserved_node_try = False
                     active_provider = provider
                     active_model = model
                     if idx > 0:
@@ -1094,7 +1118,18 @@ def run_civia_agent(
                     )
                     break
                 except AIProviderError as exc:
-                    tracker.has_unknown_consumption = True
+                    if in_tok > 0 or out_tok > 0:
+                        tracker.reconcile_usage(
+                            reserved=est_turn_total,
+                            actual_prompt=in_tok,
+                            actual_completion=out_tok,
+                            estimated=False,
+                            unknown=False,
+                        )
+                    else:
+                        tracker.release_reservation(est_turn_total)
+                        tracker.has_unknown_consumption = True
+                    reserved_node_try = False
                     dt_ms = int((time.perf_counter() - t_call) * 1000)
                     cb.record_failure(exc.code)
                     _safe_record_trace(
@@ -1112,7 +1147,18 @@ def run_civia_agent(
                     fallback_used = True
                     continue
                 except Exception as exc:
-                    tracker.has_unknown_consumption = True
+                    if in_tok > 0 or out_tok > 0:
+                        tracker.reconcile_usage(
+                            reserved=est_turn_total,
+                            actual_prompt=in_tok,
+                            actual_completion=out_tok,
+                            estimated=False,
+                            unknown=False,
+                        )
+                    else:
+                        tracker.release_reservation(est_turn_total)
+                        tracker.has_unknown_consumption = True
+                    reserved_node_try = False
                     dt_ms = int((time.perf_counter() - t_call) * 1000)
                     cb.record_failure("UNEXPECTED_ERROR")
                     _safe_record_trace(
@@ -1129,11 +1175,14 @@ def run_civia_agent(
                     )
                     fallback_used = True
                     continue
+                finally:
+                    if reserved_node_try:
+                        tracker.release_reservation(est_turn_total)
+                        reserved_node_try = False
 
             if not turn_succeeded:
-                tracker.release_reservation(est_turn_total)
                 if tracker.total_tokens == 0:
-                    tracker.record_usage(est_prompt_tokens, 0, estimated=True, unknown=True)
+                    tracker.record_estimate(est_turn_total, is_unknown=True)
                 # Caída total de proveedores IA: responder con respaldo SQL determinista sin error técnico
                 answer = _deterministic_sql_fallback_answer(query, executed_tools)
                 for et in executed_tools:

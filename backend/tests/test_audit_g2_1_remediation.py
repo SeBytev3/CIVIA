@@ -17,6 +17,7 @@ from starlette.requests import Request
 from uvicorn.config import Config
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
+from app import db
 from app.agent import (
     TokenBudgetTracker,
     estimate_prompt_tokens,
@@ -738,9 +739,9 @@ def test_g2_1_1_m06_direct_container_ip_spoofing_rejected_200_200_429(monkeypatc
     Reproduce el ataque directo desde contenedor Docker no proxy (172.19.0.9):
     El atacante envía X-Forwarded-For variable desde la misma IP peer.
     Verificación:
-    172.19.0.9 NO pertenece a TRUSTED_PROXIES ("172.28.0.2,172.18.0.2").
+    172.19.0.9 NO pertenece a TRUSTED_PROXIES ("172.28.0.2").
     Por tanto, sus cabeceras XFF se descartan y la cuota aplica sobre su IP real.
-    Resultado exacto: 200, 200, 429 (evasión bloqueada).
+    Resultado exacto: 201, 201, 429 (evasión bloqueada).
     """
     from app.seed import generate_synthetic_evidence_png
     valid_png = generate_synthetic_evidence_png("HUECO", "M06-DIRECT")
@@ -748,7 +749,7 @@ def test_g2_1_1_m06_direct_container_ip_spoofing_rejected_200_200_429(monkeypatc
     rate_limiter.reset()
     monkeypatch.setattr(settings, "RATE_LIMIT_MAX_REQUESTS", 2)
     monkeypatch.setattr(settings, "RATE_LIMIT_WINDOW_SECONDS", 60)
-    monkeypatch.setattr(settings, "TRUSTED_PROXIES", "172.28.0.2,172.18.0.2")
+    monkeypatch.setattr(settings, "TRUSTED_PROXIES", "172.28.0.2")
 
     fake_client = TestClient(app, client=("172.19.0.9", 45678))
 
@@ -785,7 +786,7 @@ def test_g2_1_1_m06_direct_container_ip_spoofing_rejected_200_200_429(monkeypatc
 def test_g2_1_1_m06_trusted_proxy_separate_client_quotas(monkeypatch):
     """
     Verifica que las peticiones que sí provienen del proxy inverso legítimo
-    (172.28.0.2 o 172.18.0.2) preservan cuotas independientes para clientes distintos.
+    (172.28.0.2) preservan cuotas independientes para clientes distintos.
     """
     from app.seed import generate_synthetic_evidence_png
     valid_png = generate_synthetic_evidence_png("HUECO", "M06-PROXY")
@@ -793,7 +794,7 @@ def test_g2_1_1_m06_trusted_proxy_separate_client_quotas(monkeypatch):
     rate_limiter.reset()
     monkeypatch.setattr(settings, "RATE_LIMIT_MAX_REQUESTS", 2)
     monkeypatch.setattr(settings, "RATE_LIMIT_WINDOW_SECONDS", 60)
-    monkeypatch.setattr(settings, "TRUSTED_PROXIES", "172.28.0.2,172.18.0.2")
+    monkeypatch.setattr(settings, "TRUSTED_PROXIES", "172.28.0.2")
 
     proxy_client = TestClient(app, client=("172.28.0.2", 80))
 
@@ -1052,3 +1053,139 @@ def test_g2_1_1_m02_agent_unknown_consumption_reported_as_estimated_not_zero(mon
         f"Violación M-02: total_tokens_used fue {res['total_tokens_used']}. "
         f"El agente reportó 0 exacto para un consumo desconocido."
     )
+
+
+# =====================================================================
+# G2.1.2 — Reproducción de los cuatro bloqueos de auditoría Codex a745a1c
+# =====================================================================
+
+def test_g2_1_2_m03_chained_cursor_and_conn_execute_reject_late_sql():
+    """
+    Reproduce el contraejemplo Codex FAIL 1 de M-03:
+    cursor = conn.cursor().execute("SELECT 1")
+    cursor = conn.execute("SELECT 1")
+    Ambos devuelven el cursor que debe seguir protegido por el proxy.
+    Al expirar o revocarse la capacidad, cursor.execute() subsiguiente
+    debe lanzar TimeoutError y no devolver 8675309.
+    """
+    cap = db.ExecutionCapability(deadline=time.monotonic() + 10.0)
+    tok = db.set_execution_capability(cap)
+    try:
+        with db.get_conn() as conn:
+            # Chained cursor.execute()
+            cur1 = conn.cursor().execute("SELECT 1")
+            # Chained conn.execute()
+            cur2 = conn.execute("SELECT 1")
+
+            assert isinstance(cur1, db._CapabilityCursorProxy), "cur1 debe ser _CapabilityCursorProxy"
+            assert isinstance(cur2, db._CapabilityCursorProxy), "cur2 debe ser _CapabilityCursorProxy"
+
+            # Revocar capacidad (simulando vencimiento tras TIMEOUT)
+            cap.revoke()
+
+            with pytest.raises(TimeoutError, match="Capacidad de ejecución revocada"):
+                cur1.execute("SELECT 8675309 AS marker")
+
+            with pytest.raises(TimeoutError, match="Capacidad de ejecución revocada"):
+                cur2.execute("SELECT 8675309 AS marker")
+    finally:
+        db.reset_execution_capability(tok)
+
+
+def test_g2_1_2_m03_copy_method_rejected_after_deadline():
+    """
+    Reproduce el contraejemplo Codex FAIL 2 de M-03:
+    with cursor.copy("COPY (SELECT 8675309) TO STDOUT") as copy:
+        value = bytes(copy.read())
+    Debe ser interceptado por la capacidad y lanzar TimeoutError
+    tras el vencimiento del deadline, impidiendo efectos SQL tardíos.
+    """
+    with db.get_conn() as conn:
+        cur = conn.cursor()
+        cap = db.ExecutionCapability(deadline=time.monotonic() - 1.0)
+        tok = db.set_execution_capability(cap)
+        conn._execution_capability = cap
+        cur._cap = cap
+        try:
+            with pytest.raises(TimeoutError, match="Capacidad de ejecución expirada|revocada"):
+                with cur.copy("COPY (SELECT 8675309) TO STDOUT") as copy_ctx:
+                    copy_ctx.read()
+        finally:
+            db.reset_execution_capability(tok)
+
+
+def test_g2_1_2_m03_atomic_publish_file_serializes_race_with_revocation(tmp_path):
+    """
+    Reproduce el contraejemplo Codex FAIL 3 de M-03:
+    Carrera entre la validación de la capacidad y os.replace().
+    Al coordinar la promoción bajo candado indivisible con revoke(),
+    si revoke() ocurre primero o durante la coordinación,
+    la promoción es rechazada y el archivo de destino jamás se publica.
+    """
+    dest_file = tmp_path / "published.txt"
+    staging_file = tmp_path / "staging.tmp"
+    staging_file.write_bytes(b"DATA")
+
+    cap = db.ExecutionCapability(deadline=time.monotonic() + 10.0)
+    tok = db.set_execution_capability(cap)
+    try:
+        # Revocar la capacidad
+        cap.revoke()
+        assert not cap.is_valid()
+
+        # Intentar publicar archivo atómicamente
+        with pytest.raises(TimeoutError, match="Capacidad de ejecución revocada"):
+            db.atomic_publish_file(staging_file, dest_file)
+
+        assert not dest_file.exists(), "Violación M-03: El archivo fue publicado a pesar de estar revocada la capacidad"
+    finally:
+        db.reset_execution_capability(tok)
+
+
+def test_g2_1_2_m02_invalid_json_exhausts_budget_blocks_subsequent_groq_attempt(monkeypatch):
+    """
+    Reproduce el contraejemplo Codex FAIL de M-02:
+    Presupuesto de 1000 tokens.
+    Gemini consume 900+100=1000 tokens conocidos y devuelve JSON inválido '{}'.
+    Al conciliar por intento, el tracker queda con remaining=0.
+    Por tanto, el router no debe iniciar la segunda llamada a Groq.
+    """
+    from app import ai_router as ai_r
+    from app.agent import TokenBudgetTracker
+    ai_r.reset_all_circuits()
+
+    def mock_gemini_exhausts_budget(**kwargs):
+        return "{}", 900, 100
+
+    groq_called = False
+    def mock_groq_should_not_be_called(**kwargs):
+        nonlocal groq_called
+        groq_called = True
+        return json.dumps({
+            "category": "HUECO",
+            "severity": "ALTA",
+            "confidence": 0.9,
+            "summary": "Hueco detectado",
+            "keywords": ["hueco"],
+        }), 700, 100
+
+    monkeypatch.setattr(ai_r, "_call_gemini_multimodal", mock_gemini_exhausts_budget)
+    monkeypatch.setattr(ai_r, "_call_groq_multimodal", mock_groq_should_not_be_called)
+
+    tracker = TokenBudgetTracker(max_budget=1000)
+    contract, meta = ai_r.classify_evidence_with_router(
+        description="Prueba de presupuesto agotado en primer intento",
+        latitude=3.45,
+        longitude=-76.53,
+        token_tracker=tracker,
+    )
+
+    assert contract is None, "El contrato debió ser None ya que Groq no debió ser llamado"
+    assert groq_called is False, (
+        "Violación M-02: Groq fue llamado cuando el presupuesto ya había sido agotado "
+        "por el intento de Gemini (1000 de 1000)!"
+    )
+    assert tracker.total_tokens == 1000, f"total_tokens fue {tracker.total_tokens}, esperado 1000"
+    assert tracker.remaining() == 0, f"remaining fue {tracker.remaining()}, esperado 0"
+    assert meta["attempts"] == 1, f"attempts fue {meta['attempts']}, esperado 1"
+    assert meta["insufficient_budget"] is True

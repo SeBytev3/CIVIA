@@ -181,3 +181,111 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
   - `test_g2_1_1_m02_token_accumulation_invalid_json_fallback`: Gemini inválido (600) + Groq válido (800) registra exactamente 1400 tokens conocidos (`PASSED`).
   - `test_g2_1_1_m02_token_accumulation_three_invalid_responses`: Tres proveedores inválidos (600 c/u) registran exactamente 1800 tokens conocidos (`PASSED`).
   - `test_g2_1_1_m02_agent_unknown_consumption_reported_as_estimated_not_zero`: Fallo por error de red en todos los intentos reporta `tokens_estimated=True`, `unknown_consumption=True` y consumo mayor a cero (`PASSED`).
+
+---
+
+## 7. Adenda G2.1.2 — Cierre Definitivo de Bloqueos de Cursor, Carrera de Archivos, Topología Compose y Hermeticidad (`docs/auditoria_codex_g2_1_1_a745a1c.md`)
+
+- **Informe de auditoría de referencia:** `docs/auditoria_codex_g2_1_1_a745a1c.md` sobre commit `a745a1ceb9116e0368b600984855d0a514d2a13f`.
+- **Alcance específico:**
+  1. `M-03`: Prevención de escapes de cursor nativo en llamadas encadenadas (`cur.execute()`, `conn.execute()`), interceptación de métodos `copy()` y `stream()`, y eliminación de condición de carrera TOCTOU entre revocación y promoción atómica de archivos (`authorized_replace`). Preservación estricta de rollback diferido `A-02`.
+  2. `M-06`: Asignación disjunta y estática de IPs en Docker Compose (`db`: `172.28.0.10`, `api`: `172.28.0.11`, `frontend`: `172.28.0.2`), purga total del legado `172.18.0.2` y verificación de inmutabilidad tras inicios limpios y reinicios.
+  3. `M-02`: Reserva y reconciliación atómica trasladada al nivel de intento individual en `classify_evidence_with_router`; detención inmediata del bucle de reintentos ante JSON inválido que agote el saldo disponible sin invocar a Groq; eliminación de doble acumulación en excepciones.
+  4. **Hermeticidad incondicional de pruebas:** Sustitución incondicional de adaptadores de red externa en `test_ai_and_agent.py` y fixture centinela que bloquea tráfico externo a Google/Groq con fallo inmediato ante peticiones imprevistas.
+
+### 7.1. `M-03`: Interceptación total en cursores/conexiones y serialización de reemplazo de archivos
+
+#### Diagnóstico de Codex
+1. **Escape por retorno encadenado:** `_CapabilityCursorProxy.execute()` delegaba a `self._cur.execute()`, retornando el cursor nativo de C de `psycopg 3`. Al encadenar `cur = conn.cursor().execute(...)`, las sentencias subsiguientes se ejecutaban directamente sobre el cursor nativo desprotegido tras el vencimiento del plazo. Igualmente, `conn.execute()` eludía el proxy.
+2. **Métodos no interceptados:** Métodos como `cur.copy()` y `conn.copy()` enviaban sentencias SQL a PostgreSQL sin validar la capacidad de ejecución.
+3. **Carrera TOCTOU en archivos:** Entre la comprobación previa en `_atomic_write_bytes()` y la invocación de `os.replace()`, un hilo supervisor podía llamar a `capability.revoke()`, permitiendo que el worker publicara el archivo tardío en disco si el reemplazo se ejecutaba justo después.
+
+#### Remediación técnica implementada
+1. **Preservación de identidad en cursores encadenados y soporte completo de operaciones SQL:**
+   - En `backend/app/db.py`: `_CapabilityCursorProxy.execute()` y `executemany()` retornan `self` (la instancia del proxy), garantizando que las llamadas encadenadas sigan protegidas.
+   - Se interceptaron `cur.copy()` y `conn.copy()` mediante `_CapabilityCopyProxy`, y lecturas en streaming con `_CapabilityStreamProxy`.
+   - En `get_conn()`, `conn.execute` se reasigna a delegar en el proxy de cursor vinculado a la capacidad de la conexión.
+2. **Protocolo seguro de publicación y serialización atómica:**
+   - En `backend/app/db.py`: `ExecutionCapability` incorpora `authorized_replace(src, dst)`. El chequeo de revocación y `os.replace(src, dst)` se ejecutan bajo el mismo cerrojo de sincronización `self._lock`.
+   - Si `revoke()` adquiere el cerrojo primero, marca la capacidad como revocada e invalida cualquier intento de publicación; si `authorized_replace()` adquiere el cerrojo primero, `os.replace()` (operación atómica de microsegundos en el sistema de archivos) se completa antes de conceder la revocación, eliminando cualquier ventana TOCTOU.
+   - En `backend/app/security.py`: `_atomic_write_bytes()` utiliza `atomic_publish_file(staging_path, final_path)`. Si la capacidad es revocada, la operación falla con `TimeoutError` y elimina cualquier archivo residual.
+3. **Preservación estricta de A-02:**
+   - Se mantuvo intacto el mecanismo de `checked_commit()` y `_wrapped_commit()` con temporizador de cancelación e invalidación de transacciones pendientes ante constraint triggers diferidos (`pg_sleep`).
+
+#### Pruebas adversariales permanentes
+- `test_g2_1_2_m03_chained_cursor_and_conn_execute_reject_late_sql`: Comprueba que `cur = conn.cursor().execute("SELECT 1")` y `conn.execute("SELECT 1")` devuelven proxies protegidos y rechazan sentencias posteriores tras el vencimiento (`PASSED`).
+- `test_g2_1_2_m03_copy_method_rejected_after_deadline`: Comprueba que `cur.copy("COPY (SELECT 1) TO STDOUT")` es rechazado con `TimeoutError` tras el vencimiento (`PASSED`).
+- `test_g2_1_2_m03_atomic_publish_file_serializes_race_with_revocation`: Dispara hilos concurrentes compitiendo entre revocación y publicación atómica de archivo; el protocolo serializado garantiza que el archivo jamás es publicado tras la revocación (`PASSED`).
+
+### 7.2. `M-06`: Topología de red Compose disjunta e inmutable
+
+#### Diagnóstico de Codex
+- Al iniciar contenedores desde cero, la asignación dinámica de IPs en redes tipo puente de Docker asignaba secuencialmente `172.28.0.2` al primer contenedor que iniciaba (`civia-db-1`), colisionando luego con la IP fija del frontend Nginx y quebrando el aislamiento de confianza.
+- Permanecían menciones obsoletas a `172.18.0.2` en configuraciones y pruebas.
+
+#### Remediación técnica implementada
+- **Asignación estática integral en `docker-compose.yml`:**
+  - Red `civia_net`: subred estática `172.28.0.0/16`, gateway `172.28.0.1`.
+  - Servicio `db`: IP fija `172.28.0.10`.
+  - Servicio `api`: IP fija `172.28.0.11`.
+  - Servicio `frontend` (Nginx): IP fija exclusiva `172.28.0.2`.
+- **Purga total de `172.18.0.2`:**
+  - En `backend/app/config.py`: `TRUSTED_PROXIES: str = os.getenv("TRUSTED_PROXIES", "172.28.0.2")`.
+  - Se eliminó `172.18.0.2` de todas las configuraciones, pruebas y documentación.
+- **Verificación de inmutabilidad:**
+  - Se verificó mediante `docker compose up -d`, `docker compose restart` y `docker network inspect civia_civia_net` que únicamente Nginx posee `172.28.0.2`, y que `db` y `api` conservan invariablemente sus IPs disjuntas (`.10` y `.11`).
+  - Conexiones directas desde otros contenedores o la red Docker no pueden falsear cabeceras y reciben rate limiting estricto (`201 / 201 / 429`). Clientes independientes detrás de Nginx conservan sus cuotas aisladas.
+
+### 7.3. `M-02`: Reserva y conciliación por intento individual en el Router IA
+
+#### Diagnóstico de Codex
+- Al pasar una reserva global para toda la cadena en lugar de por intento, un proveedor inicial (Gemini) que devolvía JSON inválido `{}` consumiendo la totalidad del presupuesto (ej. 1000 tokens) no conciliaba su consumo de inmediato, permitiendo que el router llamara indebidamente al siguiente proveedor (Groq) excediendo el presupuesto global.
+- Los manejadores de excepción en `ai_router.py` volvían a sumar `accumulated_prompt_tokens`, duplicando la contabilidad reportada.
+
+#### Remediación técnica implementada
+- **Reserva atómica por intento individual:**
+  - En `backend/app/ai_router.py:classify_evidence_with_router`: Cada intento dentro del bucle de proveedores ejecuta su propia reserva atómica `token_tracker.try_reserve(est_attempt_tokens)`.
+  - Inmediatamente después de cada llamada, se concilian los tokens reales consumidos (`record_usage` + `release_reserved`).
+  - Si los tokens consumidos agotan el saldo restante (`tracker.remaining() < est_attempt_tokens`), el bucle de reintentos se interrumpe de inmediato (`break`) sin invocar a proveedores subsiguientes.
+- **Detención ante JSON inválido y eliminación de duplicidades:**
+  - Errores de tipo `INVALID_JSON` e `INVALID_SCHEMA` se marcaron como condiciones no reintentables sobre el mismo modelo, evitando llamadas duplicadas innecesarias.
+  - Se eliminó la re-acumulación redundante de tokens en los bloques `except AIProviderError` y `except Exception`.
+
+#### Pruebas adversariales permanentes
+- `test_g2_1_2_m02_invalid_json_exhausts_budget_blocks_subsequent_groq_attempt`: Con presupuesto de 1000 tokens, Gemini consume 1000 tokens devolviendo `{}`. El tracker concilia el consumo, reduce el remanente a 0 y bloquea la llamada subsecuente a Groq, registrando exactamente 1 intento y 1000 tokens (`PASSED`).
+
+### 7.4. Hermeticidad incondicional de pruebas
+
+#### Remediación técnica implementada
+- En `backend/tests/test_ai_and_agent.py`:
+  - Se sustituyeron incondicionalmente los adaptadores de proveedores IA (`_call_gemini_multimodal` y `_call_groq_multimodal`) mediante `hermetic_multimodal_adapter_fixture`, garantizando que ninguna prueba dependa de conectividad a internet ni de claves válidas en `.env`.
+  - Se añadió la fixture `guard_no_external_network_calls` que intercepta llamadas HTTP hacia dominios de Google y Groq, provocando un fallo inmediato (`pytest.fail`) si algún código intenta realizar tráfico externo inadvertido.
+  - Se añadió `test_hermetic_guard_fails_immediately_on_unexpected_external_http` para verificar permanentemente la efectividad del centinela de red.
+
+---
+
+## 8. Matriz de Pruebas Integradas Final (G2.1.2)
+
+Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`, `pytest-8.3.5` sobre PostgreSQL 17 real):
+
+| Suite | Archivo | Pruebas | Resultado |
+|---|---|---|---|
+| Remediación G2.1, G2.1.1 y G2.1.2 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 24 | **24 PASSED** (0 fallos) |
+| Resiliencia y Control G2 | `tests/test_audit_g2_resilience.py` | 23 | **23 PASSED** (0 fallos) |
+| Seguridad e Integridad G1 | `tests/test_audit_g1_security.py` | 14 | **14 PASSED** (0 fallos) |
+| Integración IA y Agente (Hermética) | `tests/test_ai_and_agent.py` | 14 | **14 PASSED** (0 fallos) |
+| CRUD y Negocio Ciudadano | `tests/test_reports_crud.py` | 6 | **6 PASSED** (0 fallos) |
+| Salud de la API | `tests/test_health.py` | 1 | **1 PASSED** (0 fallos) |
+| Proxy Frontend PWA E2E | `tests/test_e2e_frontend_proxy.py` | 1 | **1 PASSED** (0 fallos) |
+| **Total suites backend CIVIA** | — | **83** | **83 PASSED (100% de éxito, 0 fallos, 9.39 s)** |
+
+---
+
+## 9. Limitaciones Reconocidas y Fronteras de Garantía
+
+1. **Límites de hilos en CPython vs procesos:**
+   - La arquitectura desvincula los workers no cooperativos y revoca su `ExecutionCapability` inmediatamente. En CPython, un hilo sin I/O (ej. bucle infinito de CPU) no puede ser terminado forzosamente por señales del sistema operativo sin arriesgar la corrupción de la memoria del proceso. La garantía se aplica a todas las fronteras de efectos: cualquier operación SQL (incluyendo cursores encadenados, conexiones directas y copy) y cualquier escritura/reemplazo de archivos en disco es bloqueada inmediatamente al verificarse la revocación de la capacidad.
+2. **Estimación conservadora en consumos no cuantificables:**
+   - Cuando un proveedor remoto falla por caída de red sin devolver metadatos de uso, se imputa una estimación conservadora basada en la longitud del prompt y se marca explícitamente con `tokens_estimated=True` y `unknown_consumption=True`, evitando tanto la subestimación como la certeza engañosa.
+3. **Aislamiento de red Docker:**
+   - La confianza en `172.28.0.2` descansa en la asignación estática del bridge `civia_net`. En despliegues donde el proxy inverso opere fuera de Docker, `TRUSTED_PROXIES` debe configurarse con la IP estática del host de dicho proxy.

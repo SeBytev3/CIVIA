@@ -19,6 +19,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from starlette.requests import Request
 
+from app.config import settings
 from app.db import (
     set_deadline_context,
     reset_deadline_context,
@@ -285,8 +286,9 @@ def test_m01_rejects_empty_wav():
 # M-06: Trusted reverse proxy IP extraction
 # -------------------------------------------------------------------------
 
-def test_m06_trusted_proxy_client_ip():
+def test_m06_trusted_proxy_client_ip(monkeypatch):
     """Verify get_trusted_client_ip respects X-Forwarded-For only from trusted networks."""
+    monkeypatch.setattr(settings, "TRUSTED_PROXIES", "172.28.0.2")
     # Untrusted client attempting to spoof IP via X-Forwarded-For
     scope_untrusted = {
         "type": "http",
@@ -296,20 +298,29 @@ def test_m06_trusted_proxy_client_ip():
     req_untrusted = Request(scope_untrusted)
     assert get_trusted_client_ip(req_untrusted) == "198.51.100.2"
 
-    # Trusted proxy (Docker gateway 172.18.0.1) forwarding real client IP
-    scope_trusted_docker = {
+    # Gateway or untrusted container (172.18.0.1 / 172.28.0.1) cannot spoof IP via headers
+    scope_gateway = {
         "type": "http",
         "client": ("172.18.0.1", 54321),
         "headers": [(b"x-forwarded-for", b"203.0.113.195")],
     }
-    req_trusted = Request(scope_trusted_docker)
+    req_gateway = Request(scope_gateway)
+    assert get_trusted_client_ip(req_gateway) == "172.18.0.1"
+
+    # Sole trusted proxy (Nginx 172.28.0.2) forwarding real client IP
+    scope_trusted_nginx = {
+        "type": "http",
+        "client": ("172.28.0.2", 54321),
+        "headers": [(b"x-forwarded-for", b"203.0.113.195")],
+    }
+    req_trusted = Request(scope_trusted_nginx)
     assert get_trusted_client_ip(req_trusted) == "203.0.113.195"
 
-    # Trusted proxy with multiple hops in X-Forwarded-For (from 172.18.0.2)
+    # Trusted proxy with multiple hops in X-Forwarded-For (from 172.28.0.2)
     scope_trusted_hops = {
         "type": "http",
-        "client": ("172.18.0.2", 54321),
-        "headers": [(b"x-forwarded-for", b"190.85.12.34, 172.18.0.1")],
+        "client": ("172.28.0.2", 54321),
+        "headers": [(b"x-forwarded-for", b"190.85.12.34, 172.28.0.2")],
     }
     req_hops = Request(scope_trusted_hops)
     assert get_trusted_client_ip(req_hops) == "190.85.12.34"

@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 import contextvars
 import logging
+import os
 from pathlib import Path
 import re
 import threading
@@ -55,6 +56,22 @@ class ExecutionCapability:
                 self._revoked = True
                 raise TimeoutError(f"Capacidad de ejecución expirada por deadline: {operation_desc} rechazada.")
 
+    def authorized_replace(self, src: Path | str, dst: Path | str) -> None:
+        """Promoción atómica de archivo coordinada con la revocación bajo candado (M-03).
+
+        Garantiza que la validación y os.replace sean atómicos respecto a revoke(),
+        impidiendo que un archivo se publique si revoke() ya fue invocado o el
+        deadline ya expiró. os.replace es una operación atómica a nivel de metadatos
+        de directorio (microsegundos), por lo que no introduce bloqueos indefinidos.
+        """
+        with self._lock:
+            if self._revoked:
+                raise TimeoutError("Capacidad de ejecución revocada: promoción de archivo rechazada.")
+            if self.deadline is not None and time.monotonic() >= self.deadline:
+                self._revoked = True
+                raise TimeoutError("Capacidad de ejecución expirada por deadline: promoción de archivo rechazada.")
+            os.replace(src, dst)
+
 
 _CURRENT_CAPABILITY: contextvars.ContextVar[ExecutionCapability | None] = contextvars.ContextVar(
     "_CURRENT_CAPABILITY", default=None
@@ -82,6 +99,86 @@ def check_execution_capability_or_raise(operation_desc: str = "operación") -> N
         raise TimeoutError(f"Deadline de ejecución expirado: {operation_desc} rechazada.")
 
 
+def atomic_publish_file(src: Path | str, dst: Path | str) -> None:
+    """Publica atómicamente un archivo validando la capacidad de ejecución activa bajo candado (M-03)."""
+    cap = get_current_capability()
+    if cap is not None:
+        cap.authorized_replace(src, dst)
+        return
+    dl = get_deadline_context()
+    if dl is not None and time.monotonic() >= dl:
+        raise TimeoutError("Deadline de ejecución expirado: promoción de archivo rechazada.")
+    os.replace(src, dst)
+
+
+class _CapabilityCopyProxy:
+    """Proxy para objetos Copy de psycopg que valida la capacidad de ejecución."""
+
+    def __init__(self, copy_obj: Any, cap: ExecutionCapability | None) -> None:
+        self._copy_obj = copy_obj
+        self._cap = cap
+
+    def _check(self, op: str = "operación copy") -> None:
+        if self._cap is not None:
+            self._cap.check_or_raise(op)
+        check_execution_capability_or_raise(op)
+
+    def read(self, *args: Any, **kwargs: Any) -> Any:
+        self._check("lectura copy")
+        return self._copy_obj.read(*args, **kwargs)
+
+    def read_row(self, *args: Any, **kwargs: Any) -> Any:
+        self._check("lectura copy")
+        return self._copy_obj.read_row(*args, **kwargs)
+
+    def rows(self, *args: Any, **kwargs: Any) -> Any:
+        self._check("filas copy")
+        return self._copy_obj.rows(*args, **kwargs)
+
+    def write(self, *args: Any, **kwargs: Any) -> Any:
+        self._check("escritura copy")
+        return self._copy_obj.write(*args, **kwargs)
+
+    def write_row(self, *args: Any, **kwargs: Any) -> Any:
+        self._check("escritura copy")
+        return self._copy_obj.write_row(*args, **kwargs)
+
+    def __iter__(self) -> Any:
+        self._check("iteración copy")
+        return iter(self._copy_obj)
+
+    def __enter__(self) -> "_CapabilityCopyProxy":
+        self._check("apertura copy")
+        self._copy_obj.__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        return self._copy_obj.__exit__(exc_type, exc_val, exc_tb)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._copy_obj, name)
+
+
+class _CapabilityStreamProxy:
+    """Proxy para streams/iteradores de cursores psycopg."""
+
+    def __init__(self, stream_obj: Any, cap: ExecutionCapability | None) -> None:
+        self._stream_obj = stream_obj
+        self._cap = cap
+
+    def __iter__(self) -> "_CapabilityStreamProxy":
+        return self
+
+    def __next__(self) -> Any:
+        if self._cap is not None:
+            self._cap.check_or_raise("stream SQL fila")
+        check_execution_capability_or_raise("stream SQL fila")
+        return next(self._stream_obj)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream_obj, name)
+
+
 class _CapabilityCursorProxy:
     """Proxy para cursores psycopg que valida la capacidad de ejecución antes de cada consulta."""
 
@@ -89,19 +186,38 @@ class _CapabilityCursorProxy:
         self._cur = cur
         self._cap = cap
 
-    def execute(self, query: Any, params: Any = None, **kwargs: Any) -> Any:
+    def execute(self, query: Any, params: Any = None, **kwargs: Any) -> "_CapabilityCursorProxy":
         if self._cap is not None:
             self._cap.check_or_raise("sentencia SQL")
         check_execution_capability_or_raise("sentencia SQL")
-        return self._cur.execute(query, params, **kwargs)
+        self._cur.execute(query, params, **kwargs)
+        return self
 
-    def executemany(self, query: Any, params_seq: Any, **kwargs: Any) -> Any:
+    def executemany(self, query: Any, params_seq: Any, **kwargs: Any) -> "_CapabilityCursorProxy":
         if self._cap is not None:
             self._cap.check_or_raise("sentencia SQL múltiple")
         check_execution_capability_or_raise("sentencia SQL múltiple")
-        return self._cur.executemany(query, params_seq, **kwargs)
+        self._cur.executemany(query, params_seq, **kwargs)
+        return self
+
+    def copy(self, statement: Any, params: Any = None, **kwargs: Any) -> _CapabilityCopyProxy:
+        if self._cap is not None:
+            self._cap.check_or_raise("sentencia SQL copy")
+        check_execution_capability_or_raise("sentencia SQL copy")
+        copy_obj = self._cur.copy(statement, params, **kwargs)
+        return _CapabilityCopyProxy(copy_obj, self._cap)
+
+    def stream(self, query: Any, params: Any = None, **kwargs: Any) -> _CapabilityStreamProxy:
+        if self._cap is not None:
+            self._cap.check_or_raise("stream SQL")
+        check_execution_capability_or_raise("stream SQL")
+        stream_obj = self._cur.stream(query, params, **kwargs)
+        return _CapabilityStreamProxy(stream_obj, self._cap)
 
     def __iter__(self) -> Any:
+        if self._cap is not None:
+            self._cap.check_or_raise("iteración cursor SQL")
+        check_execution_capability_or_raise("iteración cursor SQL")
         return iter(self._cur)
 
     def __getattr__(self, name: str) -> Any:
@@ -273,6 +389,23 @@ def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Conne
         return _CapabilityCursorProxy(orig_cursor(*c_args, **c_kwargs), cap)
 
     conn.cursor = _proxy_cursor  # type: ignore[assignment]
+
+    def _wrapped_conn_execute(query: Any, params: Any = None, **kwargs: Any) -> _CapabilityCursorProxy:
+        proxy_cur = _proxy_cursor()
+        return proxy_cur.execute(query, params, **kwargs)
+
+    conn.execute = _wrapped_conn_execute  # type: ignore[assignment]
+
+    orig_conn_copy = getattr(conn, "copy", None)
+    if orig_conn_copy is not None:
+        def _wrapped_conn_copy(statement: Any, params: Any = None, **kwargs: Any) -> _CapabilityCopyProxy:
+            if cap is not None:
+                cap.check_or_raise("sentencia SQL copy")
+            check_execution_capability_or_raise("sentencia SQL copy")
+            return _CapabilityCopyProxy(orig_conn_copy(statement, params, **kwargs), cap)
+
+        conn.copy = _wrapped_conn_copy  # type: ignore[assignment]
+
     register_active_conn(conn)
     orig_commit = conn.commit
 

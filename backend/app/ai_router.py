@@ -2,6 +2,7 @@ import base64
 from dataclasses import dataclass
 import json
 import logging
+import math
 import random
 import re
 import threading
@@ -555,11 +556,14 @@ def classify_evidence_with_router(
     report_id: UUID | str | None = None,
     trace_group_id: UUID | None = None,
     total_timeout_override: float | None = None,
+    token_tracker: Any = None,
+    already_reserved: int = 0,
 ) -> tuple[AIAnalysisContract | None, dict[str, Any]]:
     """
     Ejecuta clasificación multimodal a través del router Gemini -> Groq -> Gemini.
     Nunca lanza excepción hacia el ciudadano; si todos los proveedores fallan,
     retorna (None, metadata_de_traza) para conservar el reporte en PENDING_ANALYSIS.
+    Aplica reserva y conciliación atómica por intento (M-02).
     """
     eff_trace_group_id = trace_group_id or uuid.uuid4()
     prompt_text = build_classification_prompt(
@@ -569,6 +573,18 @@ def classify_evidence_with_router(
         address_hint=address_hint,
         audio_transcript=audio_transcript,
     )
+    est_prompt_tokens = int(math.ceil(len(prompt_text) / 3.0))
+    est_image_tokens = 258 if image_bytes else 0
+    est_output_tokens = 80
+    est_attempt_tokens = est_prompt_tokens + est_image_tokens + est_output_tokens
+
+    eff_tracker = token_tracker
+    if eff_tracker is None:
+        try:
+            from app.agent import get_active_token_tracker
+            eff_tracker = get_active_token_tracker()
+        except Exception:
+            eff_tracker = None
 
     chain = get_provider_chain()
     ensure_at_least_one_circuit_openable(chain)
@@ -586,8 +602,11 @@ def classify_evidence_with_router(
     accumulated_prompt_tokens = 0
     accumulated_completion_tokens = 0
     has_unknown_consumption = False
+    insufficient_budget = False
 
     for idx, node in enumerate(chain):
+        if insufficient_budget:
+            break
         elapsed_router = time.perf_counter() - t_start
         if elapsed_router >= total_timeout or (dl is not None and time.monotonic() >= dl):
             break
@@ -630,6 +649,20 @@ def classify_evidence_with_router(
             effective_timeout = min(per_call_timeout, remaining_for_call)
             if effective_timeout <= 0.005:
                 break
+
+            # Reserva atómica previa para este intento individual (M-02)
+            reserved_this_try = False
+            est_call_tokens = est_attempt_tokens
+            if already_reserved > 0 and attempt_global == 0:
+                reserved_this_try = True
+                est_call_tokens = already_reserved
+                already_reserved = 0
+            elif eff_tracker is not None:
+                if not eff_tracker.try_reserve(est_attempt_tokens):
+                    insufficient_budget = True
+                    break
+                reserved_this_try = True
+
             attempt_global += 1
             t0 = time.perf_counter()
             in_tok = 0
@@ -657,12 +690,32 @@ def classify_evidence_with_router(
                         timeout_sec=effective_timeout,
                     )
 
-                # Acumulación atómica de tokens de todas las respuestas recibidas (M-02)
+                # Reconciliación inmediata de tokens consumidos en este intento (M-02)
                 if in_tok > 0 or out_tok > 0:
                     accumulated_prompt_tokens += in_tok
                     accumulated_completion_tokens += out_tok
+                    if eff_tracker is not None and reserved_this_try:
+                        eff_tracker.reconcile_usage(
+                            reserved=est_call_tokens,
+                            actual_prompt=in_tok,
+                            actual_completion=out_tok,
+                            estimated=False,
+                            unknown=False,
+                        )
+                        reserved_this_try = False
                 else:
                     has_unknown_consumption = True
+                    accumulated_prompt_tokens += (est_prompt_tokens + est_image_tokens)
+                    accumulated_completion_tokens += est_output_tokens
+                    if eff_tracker is not None and reserved_this_try:
+                        eff_tracker.reconcile_usage(
+                            reserved=est_call_tokens,
+                            actual_prompt=est_prompt_tokens + est_image_tokens,
+                            actual_completion=est_output_tokens,
+                            estimated=True,
+                            unknown=True,
+                        )
+                        reserved_this_try = False
 
                 # Post-call deadline verification: reject if call finished outside deadline
                 post_elapsed = time.perf_counter() - t_start
@@ -716,6 +769,11 @@ def classify_evidence_with_router(
             except AIProviderError as exc:
                 if in_tok == 0 and out_tok == 0:
                     has_unknown_consumption = True
+                    if eff_tracker is not None and reserved_this_try:
+                        eff_tracker.release_reservation(est_call_tokens)
+                        eff_tracker.has_unknown_consumption = True
+                        reserved_this_try = False
+
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_failure(exc.code)
                 _safe_record_trace(
@@ -738,6 +796,8 @@ def classify_evidence_with_router(
                 if (
                     exc.code == "TIMEOUT"
                     or exc.code == "HTTP_429"
+                    or exc.code == "INVALID_JSON"
+                    or exc.code == "INVALID_SCHEMA"
                     or not exc.retryable
                     or node_try >= max_retries
                     or (tier == "primary" and node_try >= 1)
@@ -749,6 +809,11 @@ def classify_evidence_with_router(
             except Exception as exc:
                 if in_tok == 0 and out_tok == 0:
                     has_unknown_consumption = True
+                    if eff_tracker is not None and reserved_this_try:
+                        eff_tracker.release_reservation(est_call_tokens)
+                        eff_tracker.has_unknown_consumption = True
+                        reserved_this_try = False
+
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_failure("UNEXPECTED_ERROR")
                 _safe_record_trace(
@@ -765,11 +830,22 @@ def classify_evidence_with_router(
                     metadata={"tier": tier},
                 )
                 break
+            finally:
+                if eff_tracker is not None and reserved_this_try:
+                    eff_tracker.release_reservation(est_call_tokens)
+                    reserved_this_try = False
 
         provider_switches += 1
 
     dt_total = int((time.perf_counter() - t_start) * 1000)
     total_acc = accumulated_prompt_tokens + accumulated_completion_tokens
+    if total_acc == 0 and has_unknown_consumption:
+        total_acc = est_attempt_tokens
+        accumulated_prompt_tokens = est_prompt_tokens + est_image_tokens
+        accumulated_completion_tokens = est_output_tokens
+        if eff_tracker is not None and eff_tracker.total_tokens == 0:
+            eff_tracker.record_estimate(total_acc, is_unknown=True)
+
     return None, {
         "trace_group_id": str(eff_trace_group_id),
         "provider": "none",
@@ -782,6 +858,7 @@ def classify_evidence_with_router(
         "completion_tokens": accumulated_completion_tokens,
         "total_tokens": total_acc,
         "unknown_consumption": has_unknown_consumption or (total_acc == 0),
+        "insufficient_budget": insufficient_budget,
     }
 
 
