@@ -268,3 +268,32 @@
     - `test_ai_and_agent.py`: 14/14 passed.
     - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
     - Cero regresiones en controles aprobados G1, A-02, N-02, M-02, M-03 COPY o M-06. Cero commits en `main` ni push remoto.
+
+### Bloque G2.1.5 — Resolución Definitiva de Integridad Transaccional A-02 y Normalización de Excepciones (`docs/auditoria_codex_g2_1_4_95eecba.md`) completado (2026-11-03)
+- **Detalle completo por hallazgo, diagnóstico, corrección, pruebas adversariales y límites**: documentado en la sección 10 de [`docs/remediacion_g2_1.md`](remediacion_g2_1.md).
+- **Cierres aplicados**:
+  1. **`A-02` (Sincronización dinámica de vencimiento en el dominio temporal del servidor PostgreSQL)**:
+     - `backend/app/db.py`: Eliminado el paso de enteros milimétricos relativos calculados previamente en Python. Ahora se transmite a PostgreSQL el epoch objetivo absoluto (`target_epoch = time.time() + rem_sec`).
+     - PostgreSQL calcula dinámicamente en SQL mediante `clock_timestamp()` el remanente real:
+       `set_config('transaction_timeout', GREATEST(1, CEIL((%s - EXTRACT(EPOCH FROM clock_timestamp())) * 1000))::text, true)`
+       absorbiendo cualquier pausa de planificación o red entre Python y la BD. Si el plazo ya expiró al momento de ejecución, PostgreSQL ejecuta inmediatamente `pg_cancel_backend(pg_backend_pid())`.
+  2. **Unificación arquitectónica de `checked_commit` y `_wrapped_commit`**:
+     - `_wrapped_commit()` en `get_conn` delega íntegramente en `checked_commit(conn)`, invocando la referencia nativa `conn._orig_commit`. Ambos métodos ejecutan la misma lógica rigurosa de protección, reevaluación monotónica y validación de supervisor post-commit.
+  3. **Límites tempranos a nivel de sesión**:
+     - `get_conn` configura preventivamente `transaction_timeout` a nivel de conexión anclado al target epoch del servidor.
+  4. **Normalización del contrato de excepciones en `agent.py`**:
+     - En `backend/app/agent.py:execute_tool_with_timeout`, tanto en `_worker` como en `future.result`, se traducen de forma exhaustiva `psycopg.errors.QueryCanceled`, `TransactionTimeout`, `AdminShutdown` y fallos operacionales de cancelación a `TimeoutError`.
+  5. **Pruebas permanentes de regresión**:
+     - `test_g2_1_a02_balanced_config_checks_cases_81_84_prevent_late_writes`: reproduce los casos 81 a 84 con pausas de 40 ms, 5 ms y 40 ms, con y sin Timer, confirmando estado `ORIGINAL` en el 100% de los casos (**PASSED**).
+     - `test_g2_1_a02_legitimate_commits_within_deadline`: confirma que transacciones legítimas dentro del plazo persisten `CHANGED` sin demoras (**PASSED**).
+     - `test_g2_1_a02_cases_61_64_scheduling_delay`: verifica la resistencia ante pausas de 0.13 s (**PASSED**).
+     - `test_g2_1_a02_active_conn_cancellation_on_slow_worker`: verifica cancelación de workers lentos y tipo de excepción `TimeoutError` (**PASSED**).
+- **Verificación oficial de la suite completa en PostgreSQL 17 real (`civia-api-1`)**:
+  - `docker exec civia-api-1 pytest tests -m "not live"`:
+    - **`92 PASSED, 1 deselected`** (100% de éxito, 0 fallos, 1 warning en 13.08 s).
+    - `test_audit_g2_1_remediation.py`: 34/34 passed (incluyendo los 3 nuevos tests de regresión A-02).
+    - `test_audit_g2_resilience.py`: 23/23 passed.
+    - `test_audit_g1_security.py`: 14/14 passed.
+    - `test_ai_and_agent.py`: 13/13 passed (1 deselected live).
+    - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
+    - Cero regresiones en controles aprobados G1, A-02, N-02, M-02, M-03 COPY o M-06. Cero commits en `main` ni push remoto.

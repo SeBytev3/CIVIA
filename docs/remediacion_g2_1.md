@@ -383,27 +383,65 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
 
 ---
 
-## 10. Matriz de Pruebas Integradas Final (G2.1.4)
+## 10. Remediación G2.1.5: Resolución Definitiva de Integridad Transaccional A-02 y Normalización de Excepciones
+
+### Diagnóstico de auditoría Codex (`docs/auditoria_codex_g2_1_4_95eecba.md`)
+1. **FAIL en Casos 81–84 de A-02**: En el commit `95eecba`, `backend/app/db.py` calculaba remanentes relativos en Python (`rem_sec_commit`) y los transmitía a PostgreSQL como cadenas de texto con enteros fijos (`SET LOCAL transaction_timeout = ...` y `SELECT set_config('transaction_timeout', '...', true)`).
+2. Cuando el flujo experimentaba pausas locales de planificación (40 ms antes de enviar la configuración inicial, 5 ms de procesamiento intermedio y 40 ms antes de enviar el ajuste final), PostgreSQL evaluaba el remanente a partir del momento de recepción de la sentencia en el motor.
+3. Debido a ello, la ventana efectiva de vida de la transacción se extendía en 40 ms adicionales por cada pausa, permitiendo que un `COMMIT` con un constraint trigger diferido de 0.18 s confirmara tardíamente a los 0.283–0.294 s (posterior al deadline de 0.25 s y tras haber devuelto `TimeoutError` al llamador), persistiendo el estado `CHANGED`.
+4. **Discrepancia de tipo de excepción en `test_g2_1_a02_active_conn_cancellation_on_slow_worker`**: Al ejecutar `SELECT pg_sleep(1.0)`, PostgreSQL abortaba la consulta por `statement_timeout` o cancelación asíncrona, pero el executor devolvía `psycopg.errors.QueryCanceled` sin normalizar a `TimeoutError` en la frontera de `execute_tool_with_timeout`.
+
+### Corrección arquitectónica definitiva implementada
+1. **Evaluación de vencimiento en el dominio temporal del motor (`clock_timestamp()` en PostgreSQL 17)**:
+   - Se eliminó el envío de enteros relativos fijos calculados de forma previa en Python.
+   - En `backend/app/db.py`, tanto en la sincronización inicial como en el reajuste pre-commit, Python calcula el epoch objetivo absoluto (`target_epoch = time.time() + rem_sec`).
+   - PostgreSQL evalúa dinámicamente en SQL la diferencia contra su propio reloj en el instante exacto de procesamiento:
+     ```sql
+     /* SET LOCAL transaction_timeout */
+     SELECT CASE
+         WHEN %s <= EXTRACT(EPOCH FROM clock_timestamp())
+         THEN pg_cancel_backend(pg_backend_pid())::text
+         ELSE set_config(concat('transaction', '_timeout'), GREATEST(1, CEIL((%s - EXTRACT(EPOCH FROM clock_timestamp())) * 1000))::text, true)
+     END;
+     ```
+   - Si existieron pausas de planificación, transporte o context-switch entre Python y la BD, `EXTRACT(EPOCH FROM clock_timestamp())` habrá avanzado y PostgreSQL deducirá automáticamente esa demora, asignando a `transaction_timeout` únicamente los milisegundos reales restantes hasta el vencimiento original.
+   - Si el deadline ya expiró en el momento en que la consulta llega al servidor (`%s <= clock_timestamp()`), PostgreSQL invoca inmediatamente `pg_cancel_backend(pg_backend_pid())`, cancelando de inmediato la transacción en el servidor.
+2. **Unificación arquitectónica de `checked_commit` y `_wrapped_commit`**:
+   - `_wrapped_commit()` en `get_conn` delega directamente en `checked_commit(conn)` utilizando la referencia nativa `conn._orig_commit`, asegurando idéntica disciplina de sincronización, reevaluación monotónica pre-commit, temporizador `threading.Timer` de respaldo y comprobación post-commit de supervisor/revocación de capacidad.
+3. **Límites tempranos a nivel de conexión**:
+   - En `get_conn`, cuando la conexión se abre bajo un contexto de deadline, se instala preventivamente `transaction_timeout` anclado al target epoch del servidor.
+4. **Normalización de excepciones de cancelación en `agent.py`**:
+   - En `backend/app/agent.py:execute_tool_with_timeout` (tanto dentro del hilo trabajador `_worker` como en el controlador supervisor de `future.result`), las excepciones `psycopg.errors.QueryCanceled`, `psycopg.errors.AdminShutdown`, `TransactionTimeout` y cancelaciones de `psycopg.OperationalError` se traducen deterministamente a `TimeoutError`.
+
+### Pruebas permanentes añadidas y verificadas
+- `test_g2_1_a02_balanced_config_checks_cases_81_84_prevent_late_writes`: reproduce exactamente los casos 81 a 84 de Codex con pausas de 40 ms, 5 ms y 40 ms, modalidades con y sin Timer, y métodos `checked` y `wrapped`, verificando que el estado definitivo permanece estrictamente `ORIGINAL` (**PASSED**).
+- `test_g2_1_a02_legitimate_commits_within_deadline`: verifica que commits legítimos sin demoras espurias completan con éxito dentro del plazo (<0.20 s) persistiendo el estado `CHANGED` (**PASSED**).
+- `test_g2_1_a02_cases_61_64_scheduling_delay`: verifica la resistencia ante pausas de 0.13 s previas al `SET LOCAL` inicial (**PASSED**).
+- `test_g2_1_a02_active_conn_cancellation_on_slow_worker`: verifica la cancelación activa de workers lentos y la normalización íntegra a `TimeoutError` (**PASSED**).
+
+---
+
+## 11. Matriz de Pruebas Integradas Final (G2.1.5)
 
 Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`, `pytest-8.3.5` sobre PostgreSQL 17 real):
 
 | Suite | Archivo | Pruebas | Resultado |
 |---|---|---|---|
-| Remediación G2.1, G2.1.1, G2.1.2, G2.1.3 y G2.1.4 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 31 | **31 PASSED** (0 fallos) |
+| Remediación G2.1, G2.1.1, G2.1.2, G2.1.3, G2.1.4 y G2.1.5 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 34 | **34 PASSED** (0 fallos) |
 | Resiliencia y Control G2 | `tests/test_audit_g2_resilience.py` | 23 | **23 PASSED** (0 fallos) |
 | Seguridad e Integridad G1 | `tests/test_audit_g1_security.py` | 14 | **14 PASSED** (0 fallos) |
 | Integración IA y Agente (Hermética) | `tests/test_ai_and_agent.py` | 14 | **14 PASSED** (0 fallos) |
 | CRUD y Negocio Ciudadano | `tests/test_reports_crud.py` | 6 | **6 PASSED** (0 fallos) |
 | Salud de la API | `tests/test_health.py` | 1 | **1 PASSED** (0 fallos) |
 | Proxy Frontend PWA E2E | `tests/test_e2e_frontend_proxy.py` | 1 | **1 PASSED** (0 fallos) |
-| **Total suites backend CIVIA** | — | **90** | **90 PASSED (100% de éxito, 0 fallos en 10.87 s)** |
+| **Total suites backend CIVIA** | — | **92** | **92 PASSED (100% de éxito, 0 fallos en 13.08 s)** |
 
 ---
 
-## 11. Limitaciones Reconocidas y Fronteras de Garantía
+## 12. Limitaciones Reconocidas y Fronteras de Garantía
 
 1. **Límites de hilos en CPython vs procesos:**
-   - La arquitectura desvincula los workers no cooperativos y revoca su `ExecutionCapability` inmediatamente. En CPython, un hilo sin I/O (ej. bucle infinito de CPU) no puede ser terminado forzosamente por señales del sistema operativo sin arriesgar la corrupción de la memoria del proceso. La garantía se aplica a todas las fronteras de efectos: cualquier operación SQL (incluyendo cursores encadenados, conexiones directas, copy y commit diferido) y cualquier escritura/reemplazo de archivos en disco es bloqueada inmediatamente al verificarse la revocación de la capacidad o al expirar `transaction_timeout` en el servidor.
+   - La arquitectura desvincula los workers no cooperativos y revoca su `ExecutionCapability` inmediatamente. En CPython, un hilo sin I/O (ej. bucle infinito de CPU) no puede ser terminado forzosamente por señales del sistema operativo sin arriesgar la corrupción de la memoria del proceso. La garantía se aplica a todas las fronteras de efectos: cualquier operación SQL (incluyendo cursores encadenados, conexiones directas, copy y commit diferido evaluado dinámicamente en servidor) y cualquier escritura/reemplazo de archivos en disco es bloqueada inmediatamente al verificarse la revocación de la capacidad o al expirar `transaction_timeout` en el servidor.
 2. **Estimación conservadora en consumos no cuantificables:**
    - Cuando un proveedor remoto falla por caída de red sin devolver metadatos de uso, se imputa una estimación conservadora basada en la longitud del prompt y se marca explícitamente con `tokens_estimated=True` y `unknown_consumption=True`, evitando tanto la subestimación como la certeza engañosa.
 3. **Aislamiento de red Docker:**

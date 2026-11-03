@@ -8,6 +8,7 @@ import time
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 import uuid
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 import httpx
@@ -178,6 +179,230 @@ def test_g2_1_a02_active_conn_cancellation_on_slow_worker():
         with pytest.raises(TimeoutError):
             execute_tool_with_timeout("mock_slow", {}, timeout_sec=0.15)
         assert not executed, "La herramienta lenta no debió completarse con éxito"
+
+
+def test_g2_1_a02_balanced_config_checks_cases_81_84_prevent_late_writes():
+    """
+    Prueba permanente de regresión para A-02 basada en los casos 81-84 de Codex:
+    - Intervalos de planificación finitos (40 ms antes de configuración inicial, 5 ms intermedio, 40 ms antes de ajuste final).
+    - Trigger diferido con pg_sleep(0.18) y deadline de 0.25 s.
+    - Modalidades: servidor aislado (sin Timer) y Timer retrasado (+0.15 s).
+    - Ambos métodos: checked_commit y conn.commit (wrapped).
+    - Verificación: CERO escrituras tardías; final_state permanece 'ORIGINAL' en todas las filas.
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_a02_balanced")
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute("CREATE TABLE audit_deadline_rows(id int PRIMARY KEY, state text NOT NULL);")
+        c.execute("CREATE OR REPLACE FUNCTION audit_deferred() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='CHANGED' THEN PERFORM pg_sleep(0.18); END IF; RETURN NEW; END $$;")
+        c.execute("CREATE CONSTRAINT TRIGGER audit_delay AFTER UPDATE ON audit_deadline_rows DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION audit_deferred();")
+        c.execute("INSERT INTO audit_deadline_rows SELECT n, 'ORIGINAL' FROM generate_series(80, 90) n;")
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    OriginalTimer = threading.Timer
+
+    class NoTimer:
+        def __init__(self, *args, **kwargs): pass
+        def start(self): pass
+        def cancel(self): pass
+
+    class LateTimer:
+        def __init__(self, interval, function, args=None, kwargs=None):
+            self.timer = OriginalTimer(interval + 0.15, function, args=args, kwargs=kwargs)
+        def start(self):
+            self.timer.daemon = True
+            self.timer.start()
+        def cancel(self):
+            self.timer.cancel()
+
+    try:
+        case_idx = 81
+        for phase, pre_final, timer_type in [
+            ('both_configs_server_only', 0.04, NoTimer),
+            ('both_configs_delayed_timer', 0.04, LateTimer),
+        ]:
+            for method in ['checked', 'wrapped']:
+                number = case_idx
+                case_idx += 1
+                done = threading.Event()
+                worker_error = []
+
+                def worker(args):
+                    try:
+                        cm = db.get_conn() if method == 'wrapped' else psycopg.connect(settings.DATABASE_URL)
+                        with cm as c:
+                            if method == 'checked':
+                                db.register_active_conn(c)
+                            orig_cur = c.cursor
+                            class Cursor:
+                                def __init__(self, *c_args, **c_kwargs):
+                                    self.cur = orig_cur(*c_args, **c_kwargs)
+                                def __enter__(self):
+                                    self.cur.__enter__()
+                                    return self
+                                def __exit__(self, *e_args):
+                                    return self.cur.__exit__(*e_args)
+                                def __getattr__(self, name):
+                                    return getattr(self.cur, name)
+                                def execute(self, q, p=None, **kwargs):
+                                    text = str(q)
+                                    is_init = 'SET LOCAL transaction_timeout' in text
+                                    is_fin = "set_config('transaction_timeout'" in text
+                                    if is_init:
+                                        time.sleep(0.04)
+                                    if is_fin and pre_final:
+                                        time.sleep(pre_final)
+                                    res = self.cur.execute(q, p, **kwargs)
+                                    if is_init:
+                                        time.sleep(0.005)
+                                    return res
+                            c.cursor = Cursor
+                            c.execute("UPDATE audit_deadline_rows SET state='CHANGED' WHERE id=%s", (number,))
+                            if method == 'wrapped':
+                                c.commit()
+                            else:
+                                db.checked_commit(c)
+                    except Exception as exc:
+                        worker_error.append(type(exc).__name__)
+                    finally:
+                        if method == 'checked' and 'c' in locals():
+                            db.unregister_active_conn(c)
+                        done.set()
+                    return {}
+
+                orig_cancel = cancel_active_conns_for_thread
+                def delayed_cancel(tid):
+                    time.sleep(0.15)
+                    return orig_cancel(tid)
+
+                with patch.dict("app.agent.TOOL_DISPATCH", {'audit_final_config': worker}), \
+                     patch("app.agent.cancel_active_conns_for_thread", side_effect=delayed_cancel), \
+                     patch.object(db.threading, 'Timer', timer_type):
+                    try:
+                        execute_tool_with_timeout('audit_final_config', {}, 0.25)
+                    except Exception:
+                        pass
+                    done.wait(2)
+                    with psycopg.connect(settings.DATABASE_URL, autocommit=True) as v:
+                        final = v.execute('SELECT state FROM audit_deadline_rows WHERE id=%s', (number,)).fetchone()[0]
+
+                assert final == "ORIGINAL", (
+                    f"Violación A-02 en caso {number} ({phase}, {method}): "
+                    f"la fila cambió a '{final}' tras vencer el deadline absoluto de 0.25s."
+                )
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_a02_legitimate_commits_within_deadline():
+    """
+    Verifica que los commits legítimos dentro del deadline (0.25 s) con trigger diferido (0.18 s)
+    confirman exitosamente para ambos métodos (checked_commit y wrapped conn.commit).
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_a02_legit")
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute("CREATE TABLE audit_deadline_rows(id int PRIMARY KEY, state text NOT NULL);")
+        c.execute("CREATE OR REPLACE FUNCTION audit_deferred() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='CHANGED' THEN PERFORM pg_sleep(0.18); END IF; RETURN NEW; END $$;")
+        c.execute("CREATE CONSTRAINT TRIGGER audit_delay AFTER UPDATE ON audit_deadline_rows DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION audit_deferred();")
+        c.execute("INSERT INTO audit_deadline_rows SELECT n, 'ORIGINAL' FROM generate_series(91, 95) n;")
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        for number, method in [(91, 'checked'), (92, 'wrapped')]:
+            done = threading.Event()
+            def worker(args):
+                try:
+                    cm = db.get_conn() if method == 'wrapped' else psycopg.connect(settings.DATABASE_URL)
+                    with cm as c:
+                        if method == 'checked':
+                            db.register_active_conn(c)
+                        c.execute("UPDATE audit_deadline_rows SET state='CHANGED' WHERE id=%s", (number,))
+                        if method == 'checked':
+                            db.checked_commit(c)
+                        else:
+                            c.commit()
+                    return {'committed': True}
+                finally:
+                    if method == 'checked' and 'c' in locals():
+                        db.unregister_active_conn(c)
+                    done.set()
+
+            with patch.dict("app.agent.TOOL_DISPATCH", {'audit_legit': worker}):
+                res = execute_tool_with_timeout('audit_legit', {}, 0.25)
+                assert res.get('committed') is True, f"El commit legítimo {number} ({method}) debió ser exitoso"
+                done.wait(2)
+                with psycopg.connect(settings.DATABASE_URL, autocommit=True) as v:
+                    final = v.execute('SELECT state FROM audit_deadline_rows WHERE id=%s', (number,)).fetchone()[0]
+                assert final == "CHANGED", f"El commit legítimo {number} ({method}) debió persistir CHANGED"
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_a02_cases_61_64_scheduling_delay():
+    """
+    Verifica que una pausa de planificación de 0.13 s antes de la configuración de deadline
+    no permite escrituras tardías (Casos 61-64 de auditoría).
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_a02_sched")
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute("CREATE TABLE audit_deadline_rows(id int PRIMARY KEY, state text NOT NULL);")
+        c.execute("CREATE OR REPLACE FUNCTION audit_deferred() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='CHANGED' THEN PERFORM pg_sleep(0.18); END IF; RETURN NEW; END $$;")
+        c.execute("CREATE CONSTRAINT TRIGGER audit_delay AFTER UPDATE ON audit_deadline_rows DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION audit_deferred();")
+        c.execute("INSERT INTO audit_deadline_rows SELECT n, 'ORIGINAL' FROM generate_series(61, 65) n;")
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        for number, method in [(61, 'checked'), (62, 'wrapped'), (63, 'checked'), (64, 'wrapped')]:
+            done = threading.Event()
+            def worker(args):
+                try:
+                    cm = db.get_conn() if method == 'wrapped' else psycopg.connect(settings.DATABASE_URL)
+                    with cm as c:
+                        if method == 'checked':
+                            db.register_active_conn(c)
+                        orig = c.cursor
+                        class Cursor:
+                            def __init__(self, *args, **kw): self.cur = orig(*args, **kw)
+                            def __enter__(self): self.cur.__enter__(); return self
+                            def __exit__(self, *args): return self.cur.__exit__(*args)
+                            def __getattr__(self, name): return getattr(self.cur, name)
+                            def execute(self, q, p=None, **kw):
+                                if 'SET LOCAL transaction_timeout' in str(q):
+                                    time.sleep(0.13)
+                                return self.cur.execute(q, p, **kw)
+                        c.cursor = Cursor
+                        c.execute("UPDATE audit_deadline_rows SET state='CHANGED' WHERE id=%s", (number,))
+                        if method == 'wrapped':
+                            c.commit()
+                        else:
+                            db.checked_commit(c)
+                except Exception:
+                    pass
+                finally:
+                    if method == 'checked' and 'c' in locals():
+                        db.unregister_active_conn(c)
+                    done.set()
+                return {}
+
+            orig_cancel = cancel_active_conns_for_thread
+            def delayed_cancel(tid):
+                time.sleep(0.15)
+                return orig_cancel(tid)
+
+            with patch.dict("app.agent.TOOL_DISPATCH", {'audit_sched': worker}), \
+                 patch("app.agent.cancel_active_conns_for_thread", side_effect=delayed_cancel):
+                try:
+                    execute_tool_with_timeout('audit_sched', {}, 0.25)
+                except Exception:
+                    pass
+                done.wait(2)
+                with psycopg.connect(settings.DATABASE_URL, autocommit=True) as v:
+                    final = v.execute('SELECT state FROM audit_deadline_rows WHERE id=%s', (number,)).fetchone()[0]
+                assert final == "ORIGINAL", f"Caso {number} ({method}) falló: persistió '{final}' tras vencer deadline"
+    finally:
+        settings.DATABASE_URL = old_db_url
 
 
 # ==============================================================================

@@ -12,6 +12,8 @@ from uuid import UUID
 import uuid
 
 import httpx
+import psycopg
+import psycopg.errors
 
 from app.ai_router import (
     AIProviderError,
@@ -659,6 +661,17 @@ def execute_tool_with_timeout(
             if time.monotonic() >= eff_deadline:
                 raise TimeoutError(f"La herramienta '{tool_name}' superó el deadline de ejecución ({timeout_sec}s).")
             return res
+        except (
+            psycopg.errors.QueryCanceled,
+            psycopg.errors.AdminShutdown,
+            getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
+        ) as exc:
+            raise TimeoutError(f"La herramienta '{tool_name}' fue cancelada por deadline en base de datos.") from exc
+        except psycopg.OperationalError as exc:
+            msg = str(exc).lower()
+            if "canceling statement" in msg or "timeout" in msg:
+                raise TimeoutError(f"La herramienta '{tool_name}' superó el límite por timeout en base de datos.") from exc
+            raise
         finally:
             if tok_tracker is not None:
                 try:
@@ -682,6 +695,31 @@ def execute_tool_with_timeout(
                 daemon=True,
             ).start()
         raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s.") from exc
+    except (
+        psycopg.errors.QueryCanceled,
+        psycopg.errors.AdminShutdown,
+        getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
+    ) as exc:
+        capability.revoke()
+        if worker_tid:
+            threading.Thread(
+                target=cancel_active_conns_for_thread,
+                args=(worker_tid[0],),
+                daemon=True,
+            ).start()
+        raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s (cancelación en BD).") from exc
+    except psycopg.OperationalError as exc:
+        capability.revoke()
+        msg = str(exc).lower()
+        if "canceling statement" in msg or "timeout" in msg:
+            if worker_tid:
+                threading.Thread(
+                    target=cancel_active_conns_for_thread,
+                    args=(worker_tid[0],),
+                    daemon=True,
+                ).start()
+            raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s (timeout en BD).") from exc
+        raise
     finally:
         capability.revoke()
         if worker_tid:
