@@ -31,6 +31,7 @@ from app.ai_router import (
 )
 from app.config import is_strong_admin_token, settings, validate_admin_token_or_raise
 from app.db import (
+    IdempotencyConflictError,
     check_db_health,
     get_operation_record,
     reconcile_operation,
@@ -554,6 +555,8 @@ def query_civia_agent(request: Request, payload: AgentQueryRequest):
             tool_timeout_seconds=payload.tool_timeout_seconds or 4.0,
             total_timeout_seconds=payload.total_timeout_seconds,
         )
+    except IdempotencyConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except OperationPendingError as exc:
         return {
             "answer": "La operación transaccional quedó pendiente de confirmación en base de datos. Puede consultar su estado con el identificador de operación.",
@@ -604,20 +607,42 @@ def query_civia_agent(request: Request, payload: AgentQueryRequest):
 
 
 @app.get("/api/operations/{operation_id}", response_model=OperationStatusResponse)
-def get_operation_status(operation_id: UUID) -> OperationStatusResponse:
+def get_operation_status(
+    operation_id: UUID,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+    x_operation_token: str | None = Header(default=None, alias="X-Operation-Token"),
+) -> OperationStatusResponse:
     rec = get_operation_record(operation_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Operación no encontrada.")
     if rec.get("status") == "PENDING":
         rec = reconcile_operation(operation_id)
+
+    # Determinar si el consultante está autorizado (admin o poseedor del token de consulta de la operación)
+    is_authorized = False
+    if x_admin_token:
+        try:
+            verify_admin_token(x_admin_token)
+            is_authorized = True
+        except CitizenValidationError:
+            is_authorized = False
+
+    if not is_authorized and x_operation_token and rec.get("query_token_hash"):
+        hashed = hashlib.sha256(x_operation_token.encode("utf-8")).hexdigest()
+        if hmac.compare_digest(hashed, rec["query_token_hash"]):
+            is_authorized = True
+
+    # Minimización de datos: result_payload y detalle interno solo para invocadores autorizados
+    safe_result = rec.get("result_payload") if is_authorized else None
+    safe_error = rec.get("error_message") if is_authorized else None
+
     return OperationStatusResponse(
         operation_id=rec["operation_id"],
         operation_type=rec["operation_type"],
         status=rec["status"],
         target_id=rec.get("target_id"),
-        idempotency_key=rec.get("idempotency_key"),
-        result_payload=rec.get("result_payload"),
-        error_message=rec.get("error_message"),
+        result_payload=safe_result,
+        error_message=safe_error,
         created_at=rec["created_at"],
         updated_at=rec["updated_at"],
         reconciled=rec.get("reconciled", False),

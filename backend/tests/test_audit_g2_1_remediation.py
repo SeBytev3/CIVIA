@@ -31,6 +31,7 @@ from app.agent import (
 from app.ai_router import AIProviderError, classify_evidence_with_router
 from app.config import settings
 from app.db import (
+    IdempotencyConflictError,
     OperationStatus,
     cancel_active_conns_for_thread,
     checked_commit,
@@ -71,7 +72,9 @@ def _get_clean_test_db(db_name: str) -> str:
         cur.execute(f"DROP DATABASE IF EXISTS {db_name};")
         cur.execute(f"CREATE DATABASE {db_name};")
     admin_conn.close()
-    return urlunparse(parsed._replace(path=f"/{db_name}"))
+    new_url = urlunparse(parsed._replace(path=f"/{db_name}"))
+    db.run_migrations(settings.MIGRATIONS_DIR, database_url=new_url)
+    return new_url
 
 
 # ==============================================================================
@@ -1978,25 +1981,6 @@ def test_g2_1_6_clock_offset_cases_102_109_truthful_pending_and_committed():
     old_db_url = settings.DATABASE_URL
     settings.DATABASE_URL = test_db_url
     try:
-        with psycopg.connect(test_db_url, autocommit=True) as c:
-            c.execute(
-                """
-                CREATE TABLE IF NOT EXISTS operation_records (
-                    operation_id UUID PRIMARY KEY,
-                    idempotency_key VARCHAR(128) UNIQUE,
-                    operation_type VARCHAR(64) NOT NULL,
-                    target_id VARCHAR(128),
-                    status VARCHAR(32) NOT NULL CHECK (status IN ('PENDING', 'COMMITTED', 'ABORTED', 'UNKNOWN')),
-                    proposed_payload JSONB,
-                    result_payload JSONB,
-                    error_message TEXT,
-                    backend_pid INTEGER,
-                    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-                    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
-                );
-                """
-            )
-
         class LateTimer(threading.Timer):
             def __init__(self, interval, function, args=None, kwargs=None):
                 super().__init__(interval + 0.35, function, args=args, kwargs=kwargs)
@@ -2042,29 +2026,25 @@ def test_g2_1_6_idempotent_proposal_replay():
     devuelve el resultado ya comprometido de forma idempotente sin duplicar registros en pending_approvals.
     """
     test_db_url = _get_clean_test_db("test_g2_1_6_idempotency")
+    rep_id = uuid.uuid4()
     with psycopg.connect(test_db_url, autocommit=True) as c:
-        c.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";")
-        c.execute("CREATE TABLE reports (id UUID PRIMARY KEY, tracking_code text UNIQUE, title text, status text, version int);")
-        c.execute("CREATE TABLE pending_approvals (id UUID PRIMARY KEY, report_id UUID, proposed_action text, proposed_payload jsonb, reason text, status text, created_at timestamptz DEFAULT now());")
         c.execute(
             """
-            CREATE TABLE IF NOT EXISTS operation_records (
-                operation_id UUID PRIMARY KEY,
-                idempotency_key VARCHAR(128) UNIQUE,
-                operation_type VARCHAR(64) NOT NULL,
-                target_id VARCHAR(128),
-                status VARCHAR(32) NOT NULL CHECK (status IN ('PENDING', 'COMMITTED', 'ABORTED', 'UNKNOWN')),
-                proposed_payload JSONB,
-                result_payload JSONB,
-                error_message TEXT,
-                backend_pid INTEGER,
-                created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-                updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
-            );
-            """
+            INSERT INTO reports (
+                id, tracking_code, title, description, latitude, longitude, in_service_area,
+                photo_path, photo_mime, photo_size_bytes, photo_width, photo_height, photo_sha256,
+                status, is_synthetic, version
+            )
+            VALUES (
+                %s, 'CIV-2026-TESTIDEM', 'Prueba Idempotencia',
+                'Descripcion de prueba.',
+                3.45, -76.53, TRUE, 'sentinel.png', 'image/png', 128, 64, 64, %s,
+                'CONFIRMED', FALSE, 1
+            )
+            ON CONFLICT (tracking_code) DO NOTHING;
+            """,
+            (rep_id, "a" * 64),
         )
-        rep_id = uuid.uuid4()
-        c.execute("INSERT INTO reports VALUES (%s, 'CIV-2026-TESTIDEM', 'Prueba Idempotencia', 'PENDING', 1);", (rep_id,))
 
     old_db_url = settings.DATABASE_URL
     settings.DATABASE_URL = test_db_url
@@ -2160,18 +2140,329 @@ def test_g2_1_6_api_endpoint_operations_status():
     assert r.status_code == 404
 
     known_id = uuid.uuid4()
-    register_operation_intent(
+    claim = register_operation_intent(
         operation_id=known_id,
         operation_type="clasificar_evidencia",
         target_id="rep-test-api",
     )
     mark_operation_committed(known_id, result_payload={"diagnostico": "HUECO"})
 
-    r2 = client.get(f"/api/operations/{known_id}")
-    assert r2.status_code == 200
-    data = r2.json()
-    assert data["operation_id"] == str(known_id)
-    assert data["status"] == "COMMITTED"
-    assert data["operation_type"] == "clasificar_evidencia"
-    assert data["result_payload"]["diagnostico"] == "HUECO"
+    # 1. Consulta anónima: entrega estado público pero minimiza información sensible (result_payload None, sin idempotency_key)
+    r_anon = client.get(f"/api/operations/{known_id}")
+    assert r_anon.status_code == 200
+    data_anon = r_anon.json()
+    assert data_anon["operation_id"] == str(known_id)
+    assert data_anon["status"] == "COMMITTED"
+    assert data_anon["operation_type"] == "clasificar_evidencia"
+    assert data_anon.get("result_payload") is None, "Consulta anónima no debe exponer result_payload"
+    assert "idempotency_key" not in data_anon, "idempotency_key no debe figurar en el esquema público"
+
+    # 2. Consulta autorizada con token de consulta de la operación (propietario)
+    r_owner = client.get(
+        f"/api/operations/{known_id}",
+        headers={"X-Operation-Token": claim["query_token"]},
+    )
+    assert r_owner.status_code == 200
+    data_owner = r_owner.json()
+    assert data_owner["result_payload"]["diagnostico"] == "HUECO"
+
+    # 3. Consulta autorizada con token de administrador
+    r_admin = client.get(
+        f"/api/operations/{known_id}",
+        headers={"X-Admin-Token": settings.ADMIN_TOKEN},
+    )
+    assert r_admin.status_code == 200
+    data_admin = r_admin.json()
+    assert data_admin["result_payload"]["diagnostico"] == "HUECO"
+
+
+# ==============================================================================
+# Suite G2.1.7: Endurecimiento Fail-Closed, Autorización y Reconciliación
+# ==============================================================================
+
+
+def test_g2_1_7_fail_closed_marker_failure_aborts_business_transaction():
+    """
+    P0 — Atomicidad obligatoria: si un trigger o fallo SQL impide actualizar
+    operation_records a COMMITTED en checked_commit, la transacción de negocio
+    DEBE abortar completamente (rollback) sin confirmar cambios en tablas de negocio.
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_7_marker_fail")
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute("CREATE TABLE audit_business(id int PRIMARY KEY, n int NOT NULL DEFAULT 0);")
+        c.execute("INSERT INTO audit_business VALUES (1, 0);")
+        # Trigger que rechaza la transición a COMMITTED para tipo 'audit_marker_fail'
+        c.execute(
+            """
+            CREATE OR REPLACE FUNCTION audit_deny_marker() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.operation_type = 'audit_marker_fail' AND NEW.status = 'COMMITTED' THEN
+                    RAISE EXCEPTION 'SYNTHETIC MARKER FAILURE';
+                END IF;
+                RETURN NEW;
+            END;
+            $$;
+            CREATE TRIGGER audit_marker_reject
+            BEFORE UPDATE ON operation_records
+            FOR EACH ROW EXECUTE FUNCTION audit_deny_marker();
+            """
+        )
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        def write_tool(args):
+            with db.get_conn() as c:
+                c.execute("UPDATE audit_business SET n = n + 1 WHERE id = 1;")
+                db.checked_commit(c)
+            return {"updated": True}
+
+        with patch.dict("app.agent.TOOL_DISPATCH", {"audit_marker_fail": write_tool}):
+            with pytest.raises(Exception) as exc_info:
+                execute_tool_with_timeout("audit_marker_fail", {}, timeout_sec=2.0)
+
+            # Verificar que la transacción de negocio fue ROLLED BACK
+            with psycopg.connect(test_db_url, autocommit=True) as v:
+                n_val = v.execute("SELECT n FROM audit_business WHERE id = 1;").fetchone()[0]
+            assert n_val == 0, "Fallo de fail-closed: el negocio confirmó a pesar de que el marcador falló"
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_7_missing_migration_004_fails_closed():
+    """
+    P0 — Fail-closed con migración ausente: si operation_records no existe,
+    register_operation_intent falla cerrado impidiendo que la herramienta
+    ejecute escrituras sin registro durable.
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_7_no_004")
+    # Dropear operation_records explícitamente para simular omisión de migración
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute("DROP TABLE IF EXISTS operation_records CASCADE;")
+        c.execute("CREATE TABLE audit_business(id int PRIMARY KEY, n int NOT NULL DEFAULT 0);")
+        c.execute("INSERT INTO audit_business VALUES (1, 0);")
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        def write_tool(args):
+            with db.get_conn() as c:
+                c.execute("UPDATE audit_business SET n = n + 1 WHERE id = 1;")
+                c.commit()
+            return {"updated": True}
+
+        with patch.dict("app.agent.TOOL_DISPATCH", {"audit_write": write_tool}):
+            with pytest.raises(Exception):
+                execute_tool_with_timeout("audit_write", {}, timeout_sec=2.0)
+
+            with psycopg.connect(test_db_url, autocommit=True) as v:
+                n_val = v.execute("SELECT n FROM audit_business WHERE id = 1;").fetchone()[0]
+            assert n_val == 0, "Fallo de fail-closed: se ejecutó escritura de negocio sin tabla operation_records"
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_7_reconcile_only_on_exact_operation_id_evidence():
+    """
+    P0 — Reconciliación basada en evidencia propia: una propuesta preexistente
+    sobre un report_id jamás debe causar que una operación ajena se marque COMMITTED.
+    Solo un registro con el operation_id exacto sirve de evidencia.
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_7_reconcile_link")
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        rep_id = uuid.uuid4()
+        # 1. Crear reporte previo y propuesta 1 en pending_approvals
+        op1 = uuid.uuid4()
+        claim1 = register_operation_intent(op1, "proponer_actualizacion_critica", target_id=str(rep_id))
+        with db.get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO reports (
+                        id, tracking_code, title, description, latitude, longitude, in_service_area,
+                        photo_path, photo_mime, photo_size_bytes, photo_width, photo_height, photo_sha256,
+                        status, is_synthetic, version
+                    )
+                    VALUES (
+                        %s, 'CIV-2026-RECON1', 'Prueba Reconciliacion',
+                        'Desc de reconciliacion.',
+                        3.45, -76.53, TRUE, 'sentinel.png', 'image/png', 128, 64, 64, %s,
+                        'CONFIRMED', FALSE, 1
+                    )
+                    ON CONFLICT (tracking_code) DO NOTHING;
+                    """,
+                    (rep_id, "b" * 64),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO pending_approvals (
+                        id, report_id, proposed_action, proposed_payload, reason, status, operation_id
+                    ) VALUES (%s, %s, 'UPDATE_REPORT_STATUS', '{"proposed_status":"IN_REVIEW"}'::jsonb, 'P1', 'PENDING', %s);
+                    """,
+                    (uuid.uuid4(), rep_id, str(op1)),
+                )
+                conn.commit()
+
+        # 2. Registrar operación 2 que NUNCA se ejecuta, con backend_pid inactivo
+        op2 = uuid.uuid4()
+        claim2 = register_operation_intent(
+            op2,
+            "proponer_actualizacion_critica",
+            target_id=rep_id,
+            proposed_payload={"nuevo_estado": "RESOLVED"},
+            backend_pid=999999,
+        )
+
+        # 3. Reconciliar op2: DEBE resolver a ABORTED, NUNCA a COMMITTED
+        after_rec = db.reconcile_operation(op2)
+        assert after_rec["status"] == "ABORTED", (
+            f"Falso positivo en reconciliación: op2 no ejecutada se marcó '{after_rec['status']}' por propuesta ajena"
+        )
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_7_concurrent_idempotency_claim_single_execution():
+    """
+    P0 — Idempotencia concurrente real: dos invocaciones con la misma clave
+    de idempotencia deben ejecutar el efecto de negocio exactamente UNA vez.
+    Ambas invocaciones retornan el mismo operation_id durable.
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_7_conc_idemp")
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute("CREATE TABLE audit_business(id int PRIMARY KEY, n int NOT NULL DEFAULT 0);")
+        c.execute("INSERT INTO audit_business VALUES (5, 0);")
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        shared_key = f"audit-race-{uuid.uuid4().hex}"
+
+        def write_tool(args):
+            with db.get_conn() as c:
+                c.execute("UPDATE audit_business SET n = n + 1 WHERE id = 5;")
+                c.commit()
+            return {
+                "operation_id": str(db.get_current_operation()["operation_id"]),
+                "row": 5,
+                "note": "SUCCESS",
+            }
+
+        def run_op(_):
+            return execute_tool_with_timeout("audit_write_conc", {"row": 5, "idempotency_key": shared_key}, timeout_sec=4.0)
+
+        with patch.dict("app.agent.TOOL_DISPATCH", {"audit_write_conc": write_tool}):
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                results = list(ex.map(run_op, range(2)))
+
+        with psycopg.connect(test_db_url, autocommit=True) as v:
+            writes = v.execute("SELECT n FROM audit_business WHERE id = 5;").fetchone()[0]
+
+        assert writes == 1, f"Fallo de idempotencia: el negocio fue escrito {writes} veces en lugar de 1"
+        assert len({r["operation_id"] for r in results}) == 1, "Debió retornarse exactamente un operation_id para ambas llamadas"
+        final_op_id = results[0]["operation_id"]
+        assert db.get_operation_record(final_op_id) is not None
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_7_idempotency_payload_conflict_raises_error():
+    """
+    P0 — Conflicto de idempotencia: si una clave es reusada con un payload
+    diferente, debe rechazarse con IdempotencyConflictError (HTTP 409).
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_7_conflict")
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        key = f"key-{uuid.uuid4().hex}"
+        op1 = uuid.uuid4()
+        claim1 = register_operation_intent(
+            operation_id=op1,
+            operation_type="audit_tool",
+            idempotency_key=key,
+            proposed_payload={"arg": "VALUE_A"},
+        )
+        assert claim1["claim_acquired"] is True
+
+        op2 = uuid.uuid4()
+        with pytest.raises(IdempotencyConflictError):
+            register_operation_intent(
+                operation_id=op2,
+                operation_type="audit_tool",
+                idempotency_key=key,
+                proposed_payload={"arg": "VALUE_B_DIFFERENT"},
+            )
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_7_committed_without_result_replay_reconstructs():
+    """
+    P0 — Reintento de COMMITTED sin result_payload:
+    Si la operación ya confirmó en base de datos pero result_payload está ausente,
+    el reintento NO reejecuta el negocio; retorna la confirmación durable con ID estable.
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_7_replay_no_payload")
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute("CREATE TABLE audit_business(id int PRIMARY KEY, n int NOT NULL DEFAULT 0);")
+        c.execute("INSERT INTO audit_business VALUES (9, 0);")
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        key = f"key-replay-{uuid.uuid4().hex}"
+        op_id = uuid.uuid4()
+
+        # Registrar intención y marcar COMMITTED sin result_payload
+        claim = register_operation_intent(
+            operation_id=op_id,
+            operation_type="audit_tool_replay",
+            idempotency_key=key,
+            proposed_payload={"row": 9},
+        )
+        with psycopg.connect(test_db_url, autocommit=True) as c:
+            c.execute("UPDATE audit_business SET n = n + 1 WHERE id = 9;")
+        mark_operation_committed(op_id, result_payload=None)
+
+        record_before = get_operation_record(op_id)
+        assert record_before["status"] == "COMMITTED"
+        assert record_before["result_payload"] is None
+
+        # Reintentar invocación con la misma clave
+        def tool_fn(args):
+            with db.get_conn() as c:
+                c.execute("UPDATE audit_business SET n = n + 1 WHERE id = 9;")
+                c.commit()
+            return {"updated": True}
+
+        with patch.dict("app.agent.TOOL_DISPATCH", {"audit_tool_replay": tool_fn}):
+            replay = execute_tool_with_timeout("audit_tool_replay", {"row": 9, "idempotency_key": key}, timeout_sec=2.0)
+
+        with psycopg.connect(test_db_url, autocommit=True) as v:
+            writes = v.execute("SELECT n FROM audit_business WHERE id = 9;").fetchone()[0]
+
+        assert writes == 1, "Fallo: la operación COMMITTED sin cache volvió a ejecutar escrituras de negocio"
+        assert replay.get("operation_id") == str(op_id), "El operation_id retornado debe ser el mismo que el original"
+        assert replay.get("status") == "COMMITTED"
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_7_foreign_transaction_timeout_preserves_error():
+    """
+    P1 — Procedencia de errores PostgreSQL:
+    Un transaction_timeout de sesión ajeno (50 ms) que ocurre mucho antes del deadline local (2 s)
+    NO debe ser atribuido a la cancelación del deadline local; is_deadline_cancellation debe retornar False.
+    """
+    exc = psycopg.OperationalError("canceling transaction due to transaction timeout")
+    setattr(exc, "sqlstate", "25P04")
+
+    # Deadline local es dentro de 2.0 s (no ha expirado)
+    tool_deadline = time.monotonic() + 2.0
+    is_local = is_deadline_cancellation(exc, deadline=tool_deadline)
+    assert is_local is False, "is_deadline_cancellation atribuyó erróneamente un transaction_timeout ajeno al deadline local"
+
 

@@ -27,6 +27,7 @@ from app.ai_router import (
 from app.config import settings
 from app.db import (
     ExecutionCapability,
+    IdempotencyConflictError,
     cancel_active_conns_for_thread,
     get_conn,
     get_current_operation,
@@ -664,12 +665,50 @@ def tool_proponer_actualizacion_critica(args: dict[str, Any]) -> dict[str, Any]:
             cur.execute(
                 """
                 INSERT INTO pending_approvals (
-                    id, report_id, proposed_action, proposed_payload, reason, status
+                    id, report_id, proposed_action, proposed_payload, reason, status, operation_id
                 )
-                VALUES (%s, %s, 'UPDATE_REPORT_STATUS', %s::jsonb, %s, 'PENDING');
+                VALUES (%s, %s, 'UPDATE_REPORT_STATUS', %s::jsonb, %s, 'PENDING', %s)
+                ON CONFLICT (report_id) WHERE status = 'PENDING' AND proposed_action = 'UPDATE_REPORT_STATUS'
+                DO NOTHING
+                RETURNING id;
                 """,
-                (approval_id, row["id"], json.dumps(payload, ensure_ascii=False), motivo[:500]),
+                (
+                    approval_id,
+                    row["id"],
+                    json.dumps(payload, ensure_ascii=False),
+                    motivo[:500],
+                    str(op_id) if op_id else None,
+                ),
             )
+            inserted = cur.fetchone()
+            if not inserted:
+                # Conflicto concurrente en base de datos: ya existe una propuesta PENDING para este reporte
+                cur.execute(
+                    """
+                    SELECT id, proposed_payload, reason, status
+                    FROM pending_approvals
+                    WHERE report_id = %s AND proposed_action = 'UPDATE_REPORT_STATUS' AND status = 'PENDING'
+                    ORDER BY created_at DESC LIMIT 1;
+                    """,
+                    (row["id"],),
+                )
+                existing_pa = cur.fetchone()
+                conn.commit()
+                return {
+                    "creado": False,
+                    "ya_existente": True,
+                    "requiere_aprobacion_humana": True,
+                    "approval_id": str(existing_pa["id"]) if existing_pa else str(approval_id),
+                    "tracking_code": row["tracking_code"],
+                    "estado_actual_reporte": row["status"],
+                    "estado_propuesto": (
+                        existing_pa["proposed_payload"].get("proposed_status")
+                        if existing_pa and isinstance(existing_pa.get("proposed_payload"), dict)
+                        else nuevo_estado
+                    ),
+                    "estado_aprobacion": "PENDING",
+                    "mensaje": f"Ya existe una solicitud de aprobación pendiente #{str(existing_pa['id'])[:8] if existing_pa else ''} para este reporte.",
+                }
             conn.commit()
     if _ON_APPROVAL_CREATED_HOOK is not None:
         try:
@@ -717,28 +756,62 @@ def execute_tool_with_timeout(
     capability = ExecutionCapability(deadline=eff_deadline, label=f"tool:{tool_name}")
     worker_tid: list[int] = []
 
-    # Manejo de intención durable e idempotencia para operaciones (A-02 / G2.1.6)
-    op_id: uuid.UUID = uuid.uuid4()
+    # Manejo de intención durable e idempotencia atómica para operaciones transaccionales (A-02 / G2.1.7)
     idempotency_key = tool_args.get("idempotency_key")
-    if idempotency_key:
-        existing = get_operation_by_idempotency_key(idempotency_key)
-        if existing:
-            if existing.get("status") == "COMMITTED" and existing.get("result_payload"):
-                return existing["result_payload"]
-            if existing.get("status") == "PENDING":
+    is_transactional_op = bool(idempotency_key) or (tool_name not in ("consultar_reportes", "obtener_reporte"))
+
+    op_id: uuid.UUID | None = None
+    if is_transactional_op:
+        op_id = uuid.uuid4()
+        target_id = str(tool_args.get("identificador") or tool_args.get("report_id") or "")
+
+        claim = register_operation_intent(
+            operation_id=op_id,
+            operation_type=tool_name,
+            target_id=target_id or None,
+            idempotency_key=idempotency_key,
+            proposed_payload=tool_args,
+        )
+
+        if not claim.get("claim_acquired", True):
+            existing_op_id = claim.get("operation_id")
+            existing_status = claim.get("status")
+
+            if existing_status == "COMMITTED":
+                if claim.get("result_payload"):
+                    return claim["result_payload"]
+                return {
+                    "operation_id": str(existing_op_id),
+                    "status": "COMMITTED",
+                    "target_id": claim.get("target_id"),
+                    "replayed": True,
+                    "mensaje": "Operación ya confirmada previamente.",
+                }
+
+            if existing_status == "PENDING":
+                poll_deadline = min(eff_deadline, time.monotonic() + timeout_sec)
+                while time.monotonic() < poll_deadline:
+                    time.sleep(0.04)
+                    rec = get_operation_record(existing_op_id)
+                    if rec and rec.get("status") == "COMMITTED":
+                        if rec.get("result_payload"):
+                            return rec["result_payload"]
+                        return {
+                            "operation_id": str(existing_op_id),
+                            "status": "COMMITTED",
+                            "target_id": rec.get("target_id"),
+                            "replayed": True,
+                        }
+                    if rec and rec.get("status") in ("ABORTED", "UNKNOWN"):
+                        break
+
                 raise OperationPendingError(
                     "La operación asociada a la clave de idempotencia se encuentra pendiente de confirmación.",
-                    operation_id=existing.get("operation_id"),
+                    operation_id=existing_op_id,
                     status="PENDING",
                 )
-    target_id = str(tool_args.get("identificador") or tool_args.get("report_id") or "")
-    register_operation_intent(
-        operation_id=op_id,
-        operation_type=tool_name,
-        target_id=target_id or None,
-        idempotency_key=idempotency_key,
-        proposed_payload=tool_args,
-    )
+        else:
+            op_id = uuid.UUID(str(claim["operation_id"]))
 
     def _worker() -> dict[str, Any]:
         worker_tid.append(threading.get_ident())
@@ -785,12 +858,23 @@ def execute_tool_with_timeout(
     future = executor.submit(ctx.run, _worker)
     try:
         return future.result(timeout=timeout_sec)
+    except OperationPendingError:
+        raise
     except FuturesTimeoutError as exc:
         in_flight = get_in_flight_commit_for_thread(worker_tid[0]) if worker_tid else None
-        if in_flight is not None:
-            active_op = in_flight.get("operation_id") or op_id
+        if in_flight is not None or op_id is not None:
+            active_op = (in_flight.get("operation_id") if in_flight else None) or op_id
+            # Si el commit ya está en vuelo, NO cancelamos la conexión inmediatamente; dejamos
+            # que PostgreSQL confirme o que su propio timer de servidor venza.
+            if in_flight is None and worker_tid:
+                capability.revoke()
+                threading.Thread(
+                    target=cancel_active_conns_for_thread,
+                    args=(worker_tid[0],),
+                    daemon=True,
+                ).start()
             raise OperationPendingError(
-                f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s pero la confirmación en base de datos continúa en progreso.",
+                f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s pero la confirmación transaccional continúa en progreso.",
                 operation_id=active_op,
                 status="PENDING",
             ) from exc
@@ -801,8 +885,6 @@ def execute_tool_with_timeout(
                 args=(worker_tid[0],),
                 daemon=True,
             ).start()
-        if op_id:
-            mark_operation_aborted(op_id, f"Supervisor timeout ({timeout_sec}s) antes de confirmación.")
         raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s.") from exc
     except (
         psycopg.errors.QueryCanceled,

@@ -1,11 +1,13 @@
 from contextlib import contextmanager
 import contextvars
 from enum import StrEnum
+import hashlib
 import json
 import logging
 import os
 from pathlib import Path
 import re
+import secrets
 import threading
 import time
 from typing import Any, Generator
@@ -29,6 +31,24 @@ class OperationStatus(StrEnum):
     COMMITTED = "COMMITTED"
     ABORTED = "ABORTED"
     UNKNOWN = "UNKNOWN"
+
+
+class IdempotencyConflictError(Exception):
+    """Se eleva cuando se reutiliza una clave de idempotencia con un payload diferente."""
+    pass
+
+
+def canonical_payload_hash(payload: Any) -> str:
+    """Calcula el hash SHA-256 canónico y determinista de un payload (ignorando claves de control como idempotency_key)."""
+    try:
+        if isinstance(payload, dict):
+            filtered = {k: v for k, v in payload.items() if k not in ("idempotency_key", "operation_id")}
+        else:
+            filtered = payload
+        serialized = json.dumps(filtered, sort_keys=True, separators=(",", ":"), default=str)
+    except Exception:
+        serialized = str(payload)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 _IN_FLIGHT_COMMITS: dict[int, dict[str, Any]] = {}
@@ -79,8 +99,8 @@ def get_current_operation() -> dict[str, Any] | None:
 def is_deadline_cancellation(exc: BaseException, deadline: float | None = None) -> bool:
     """
     Determina si una excepción de base de datos fue causada inequívocamente por
-    la expiración de un plazo/deadline local, y NO por un fallo de infraestructura
-    o terminación administrativa ajena (57P01 AdminShutdown) (G2.1.6).
+    la expiración de un plazo/deadline local, y NO por un fallo de infraestructura,
+    terminación administrativa ajena (57P01 AdminShutdown), o un timer de sesión ajeno (G2.1.7).
     """
     # 1. Terminación administrativa ajena nunca es deadline propio
     if isinstance(exc, psycopg.errors.AdminShutdown):
@@ -91,7 +111,13 @@ def is_deadline_cancellation(exc: BaseException, deadline: float | None = None) 
 
     # 2. TransactionTimeout de PostgreSQL (25P04)
     if sqlstate == "25P04" or isinstance(exc, getattr(psycopg.errors, "TransactionTimeout", ())):
-        return True
+        cap = get_current_capability()
+        if cap is not None and not cap.is_valid():
+            return True
+        dl = deadline if deadline is not None else get_deadline_context()
+        if dl is not None and time.monotonic() >= (dl - 0.05):
+            return True
+        return False
 
     # 3. QueryCanceled (57014) o timeout operacional
     if isinstance(exc, psycopg.errors.QueryCanceled) or sqlstate == "57014":
@@ -113,7 +139,13 @@ def is_deadline_cancellation(exc: BaseException, deadline: float | None = None) 
             if dl is not None and time.monotonic() >= (dl - 0.05):
                 return True
         if "transaction timeout" in msg:
-            return True
+            cap = get_current_capability()
+            if cap is not None and not cap.is_valid():
+                return True
+            dl = deadline if deadline is not None else get_deadline_context()
+            if dl is not None and time.monotonic() >= (dl - 0.05):
+                return True
+            return False
 
     return False
 
@@ -124,55 +156,104 @@ def register_operation_intent(
     target_id: str | None = None,
     idempotency_key: str | None = None,
     proposed_payload: dict[str, Any] | None = None,
+    requester_id: str = "citizen",
     backend_pid: int | None = None,
 ) -> dict[str, Any]:
     """
     Registra durablemente la intención de una operación transaccional en estado PENDING.
-    Se ejecuta con autocommit en conexión independiente para que el registro persista
-    incluso si la transacción principal aborta o el supervisor expira (A-02 / G2.1.6).
+    Se ejecuta con autocommit en conexión independiente.
+    FAIL-CLOSED OBLIGATORIO: si la tabla operation_records no existe o falla la BD,
+    la excepción se propaga para impedir la ejecución del negocio sin registro durable.
+    Realiza un reclamo atómico mediante INSERT ... ON CONFLICT si se suministra idempotency_key.
     """
-    try:
-        with psycopg.connect(settings.DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
-            with conn.cursor() as cur:
-                if idempotency_key:
-                    cur.execute(
-                        "SELECT * FROM operation_records WHERE idempotency_key = %s;",
-                        (idempotency_key,),
-                    )
-                    existing = cur.fetchone()
-                    if existing:
-                        return dict(existing)
+    query_token = secrets.token_urlsafe(32)
+    query_token_hash = hashlib.sha256(query_token.encode("utf-8")).hexdigest()
+    payload_hash = canonical_payload_hash(proposed_payload) if proposed_payload is not None else None
+    payload_json = json.dumps(proposed_payload) if proposed_payload is not None else None
 
+    with psycopg.connect(settings.DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
+        with conn.cursor() as cur:
+            if idempotency_key:
                 cur.execute(
                     """
                     INSERT INTO operation_records (
-                        operation_id, idempotency_key, operation_type, target_id,
-                        status, proposed_payload, backend_pid, created_at, updated_at
+                        operation_id, requester_id, operation_type, idempotency_key, payload_hash,
+                        query_token_hash, target_id, status, proposed_payload, backend_pid,
+                        created_at, updated_at
                     ) VALUES (
-                        %s, %s, %s, %s,
-                        'PENDING', %s, %s, clock_timestamp(), clock_timestamp()
+                        %s, %s, %s, %s, %s,
+                        %s, %s, 'PENDING', %s, %s,
+                        clock_timestamp(), clock_timestamp()
+                    )
+                    ON CONFLICT (requester_id, operation_type, idempotency_key)
+                    DO UPDATE SET updated_at = operation_records.updated_at
+                    RETURNING *, (xmax = 0) AS is_new_claim;
+                    """,
+                    (
+                        str(operation_id),
+                        requester_id,
+                        operation_type,
+                        idempotency_key,
+                        payload_hash,
+                        query_token_hash,
+                        target_id,
+                        payload_json,
+                        backend_pid,
+                    ),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise RuntimeError(f"Fallo al registrar reclamo para operación {operation_id}")
+                claim = dict(row)
+                is_new = bool(claim.get("is_new_claim", True))
+                if not is_new:
+                    # El registro ya existía previamente para esta clave
+                    existing_hash = claim.get("payload_hash")
+                    if payload_hash and existing_hash and existing_hash != payload_hash:
+                        raise IdempotencyConflictError(
+                            f"Conflicto de clave de idempotencia: el payload suministrado no coincide con la operación registrada previamente para la clave '{idempotency_key}'."
+                        )
+                    claim["claim_acquired"] = False
+                else:
+                    claim["claim_acquired"] = True
+                claim["query_token"] = query_token
+                return claim
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO operation_records (
+                        operation_id, requester_id, operation_type, idempotency_key, payload_hash,
+                        query_token_hash, target_id, status, proposed_payload, backend_pid,
+                        created_at, updated_at
+                    ) VALUES (
+                        %s, %s, %s, NULL, %s,
+                        %s, %s, 'PENDING', %s, %s,
+                        clock_timestamp(), clock_timestamp()
                     )
                     ON CONFLICT (operation_id) DO NOTHING
                     RETURNING *;
                     """,
                     (
                         str(operation_id),
-                        idempotency_key,
+                        requester_id,
                         operation_type,
+                        payload_hash,
+                        query_token_hash,
                         target_id,
-                        json.dumps(proposed_payload) if proposed_payload is not None else None,
+                        payload_json,
                         backend_pid,
                     ),
                 )
                 row = cur.fetchone()
-                if row:
-                    return dict(row)
-                cur.execute("SELECT * FROM operation_records WHERE operation_id = %s;", (str(operation_id),))
-                res = cur.fetchone()
-                return dict(res) if res else {}
-    except Exception as exc:
-        logger.debug("No se pudo registrar intención de operación %s: %s", operation_id, exc)
-        return {"operation_id": str(operation_id), "status": "PENDING"}
+                if not row:
+                    cur.execute("SELECT * FROM operation_records WHERE operation_id = %s;", (str(operation_id),))
+                    row = cur.fetchone()
+                if not row:
+                    raise RuntimeError(f"Fallo al registrar intención para operación {operation_id}")
+                res = dict(row)
+                res["claim_acquired"] = True
+                res["query_token"] = query_token
+                return res
 
 
 def mark_operation_committed(
@@ -183,25 +264,27 @@ def mark_operation_committed(
     """
     Marca la operación como COMMITTED.
     Si se pasa `conn`, se ejecuta dentro de la MISMA transacción para atomicidad absoluta.
+    Exige que cur.rowcount == 1 y falla cerrado si no puede actualizar el registro.
     """
-    try:
-        sql_stmt = """
-            UPDATE operation_records
-            SET status = 'COMMITTED',
-                result_payload = COALESCE(%s, result_payload),
-                updated_at = clock_timestamp()
-            WHERE operation_id = %s;
-        """
-        payload_json = json.dumps(result_payload) if result_payload is not None else None
-        if conn is not None:
-            with conn.cursor() as cur:
+    sql_stmt = """
+        UPDATE operation_records
+        SET status = 'COMMITTED',
+            result_payload = COALESCE(%s, result_payload),
+            updated_at = clock_timestamp()
+        WHERE operation_id = %s;
+    """
+    payload_json = json.dumps(result_payload) if result_payload is not None else None
+    if conn is not None:
+        with conn.cursor() as cur:
+            cur.execute(sql_stmt, (payload_json, str(operation_id)))
+            if cur.rowcount != 1:
+                raise RuntimeError(
+                    f"Fallo de trazabilidad obligatoria: operation_records {operation_id} no pudo ser actualizado a COMMITTED (filas afectadas: {cur.rowcount})."
+                )
+    else:
+        with psycopg.connect(settings.DATABASE_URL, autocommit=True, connect_timeout=5) as c:
+            with c.cursor() as cur:
                 cur.execute(sql_stmt, (payload_json, str(operation_id)))
-        else:
-            with psycopg.connect(settings.DATABASE_URL, autocommit=True, connect_timeout=5) as c:
-                with c.cursor() as cur:
-                    cur.execute(sql_stmt, (payload_json, str(operation_id)))
-    except Exception as exc:
-        logger.debug("No se pudo marcar operación %s como COMMITTED: %s", operation_id, exc)
 
 
 def mark_operation_aborted(
@@ -268,31 +351,77 @@ def get_operation_record(operation_id: uuid.UUID | str) -> dict[str, Any] | None
             return dict(row) if row else None
 
 
-def get_operation_by_idempotency_key(idempotency_key: str) -> dict[str, Any] | None:
+def get_operation_by_idempotency_key(idempotency_key: str, requester_id: str = "citizen") -> dict[str, Any] | None:
     with psycopg.connect(settings.DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM operation_records WHERE idempotency_key = %s;", (idempotency_key,))
+            cur.execute(
+                "SELECT * FROM operation_records WHERE idempotency_key = %s AND requester_id = %s;",
+                (idempotency_key, requester_id),
+            )
             row = cur.fetchone()
+            if not row:
+                cur.execute("SELECT * FROM operation_records WHERE idempotency_key = %s;", (idempotency_key,))
+                row = cur.fetchone()
             return dict(row) if row else None
 
 
 def reconcile_operation(operation_id: uuid.UUID | str) -> dict[str, Any]:
     """
     Reconcilia el estado de una operación que quedó PENDING o en estado no definitivo.
-    Verifica si el backend_pid de PostgreSQL sigue ejecutándose y coteja el estado real
-    del recurso objetivo en la base de datos para resolver inequívocamente a COMMITTED o ABORTED.
+    Solo transiciona a COMMITTED si existe evidencia transaccional inequívoca vinculada
+    al operation_id. Si no hay evidencia concluyente de commit ni de aborto confirmado,
+    la operación permanece PENDING o UNKNOWN (nunca deduce ABORTED por simple ausencia de PID).
     """
     record = get_operation_record(operation_id)
     if not record:
         raise ValueError(f"Operación no encontrada: {operation_id}")
 
-    if record["status"] != "PENDING":
+    current_status = record.get("status")
+    # Estados terminales son monótonos e inmutables
+    if current_status in ("COMMITTED", "ABORTED"):
         record["reconciled"] = False
         return record
 
+    target_id = record.get("target_id")
+    op_type = record.get("operation_type")
+
+    # 1. Buscar evidencia directa de commit en tablas de negocio vinculada a este operation_id
+    committed_evidence = False
+    try:
+        with psycopg.connect(settings.DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                # Comprobar en pending_approvals por operation_id exacto
+                cur.execute(
+                    "SELECT id, status FROM pending_approvals WHERE operation_id = %s LIMIT 1;",
+                    (str(operation_id),),
+                )
+                if cur.fetchone():
+                    committed_evidence = True
+    except Exception as exc:
+        logger.debug("Error comprobando evidencia para reconciliar %s: %s", operation_id, exc)
+
+    if committed_evidence:
+        with psycopg.connect(settings.DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE operation_records
+                    SET status = 'COMMITTED',
+                        updated_at = clock_timestamp()
+                    WHERE operation_id = %s AND status = 'PENDING'
+                    RETURNING *;
+                    """,
+                    (str(operation_id),),
+                )
+                updated = cur.fetchone()
+                res = dict(updated) if updated else record
+                res["reconciled"] = True
+                return res
+
+    # 2. Si no hay evidencia de commit:
     backend_pid = record.get("backend_pid")
-    is_pid_alive = False
     if backend_pid is not None:
+        is_pid_alive = False
         try:
             with psycopg.connect(settings.DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
                 with conn.cursor() as cur:
@@ -304,46 +433,35 @@ def reconcile_operation(operation_id: uuid.UUID | str) -> dict[str, Any]:
         except Exception:
             is_pid_alive = False
 
-    if is_pid_alive:
-        record["reconciled"] = False
-        return record
+        if is_pid_alive:
+            # El backend sigue en ejecución en PostgreSQL: permanece PENDING
+            record["reconciled"] = False
+            return record
 
-    target_id = record.get("target_id")
-    op_type = record.get("operation_type")
-    new_status = "ABORTED"
+        # El backend estuvo activo pero ya cerró definitivamente sin confirmar negocio: marcar ABORTED
+        with psycopg.connect(settings.DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE operation_records
+                    SET status = 'ABORTED',
+                        error_message = COALESCE(error_message, 'Conexión de base de datos finalizada sin confirmación de negocio.'),
+                        updated_at = clock_timestamp()
+                    WHERE operation_id = %s AND status = 'PENDING'
+                    RETURNING *;
+                    """,
+                    (str(operation_id),),
+                )
+                updated = cur.fetchone()
+                res = dict(updated) if updated else record
+                res["reconciled"] = True
+                return res
 
-    if op_type == "proponer_actualizacion_critica" and target_id:
-        try:
-            with psycopg.connect(settings.DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        "SELECT id, status FROM pending_approvals WHERE report_id = %s ORDER BY created_at DESC LIMIT 1;",
-                        (target_id,),
-                    )
-                    pa = cur.fetchone()
-                    if pa:
-                        new_status = "COMMITTED"
-        except Exception:
-            new_status = "UNKNOWN"
-    else:
-        new_status = "ABORTED"
+    # 3. Si backend_pid es None: el worker aún no ha abierto conexión o la intención sigue en curso.
+    # Conservamos PENDING (o UNKNOWN si ya estaba así) para evitar falsos abortos prematuros.
+    record["reconciled"] = False
+    return record
 
-    with psycopg.connect(settings.DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE operation_records
-                SET status = %s,
-                    updated_at = clock_timestamp()
-                WHERE operation_id = %s AND status = 'PENDING'
-                RETURNING *;
-                """,
-                (new_status, str(operation_id)),
-            )
-            updated = cur.fetchone()
-            result = dict(updated) if updated else record
-            result["reconciled"] = True
-            return result
 
 
 class ExecutionCapability:
@@ -682,26 +800,24 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
     tid = threading.get_ident()
 
     # Si hay una operación activa en contexto, actualizar operation_records
-    # dentro de esta misma transacción antes de commit (atomicidad A-02 / G2.1.6)
+    # dentro de esta misma transacción antes de commit (atomicidad A-02 / G2.1.7).
+    # FAIL-CLOSED OBLIGATORIO: no se usa SAVEPOINT. Cualquier fallo aborta la transacción.
     if op_id is not None:
-        try:
-            with conn.cursor() as cur:
-                cur.execute("SAVEPOINT op_rec_sp;")
-                try:
-                    cur.execute(
-                        """
-                        UPDATE operation_records
-                        SET status = 'COMMITTED',
-                            updated_at = clock_timestamp()
-                        WHERE operation_id = %s;
-                        """,
-                        (str(op_id),),
-                    )
-                    cur.execute("RELEASE SAVEPOINT op_rec_sp;")
-                except Exception:
-                    cur.execute("ROLLBACK TO SAVEPOINT op_rec_sp;")
-        except Exception as exc:
-            logger.debug("No se pudo pre-marcar operation_records en conn: %s", exc)
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE operation_records
+                SET status = 'COMMITTED',
+                    updated_at = clock_timestamp()
+                WHERE operation_id = %s AND status = 'PENDING';
+                """,
+                (str(op_id),),
+            )
+            if cur.rowcount != 1:
+                conn.rollback()
+                raise RuntimeError(
+                    f"Fallo de atomicidad obligatoria: el marcador operation_records para la operación {op_id} no pudo transicionar a COMMITTED (filas afectadas: {cur.rowcount}). Transacción abortada."
+                )
 
     dl_check = get_deadline_context()
     if dl_check is not None:
@@ -924,7 +1040,7 @@ def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Conne
         conn.close()
 
 
-def run_migrations(migrations_dir: Path | None = None) -> list[str]:
+def run_migrations(migrations_dir: Path | None = None, database_url: str | None = None) -> list[str]:
     """Ejecuta migraciones SQL en orden alfabético de forma idempotente."""
     mdir = migrations_dir or settings.MIGRATIONS_DIR
     if not mdir.exists():
@@ -932,7 +1048,8 @@ def run_migrations(migrations_dir: Path | None = None) -> list[str]:
         return []
 
     applied: list[str] = []
-    with get_conn() as conn:
+    target_url = database_url or settings.DATABASE_URL
+    with psycopg.connect(target_url, autocommit=True, row_factory=dict_row) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -942,7 +1059,6 @@ def run_migrations(migrations_dir: Path | None = None) -> list[str]:
                 );
                 """
             )
-            conn.commit()
 
             cur.execute("SELECT version FROM schema_migrations;")
             existing = {row["version"] for row in cur.fetchall()}
@@ -959,7 +1075,6 @@ def run_migrations(migrations_dir: Path | None = None) -> list[str]:
                         (version,),
                     )
                     applied.append(version)
-            conn.commit()
     return applied
 
 

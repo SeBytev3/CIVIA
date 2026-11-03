@@ -477,7 +477,65 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
 
 ---
 
-## 15. Limitaciones Reconocidas y Fronteras de Garantía
+---
+
+## 16. Remediación Focalizada G2.1.7: Endurecimiento Fail-Closed, Autorización y Reconciliación Transaccional
+
+**Fecha:** 2026-11-03  
+**Auditoría base:** `docs/auditoria_codex_g2_1_6_f6fe4f6.md`  
+**Diseño previo documentado:** `docs/diseno_g2_1_7.md`  
+
+### 16.1. Diagnóstico y Corrección de Defectos Auditados
+
+1. **P0 — Atomicidad obligatoria del registro (Fail-Closed)**:
+   - *Defecto auditado:* En G2.1.6, `checked_commit(conn)` envolvía la actualización del marcador en `SAVEPOINT op_rec_sp`. Un fallo SQL en el marcador (trigger de rechazo o tabla ausente) ejecutaba `ROLLBACK TO SAVEPOINT op_rec_sp` y permitía que la transacción de negocio confirmara exitosamente sin registro durable.
+   - *Corrección fail-closed:* Se eliminó definitivamente el `SAVEPOINT`. La sentencia `UPDATE operation_records SET status = 'COMMITTED', updated_at = clock_timestamp() WHERE operation_id = %s AND status = 'PENDING'` se ejecuta en la misma transacción que el negocio y valida obligatoriamente `cur.rowcount == 1`. Si el marcador falla o afecta 0 filas, se invoca `conn.rollback()` y se aborta la transacción completa. `register_operation_intent` propaga excepciones si `operation_records` no existe.
+
+2. **P0 — Reconciliación basada en evidencia propia e inmutabilidad monótona**:
+   - *Defecto auditado:* `reconcile_operation` infería `COMMITTED` si existía cualquier propuesta previa sobre el mismo `report_id`, aunque perteneciera a una operación ajena. Asimismo, interpretaba `backend_pid` nulo (worker antes de abrir conexión) como `ABORTED`, comunicando un aborto falso que luego terminaba en `COMMITTED`.
+   - *Corrección:*
+     - Migración `005_operation_records_hardening.sql`: Agrega `operation_id UUID REFERENCES operation_records(operation_id) ON DELETE SET NULL` a `pending_approvals`.
+     - `reconcile_operation` busca evidencia únicamente por `WHERE operation_id = %s`. Jamás deduce commit de propuestas ajenas.
+     - Si `backend_pid is None`, la operación conserva `PENDING` (o `UNKNOWN`), impidiendo falsos abortos prematuros.
+     - Estados terminales `COMMITTED` y `ABORTED` son inmutables.
+
+3. **P0 — Autorización del endpoint y protección de información**:
+   - *Defecto auditado:* `GET /api/operations/{operation_id}` permitía lectura anónima exponiendo notas privadas y la clave de idempotencia reutilizable.
+   - *Corrección:*
+     - Autenticación mediante `X-Admin-Token` o `X-Operation-Token` (token de consulta URL-safe de 32 bytes validado con hash SHA-256 en tiempo constante vía `hmac.compare_digest`).
+     - Minimización: `idempotency_key` eliminado de `OperationStatusResponse`. `result_payload` y errores detallados solo se entregan a invocadores autorizados. Consultas anónimas reciben únicamente el estado general de procesamiento (`PENDING`, `COMMITTED`, `ABORTED`).
+
+4. **P0 — Idempotencia concurrente real y deduplicación atómica**:
+   - *Defecto auditado:* Carrera TOCTOU permitía duplicar escrituras de negocio y propuestas en `pending_approvals` ante llamadas concurrentes con la misma clave. Reintentos de operaciones `COMMITTED` sin `result_payload` volvían a ejecutar la escritura.
+   - *Corrección:*
+     - Restricción única `uq_operation_records_scoped UNIQUE (requester_id, operation_type, idempotency_key)` en `operation_records`.
+     - Reclamo atómico en PostgreSQL con `INSERT ... ON CONFLICT DO UPDATE SET updated_at = ... RETURNING *, (xmax = 0) AS is_new_claim`.
+     - Validación de huella canónica de payload (`canonical_payload_hash`, excluyendo claves de control): rechazo con `IdempotencyConflictError` (HTTP 409 Conflict) si el payload difiere.
+     - Operaciones `COMMITTED` sin `result_payload` retornan confirmación consistente durable con `operation_id` estable sin reejecutar el negocio.
+     - Índice único parcial en `pending_approvals`: `idx_pending_approvals_active_proposal (report_id) WHERE status = 'PENDING' AND proposed_action = 'UPDATE_REPORT_STATUS'` e inserción `ON CONFLICT DO NOTHING`, garantizando que a nivel de motor SQL no puedan coexistir dos propuestas pendientes para el mismo reporte.
+
+5. **P1 — Propagación íntegra de OPERATION_PENDING**:
+   - `execute_tool_with_timeout` captura `OperationPendingError` antes de `FuturesTimeoutError`, impidiendo que se degrade a `TimeoutError`.
+   - Distinción entre herramientas transaccionales (con registro duradero) y consultas de sólo lectura (`consultar_reportes`, `obtener_reporte`), garantizando que consultas de lectura lentas reporten limpiamente `TIMEOUT` mientras transacciones en vuelo reportan `OPERATION_PENDING`.
+
+6. **P1 — Procedencia causal de cancelaciones PostgreSQL**:
+   - `is_deadline_cancellation` verifica que cancelaciones `25P04` (`TransactionTimeout`) o `57014` (`QueryCanceled`) solo se atribuyan al deadline local si `time.monotonic() >= deadline - 0.05` o la capacidad fue revocada. Políticas ajenas de conexión (ej. `transaction_timeout=50ms` de sesión con deadline de 2s) preservan el error original `OperationalError` / `TransactionTimeout`.
+
+### 16.2. Matriz de Pruebas Integradas Final (G2.1.7)
+
+Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`, `pytest-8.3.5` sobre PostgreSQL 17 real):
+
+| Suite | Archivo | Pruebas | Resultado |
+|---|---|---|---|
+| Remediación G2.1 a G2.1.7 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 47 | **47 PASSED** (0 fallos) |
+| Resiliencia y Control G2 | `tests/test_audit_g2_resilience.py` | 23 | **23 PASSED** (0 fallos) |
+| Seguridad e Integridad G1 | `tests/test_audit_g1_security.py` | 14 | **14 PASSED** (0 fallos) |
+| Integración IA y Agente (Hermética) | `tests/test_ai_and_agent.py` | 13 | **13 PASSED** (1 deselected live) |
+| CRUD y Negocio Ciudadano | `tests/test_reports_crud.py` | 6 | **6 PASSED** (0 fallos) |
+| Salud de la API | `tests/test_health.py` | 1 | **1 PASSED** (0 fallos) |
+| Proxy Frontend PWA E2E | `tests/test_e2e_frontend_proxy.py` | 1 | **1 PASSED** (0 fallos) |
+| **Total suites backend CIVIA** | — | **105** | **105 PASSED (100% de éxito, 0 fallos en 25.33 s)** |
+
 
 1. **Límites de hilos en CPython vs procesos:**
    - La arquitectura desvincula los workers no cooperativos y revoca su `ExecutionCapability` inmediatamente. En CPython, un hilo sin I/O (ej. bucle infinito de CPU) no puede ser terminado forzosamente por señales del sistema operativo sin arriesgar la corrupción de la memoria del proceso. La garantía se aplica a todas las fronteras de efectos: cualquier operación SQL (incluyendo cursores encadenados, conexiones directas, copy y commit diferido evaluado dinámicamente en servidor) y cualquier escritura/reemplazo de archivos en disco es bloqueada inmediatamente al verificarse la revocación de la capacidad o al expirar `transaction_timeout` en el servidor.

@@ -321,3 +321,48 @@
     - `test_ai_and_agent.py`: 13/13 passed (1 deselected live).
     - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
     - Cero regresiones en controles aprobados G1, A-02, N-02, M-02, M-03 COPY o M-06. Cero commits en `main` ni push remoto.
+
+---
+
+## Bloque G2.1.7 — Endurecimiento Fail-Closed, Autorización y Reconciliación del Registro Transaccional (`docs/auditoria_codex_g2_1_6_f6fe4f6.md`) completado (2026-11-03)
+- **Documentación de diseño**: Especificada previamente en [`docs/diseno_g2_1_7.md`](diseno_g2_1_7.md) y en la sección 16 de [`docs/remediacion_g2_1.md`](remediacion_g2_1.md).
+- **Cierres aplicados**:
+  1. **P0 — Atomicidad obligatoria del registro (Fail-Closed)**:
+     - `backend/app/db.py:checked_commit`: Eliminado definitivamente el uso de `SAVEPOINT op_rec_sp`. La actualización `UPDATE operation_records SET status = 'COMMITTED', updated_at = clock_timestamp() WHERE operation_id = %s AND status = 'PENDING'` se ejecuta directamente en la misma transacción que el negocio y exige `cur.rowcount == 1`. Si el marcador falla por un trigger, tabla ausente o bloqueo, se ejecuta `conn.rollback()` y se aborta la transacción completa. Jamás se confirma negocio si el marcador falla.
+     - `register_operation_intent`: Falla cerrado propagando excepciones si `operation_records` no existe o no puede persistir, impidiendo que la herramienta ejecute negocio sin trazabilidad durable.
+  2. **P0 — Reconciliación basada en evidencia propia e inmutabilidad monótona**:
+     - Migración `backend/migrations/005_operation_records_hardening.sql`: Vincula `pending_approvals` con `operation_id UUID REFERENCES operation_records(operation_id) ON DELETE SET NULL` e índice dedicado.
+     - `backend/app/db.py:reconcile_operation`: Verifica evidencia en `pending_approvals` por `operation_id` exacto; jamás infiere `COMMITTED` por la existencia de otra propuesta genérica sobre el mismo `report_id`.
+     - Si `backend_pid` es `None` (el worker aún no abre conexión o está esperando), `reconcile_operation` conserva `PENDING` (o `UNKNOWN`), erradicando falsos `ABORTED` prematuros comunicados por API antes de que el worker termine `COMMITTED`.
+     - Estados terminales `COMMITTED` y `ABORTED` son estrictamente inmutables.
+  3. **P0 — Autorización del endpoint y protección de información**:
+     - `backend/app/main.py:get_operation_status`: Implementa autenticación mediante `X-Admin-Token` o `X-Operation-Token` (token de consulta opaco de 32 bytes validado con hash SHA-256 en tiempo constante vía `hmac.compare_digest`).
+     - `backend/app/schemas.py:OperationStatusResponse`: `idempotency_key` eliminado del esquema público; `result_payload` y errores detallados solo se exponen a invocadores autorizados (propietario o admin). Consultas anónimas reciben únicamente el estado general de procesamiento (`PENDING`, `COMMITTED`, `ABORTED`), impidiendo la filtración de notas privadas o claves reutilizables.
+  4. **P0 — Idempotencia concurrente real y deduplicación atómica**:
+     - Restricción única `uq_operation_records_scoped UNIQUE (requester_id, operation_type, idempotency_key)` en `operation_records`.
+     - Reclamo atómico en PostgreSQL con `INSERT ... ON CONFLICT (requester_id, operation_type, idempotency_key) DO UPDATE SET updated_at = operation_records.updated_at RETURNING *, (xmax = 0) AS is_new_claim`.
+     - Validación de huella canónica de payload (`canonical_payload_hash`): si la clave se reutiliza con un payload diferente, se eleva `IdempotencyConflictError` (HTTP 409 Conflict).
+     - Si la clave ya fue comprometida (`COMMITTED`), retorna el resultado durable sin reejecutar el negocio (incluso si `result_payload` está vacío, reconstruyendo la confirmación con `operation_id` estable).
+     - En `pending_approvals`: índice único parcial `idx_pending_approvals_active_proposal ON pending_approvals (report_id) WHERE status = 'PENDING' AND proposed_action = 'UPDATE_REPORT_STATUS'` e inserción atómica `ON CONFLICT DO NOTHING`, impidiendo propuestas concurrentes duplicadas para el mismo reporte a nivel de motor SQL.
+  5. **P1 — Propagación íntegra de OPERATION_PENDING**:
+     - `backend/app/agent.py:execute_tool_with_timeout`: Captura `OperationPendingError` antes de `FuturesTimeoutError`, impidiendo su degradación a `TimeoutError` ordinario y preservando el `operation_id` durable.
+     - Diferenciación entre herramientas transaccionales (con reclamo duradero en `operation_records`) y consultas de sólo lectura (`consultar_reportes`, `obtener_reporte`), garantizando que consultas de lectura lentas reporten limpiamente `TIMEOUT` mientras transacciones en vuelo reportan `OPERATION_PENDING`.
+  6. **P1 — Procedencia causal de cancelaciones PostgreSQL**:
+     - `backend/app/db.py:is_deadline_cancellation`: Verifica que cancelaciones `25P04` (`TransactionTimeout`) o `57014` (`QueryCanceled`) solo se atribuyan al deadline local si el tiempo transcurrido es mayor o igual al plazo de la herramienta (`time.monotonic() >= deadline - 0.05`) o la capacidad fue revocada. Políticas ajenas de conexión (ej. `transaction_timeout=50ms` de sesión con deadline de 2s) preservan el error original `OperationalError` / `TransactionTimeout`.
+  7. **Pruebas permanentes de regresión**:
+     - `test_g2_1_7_fail_closed_marker_failure_aborts_business_transaction` (**PASSED**).
+     - `test_g2_1_7_missing_migration_004_fails_closed` (**PASSED**).
+     - `test_g2_1_7_reconcile_only_on_exact_operation_id_evidence` (**PASSED**).
+     - `test_g2_1_7_concurrent_idempotency_claim_single_execution` (**PASSED**).
+     - `test_g2_1_7_idempotency_payload_conflict_raises_error` (**PASSED**).
+     - `test_g2_1_7_committed_without_result_replay_reconstructs` (**PASSED**).
+     - `test_g2_1_7_foreign_transaction_timeout_preserves_error` (**PASSED**).
+- **Verificación oficial de la suite completa en PostgreSQL 17 real (`civia-api-1`)**:
+  - `docker exec civia-api-1 pytest -m "not live"`:
+    - **`105 PASSED, 1 deselected`** (100% de éxito, 0 fallos, 1 warning en 25.33 s).
+    - `test_audit_g2_1_remediation.py`: 47/47 passed (incluyendo los 7 nuevos tests G2.1.7).
+    - `test_audit_g2_resilience.py`: 23/23 passed.
+    - `test_audit_g1_security.py`: 14/14 passed.
+    - `test_ai_and_agent.py`: 13/13 passed (1 deselected live).
+    - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
+    - Cero regresiones en controles aprobados G1, A-02, N-02, M-02, M-03 COPY o M-06. Cero commits en `main` ni push remoto.

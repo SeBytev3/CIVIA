@@ -136,7 +136,6 @@ class OperationStatusResponse(BaseModel):
     operation_type: str
     status: Literal["PENDING", "COMMITTED", "ABORTED", "UNKNOWN"]
     target_id: str | None = None
-    idempotency_key: str | None = None
     result_payload: dict | None = None
     error_message: str | None = None
     created_at: datetime
