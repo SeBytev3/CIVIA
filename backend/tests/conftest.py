@@ -98,10 +98,66 @@ def initialize_isolated_test_db():
 
 
 @pytest.fixture(autouse=True)
+def hermetic_agent_turn_adapter_fixture(monkeypatch, request):
+    """
+    Sustitución incondicional de adaptadores de turnos principales del agente
+    para garantizar hermeticidad absoluta en toda la suite ordinaria de pruebas (G2.1.4).
+    """
+    if "live" in request.keywords:
+        yield
+        return
+
+    import app.agent as agent_module
+
+    def _mock_agent_turn(*, model: str, api_key: str, conversation_messages: list[dict], timeout_sec: float, max_output_tokens: int = 700) -> tuple[str | None, list[dict], int, int]:
+        tool_results = [m for m in conversation_messages if m.get("role") == "tool_result"]
+        user_msgs = [m for m in conversation_messages if m.get("role") == "user"]
+        user_text = user_msgs[-1]["content"] if user_msgs else ""
+        user_lower = user_text.lower()
+
+        if not tool_results:
+            if "civ-2026-" in user_lower or "demo0001" in user_lower:
+                ident = "CIV-2026-DEMO0001"
+                import re
+                m_code = re.search(r"CIV-2026-[A-Z0-9]+", user_text, re.IGNORECASE)
+                if m_code:
+                    ident = m_code.group(0).upper()
+                return None, [{"name": "obtener_reporte", "args": {"identificador": ident}}], 50, 20
+            elif "comuna 99" in user_lower or "radiación" in user_lower or "satélite" in user_lower or "ndvi" in user_lower:
+                return None, [{"name": "consultar_reportes", "args": {"comuna": "Comuna 99"}}], 50, 20
+            elif "hueco" in user_lower or "basura" in user_lower:
+                cat = "HUECO" if "hueco" in user_lower else "BASURAS"
+                return None, [{"name": "consultar_reportes", "args": {"category": cat}}], 50, 20
+            else:
+                return None, [{"name": "consultar_reportes", "args": {"limit": 5}}], 45, 15
+        else:
+            last_tr = tool_results[-1]
+            tr_res = last_tr.get("result", {})
+            if "civ-2026-" in user_lower or "demo0001" in user_lower:
+                import re
+                m_code = re.search(r"CIV-2026-[A-Z0-9]+", user_text, re.IGNORECASE)
+                code = m_code.group(0).upper() if m_code else "CIV-2026-DEMO0001"
+                rep = tr_res.get("reporte") or tr_res
+                cat = rep.get("category") or rep.get("ai_category") or "HUECO"
+                comuna = rep.get("comuna") or "Comuna 2"
+                return f"El reporte {code} corresponde a la categoría {cat} en {comuna}.", [], 70, 25
+            elif "comuna 99" in user_lower or "radiación" in user_lower or "satélite" in user_lower:
+                return "No existe evidencia registrada en la base de datos de CIVIA sobre reportes de radiación nuclear o satélite en la Comuna 99 de Cali.", [], 65, 20
+            else:
+                total = tr_res.get("total_encontrados", len(tr_res.get("reportes", [])))
+                return f"Se encontraron {total} reportes registrados según los criterios consultados.", [], 60, 20
+
+    monkeypatch.setattr(agent_module, "_call_agent_turn_gemini", _mock_agent_turn)
+    monkeypatch.setattr(agent_module, "_call_agent_turn_groq", _mock_agent_turn)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def guard_no_external_network_calls(monkeypatch, request):
     """
     Bloquea incondicionalmente cualquier conexión HTTP hacia proveedores externos
-    (Google Gemini / Groq) en toda la suite ordinaria de pruebas (G2.1.3).
+    (Google Gemini / Groq) en toda la suite ordinaria de pruebas (G2.1.3 y G2.1.4).
+    Registra cualquier intento inesperado y hace fallar la prueba en su finalización.
     """
     if "live" in request.keywords:
         yield
@@ -109,12 +165,21 @@ def guard_no_external_network_calls(monkeypatch, request):
 
     import httpx
     orig_send = httpx.Client.send
+    unexpected_attempts = []
 
     def guarded_send(self, req, *args, **kwargs):
         host = getattr(req.url, "host", "")
         if host in ("generativelanguage.googleapis.com", "api.groq.com"):
+            if not isinstance(getattr(self, "_transport", None), httpx.MockTransport):
+                unexpected_attempts.append({"test": request.node.name, "host": host, "url": str(req.url)})
             raise RuntimeError(f"Intento de llamada HTTP externa no permitida hacia {host} en prueba hermética.")
         return orig_send(self, req, *args, **kwargs)
 
     monkeypatch.setattr(httpx.Client, "send", guarded_send)
     yield
+    if unexpected_attempts:
+        if request.node.name != "test_hermetic_guard_fails_immediately_on_unexpected_external_http":
+            pytest.fail(
+                f"Centinela de hermeticidad detectó {len(unexpected_attempts)} intento(s) HTTP inesperados hacia proveedores: {unexpected_attempts}",
+                pytrace=False,
+            )

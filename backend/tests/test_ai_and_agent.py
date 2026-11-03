@@ -27,8 +27,8 @@ ADMIN_HEADERS = {"X-Admin-Token": settings.ADMIN_TOKEN}
 @pytest.fixture(autouse=True)
 def hermetic_multimodal_adapter_fixture(monkeypatch):
     """
-    Sustitución incondicional de adaptadores multimodales para garantizar
-    hermeticidad absoluta en la suite ordinaria, sin intentos de red externa (G2.1.2).
+    Sustitución incondicional de adaptadores multimodales y turnos principales de agente
+    para garantizar hermeticidad absoluta en la suite ordinaria, sin intentos de red externa (G2.1.2 y G2.1.4).
     """
     def _mock_multimodal(*, model: str, api_key: str, prompt_text: str, image_bytes: bytes | None, image_mime: str | None, timeout_sec: float) -> tuple[str, int, int]:
         p_low = prompt_text.lower()
@@ -54,8 +54,48 @@ def hermetic_multimodal_adapter_fixture(monkeypatch):
         }
         return json.dumps(payload), 450, 85
 
+    def _mock_agent_turn(*, model: str, api_key: str, conversation_messages: list[dict], timeout_sec: float, max_output_tokens: int = 700) -> tuple[str | None, list[dict], int, int]:
+        tool_results = [m for m in conversation_messages if m.get("role") == "tool_result"]
+        user_msgs = [m for m in conversation_messages if m.get("role") == "user"]
+        user_text = user_msgs[-1]["content"] if user_msgs else ""
+        user_lower = user_text.lower()
+
+        if not tool_results:
+            if "civ-2026-" in user_lower or "demo0001" in user_lower:
+                ident = "CIV-2026-DEMO0001"
+                import re
+                m_code = re.search(r"CIV-2026-[A-Z0-9]+", user_text, re.IGNORECASE)
+                if m_code:
+                    ident = m_code.group(0).upper()
+                return None, [{"name": "obtener_reporte", "args": {"identificador": ident}}], 50, 20
+            elif "comuna 99" in user_lower or "radiación" in user_lower or "satélite" in user_lower or "ndvi" in user_lower:
+                return None, [{"name": "consultar_reportes", "args": {"comuna": "Comuna 99"}}], 50, 20
+            elif "hueco" in user_lower or "basura" in user_lower:
+                cat = "HUECO" if "hueco" in user_lower else "BASURAS"
+                return None, [{"name": "consultar_reportes", "args": {"category": cat}}], 50, 20
+            else:
+                return None, [{"name": "consultar_reportes", "args": {"limit": 5}}], 45, 15
+        else:
+            last_tr = tool_results[-1]
+            tr_res = last_tr.get("result", {})
+            if "civ-2026-" in user_lower or "demo0001" in user_lower:
+                import re
+                m_code = re.search(r"CIV-2026-[A-Z0-9]+", user_text, re.IGNORECASE)
+                code = m_code.group(0).upper() if m_code else "CIV-2026-DEMO0001"
+                rep = tr_res.get("reporte") or tr_res
+                cat = rep.get("category") or rep.get("ai_category") or "HUECO"
+                comuna = rep.get("comuna") or "Comuna 2"
+                return f"El reporte {code} corresponde a la categoría {cat} en {comuna}.", [], 70, 25
+            elif "comuna 99" in user_lower or "radiación" in user_lower or "satélite" in user_lower:
+                return "No existe evidencia registrada en la base de datos de CIVIA sobre reportes de radiación nuclear o satélite en la Comuna 99 de Cali.", [], 65, 20
+            else:
+                total = tr_res.get("total_encontrados", len(tr_res.get("reportes", [])))
+                return f"Se encontraron {total} reportes registrados según los criterios consultados.", [], 60, 20
+
     monkeypatch.setattr(ai_router_module, "_call_gemini_multimodal", _mock_multimodal)
     monkeypatch.setattr(ai_router_module, "_call_groq_multimodal", _mock_multimodal)
+    monkeypatch.setattr(agent_module, "_call_agent_turn_gemini", _mock_agent_turn)
+    monkeypatch.setattr(agent_module, "_call_agent_turn_groq", _mock_agent_turn)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -414,6 +454,7 @@ def test_hermetic_guard_fails_immediately_on_unexpected_external_http():
             cl.get("https://generativelanguage.googleapis.com/v1beta/models")
 
 
+@pytest.mark.live
 @pytest.mark.skipif(
     not settings.GOOGLE_API_KEY_PRIMARY,
     reason="Prueba opcional con proveedor real separada de la suite ordinaria.",

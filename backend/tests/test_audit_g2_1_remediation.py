@@ -1366,3 +1366,202 @@ def test_g2_1_3_m03_copy_out_and_copy_in_authorized_and_rejected_after_revocatio
             cap_active_in.revoke()
             with pytest.raises(TimeoutError, match="Capacidad de ejecución"):
                 cp.write_row((4, "tardio"))
+
+
+# ==============================================================================
+# G2.1.4 — Pruebas de Regresión Adversarial A-02 y Hermeticidad
+# ==============================================================================
+
+
+@pytest.mark.parametrize("case_num,method", [
+    (61, "checked"),
+    (62, "wrapped"),
+    (63, "checked"),
+    (64, "wrapped"),
+])
+def test_g2_1_4_a02_reproduction_scheduling_pause_and_delayed_cancel_preserves_original(case_num, method):
+    """
+    Reproduce exactamente los cuatro contraejemplos A-02 de Codex (docs/auditoria_codex_g2_1_3_4a99705.md):
+    - Deadline absoluto del llamador: 0.25 s.
+    - Constraint trigger diferido AFTER UPDATE con pg_sleep(0.18 s).
+    - Pausa determinista de planificación de 0.13 s antes de aplicar SET LOCAL transaction_timeout.
+    - Retraso de planificación de 0.15 s antes de despachar cancel_active_conns_for_thread.
+    - Conexiones registradas explícitamente (checked) y mediante get_conn() (wrapped).
+
+    Verificación obligatoria:
+    1. El llamador recibe TimeoutError a ~0.25 s.
+    2. El worker es abortado por transaction_timeout / cancel y registra TimeoutError.
+    3. Ningún COMMIT tardío es confirmado (cero escrituras posteriores al deadline).
+    4. El estado observado por otra conexión inmediatamente y tras finalizar el worker es estrictamente ORIGINAL.
+    """
+    test_db_url = _get_clean_test_db(f"test_g2_1_4_a02_{case_num}")
+    with psycopg.connect(test_db_url, autocommit=True) as setup_conn:
+        setup_conn.execute("CREATE TABLE IF NOT EXISTS audit_deadline_rows (id int PRIMARY KEY, state text NOT NULL);")
+        setup_conn.execute("""
+            CREATE OR REPLACE FUNCTION audit_deferred() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.state = 'CHANGED' THEN
+                    PERFORM pg_sleep(0.18);
+                END IF;
+                RETURN NEW;
+            END
+            $$;
+        """)
+        setup_conn.execute("DROP TRIGGER IF EXISTS audit_delay ON audit_deadline_rows;")
+        setup_conn.execute("""
+            CREATE CONSTRAINT TRIGGER audit_delay
+            AFTER UPDATE ON audit_deadline_rows
+            DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION audit_deferred();
+        """)
+        setup_conn.execute(
+            "INSERT INTO audit_deadline_rows (id, state) VALUES (%s, 'ORIGINAL') "
+            "ON CONFLICT (id) DO UPDATE SET state = 'ORIGINAL';",
+            (case_num,),
+        )
+
+    from app import agent as a
+    from app.config import settings
+    from unittest.mock import patch
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+
+    try:
+        done = threading.Event()
+        worker_error = []
+        events = []
+        origin = time.monotonic()
+
+        def worker(args):
+            try:
+                cm = db.get_conn() if method == "wrapped" else psycopg.connect(test_db_url)
+                with cm as c:
+                    if method == "checked":
+                        db.register_active_conn(c)
+                    original_cursor = c.cursor
+
+                    class SchedulingProbeCursor:
+                        def __init__(self, *args, **kw):
+                            self.cur = original_cursor(*args, **kw)
+                        def __enter__(self):
+                            self.cur.__enter__()
+                            return self
+                        def __exit__(self, *args):
+                            return self.cur.__exit__(*args)
+                        def __getattr__(self, name):
+                            return getattr(self.cur, name)
+                        def execute(self, q, p=None, **kw):
+                            if "SET LOCAL transaction_timeout" in str(q):
+                                events.append({"set_computed_at": time.monotonic() - origin, "statement": str(q)})
+                                time.sleep(0.13)
+                            res = self.cur.execute(q, p, **kw)
+                            if "SET LOCAL transaction_timeout" in str(q):
+                                events.append({"set_completed_at": time.monotonic() - origin})
+                            return res
+
+                    c.cursor = SchedulingProbeCursor
+                    c.execute("UPDATE audit_deadline_rows SET state='CHANGED' WHERE id=%s", (case_num,))
+                    events.append({"commit_entered_at": time.monotonic() - origin})
+                    if method == "wrapped":
+                        c.commit()
+                    else:
+                        db.checked_commit(c)
+                    events.append({"commit_confirmed_at": time.monotonic() - origin})
+            except Exception as exc:
+                worker_error.append(type(exc).__name__)
+            finally:
+                if method == "checked" and "c" in locals():
+                    db.unregister_active_conn(c)
+                done.set()
+            return {}
+
+        original_cancel = a.cancel_active_conns_for_thread
+
+        def delayed_cancel(tid):
+            time.sleep(0.15)
+            return original_cancel(tid)
+
+        with patch.dict(a.TOOL_DISPATCH, {"audit_commit_schedule": worker}):
+            with patch.object(a, "cancel_active_conns_for_thread", side_effect=delayed_cancel):
+                origin = time.monotonic()
+                caller_error = None
+                try:
+                    a.execute_tool_with_timeout("audit_commit_schedule", {}, 0.25)
+                except Exception as exc:
+                    caller_error = type(exc).__name__
+                caller_elapsed = time.monotonic() - origin
+
+                with psycopg.connect(test_db_url, autocommit=True) as verify_conn:
+                    at_return = verify_conn.execute(
+                        "SELECT state FROM audit_deadline_rows WHERE id=%s", (case_num,)
+                    ).fetchone()[0]
+
+                finished = done.wait(timeout=2.0)
+
+                with psycopg.connect(test_db_url, autocommit=True) as verify_conn:
+                    final_state = verify_conn.execute(
+                        "SELECT state FROM audit_deadline_rows WHERE id=%s", (case_num,)
+                    ).fetchone()[0]
+
+        # Validaciones obligatorias de integridad transaccional A-02:
+        assert caller_error == "TimeoutError", f"El llamador debió recibir TimeoutError, obtuvo: {caller_error}"
+        assert at_return == "ORIGINAL", f"Estado inmediatamente al retorno debe ser ORIGINAL, fue: {at_return}"
+        assert finished is True, "El worker debió finalizar dentro del plazo razonable"
+        assert final_state == "ORIGINAL", (
+            f"VIOLACIÓN A-02: El worker confirmó tardíamente tras TimeoutError! Estado final: {final_state}"
+        )
+        assert "TimeoutError" in worker_error, f"El worker debió abortar con TimeoutError: {worker_error}"
+        assert not any("commit_confirmed_at" in ev for ev in events), (
+            "El commit jamás debió confirmarse tras la pausa de planificación y trigger"
+        )
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_4_hermetic_suite_zero_external_attempts_synthetic_and_empty():
+    """
+    Verifica que las consultas del agente operan con cero intentos externos
+    tanto con claves sintéticas como con claves vacías (G2.1.4).
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.config import settings
+
+    tc = TestClient(app)
+
+    # 1. Con claves sintéticas
+    old_google = settings.GOOGLE_API_KEY_PRIMARY
+    old_groq = settings.GROQ_API_KEY
+    try:
+        settings.GOOGLE_API_KEY_PRIMARY = "fake_synthetic_google_key_g214"
+        settings.GROQ_API_KEY = "fake_synthetic_groq_key_g214"
+
+        r1 = tc.post(
+            "/api/agent/query",
+            json={"query": "¿Cuál es la categoría del reporte CIV-2026-DEMO0001?"},
+        )
+        assert r1.status_code == 200
+        d1 = r1.json()
+        assert "CIV-2026-DEMO0001" in d1["answer"] or "HUECO" in d1["answer"].upper()
+
+        r2 = tc.post(
+            "/api/agent/query",
+            json={"query": "¿Cuántos reportes de radiación nuclear existen en la Comuna 99?"},
+        )
+        assert r2.status_code == 200
+        d2 = r2.json()
+        assert any(w in d2["answer"].lower() for w in ("no existe", "no hay", "0", "ningún", "sin evidencia"))
+
+        # 2. Con claves vacías
+        settings.GOOGLE_API_KEY_PRIMARY = ""
+        settings.GROQ_API_KEY = ""
+
+        r3 = tc.post(
+            "/api/agent/query",
+            json={"query": "¿Cuál es la categoría del reporte CIV-2026-DEMO0001?"},
+        )
+        assert r3.status_code == 200
+    finally:
+        settings.GOOGLE_API_KEY_PRIMARY = old_google
+        settings.GROQ_API_KEY = old_groq

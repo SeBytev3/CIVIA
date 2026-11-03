@@ -333,27 +333,77 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
 
 ---
 
-## 9. Matriz de Pruebas Integradas Final (G2.1.3)
+## 9. Remediación Focalizada G2.1.4 (commit de remediación)
+
+### 9.1. `A-02`: Integridad transaccional absoluta y eliminación de commits tardíos tras pausas de planificación
+
+#### Diagnóstico de Codex (`4a99705`)
+- Al reproducir variaciones locales controladas de planificación (pausa de 0.13 s antes de aplicar `SET LOCAL transaction_timeout` y retraso de 0.15 s antes de despachar la cancelación asíncrona del llamador), se confirmaron cuatro commits tardíos a ~0.33 s para un deadline de 0.25 s y trigger diferido de 0.18 s (casos 61 y 63 con `checked_commit`, casos 62 y 64 con `_wrapped_commit`).
+- Causa raíz: En PostgreSQL, `transaction_timeout` es un temporizador que cuenta a partir del instante en que se configura el GUC. Al calcular un saldo relativo antes del envío a la base de datos (ej. 237 ms a `t = 0.0125 s`), si el hilo sufre una pausa de planificación previa (ej. 0.13 s), PostgreSQL recibe `transaction_timeout = 237 ms` a `t = 0.144 s`, permitiendo que la transacción continúe hasta `0.144 + 0.237 = 0.381 s`. El Timer interno de Python también arrancaba con el saldo antiguo. Al demorarse la cancelación del cliente, ambos límites dejaban espacio para que el trigger diferido completara su ejecución (`0.144 + 0.18 = 0.324 s < 0.381 s`) y confirmara `CHANGED` tras el TIMEOUT del llamador.
+
+#### Remediación técnica implementada
+1. **Re-verificación estricta del deadline monotónico inmediatamente antes de COMMIT (Requisito 3):**
+   - En [`backend/app/db.py`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/backend/app/db.py): Tanto en `checked_commit(conn)` como en `_wrapped_commit()`, tras aplicar la configuración inicial de GUC, se evalúa nuevamente el saldo disponible contra el deadline monotónico:
+     `rem_sec_commit = dl_check - time.monotonic()`.
+   - Si el saldo expiró (`rem_sec_commit <= 0`), la transacción ejecuta `conn.rollback()` de inmediato y levanta `TimeoutError`, impidiendo que `COMMIT` sea siquiera transmitido al motor de base de datos.
+2. **Ajuste dinámico server-side de `transaction_timeout` en PostgreSQL (Requisitos 1 y 4):**
+   - Si el tiempo disponible disminuyó durante la espera o planificación previa (`rem_ms_effective < timeout_ms`), se ajusta inmediatamente el límite en PostgreSQL antes de emitir `COMMIT`:
+     `SELECT set_config('transaction_timeout', '{rem_ms_effective}', true);`
+   - Esto ancla la expiración del motor al remanente real del deadline original y previene que el servidor otorgue una ventana extendida a la transacción.
+   - Si cualquier trigger diferido o bloqueo en commit excede `rem_ms_effective`, PostgreSQL aborta la transacción con `TransactionTimeout` a nivel de servidor sin depender exclusivamente del Timer de Python.
+3. **Alineación del Timer de cancelación con el saldo final absoluto (Requisito 2):**
+   - El temporizador `threading.Timer(max(0.001, rem_sec_final), conn.cancel)` se inicializa con el saldo remanente recalculado inmediatamente antes de invocar `conn.commit()`, garantizando que su disparo ocurra exactamente en el deadline monotónico original.
+4. **Preservación de operaciones autorizadas dentro de plazo (Requisito 5):**
+   - Las transacciones legítimas cuyo trabajo y commit culminan dentro del plazo establecido completan exitosamente sin alteraciones ni penalizaciones.
+
+#### Pruebas adversariales permanentes
+- `test_g2_1_4_a02_reproduction_scheduling_pause_and_delayed_cancel_preserves_original`: Reproduce exactamente los cuatro contraejemplos de Codex (casos 61, 62, 63 y 64) sobre PostgreSQL 17 real, con pausa de planificación de 0.13 s antes de `SET LOCAL` y retraso de 0.15 s en la cancelación del llamador.
+- Resultado: El llamador recibe `TimeoutError`, el worker aborta con `TimeoutError`, cero commits son confirmados y el estado final verificado desde conexión independiente es estrictamente **`ORIGINAL`** en los cuatro casos (**PASSED**).
+
+### 9.2. Hermeticidad incondicional de turnos de agente y centinela con fallo en teardown
+
+#### Diagnóstico de Codex (`4a99705`)
+- Al ejecutar `test_ai_and_agent.py::test_agent_tools_and_unanswerable_query` con claves sintéticas, se registraron seis intentos salientes hacia Google/Groq. La fixture multimodal existente cubría la clasificación de evidencias pero no los adaptadores de turnos principales del agente (`_call_agent_turn_gemini` y `_call_agent_turn_groq`).
+- El fixture centinela lanzaba `RuntimeError`, pero el código del producto capturaba la excepción y degradaba a SQL, permitiendo que la prueba pasara sin evidenciar los intentos externos.
+
+#### Remediación técnica implementada
+1. **Simulación incondicional de adaptadores de turnos principales (Requisito 1):**
+   - En [`backend/tests/conftest.py`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/backend/tests/conftest.py): Se implementó la fixture `hermetic_agent_turn_adapter_fixture` (`autouse=True`) que sustituye `_call_agent_turn_gemini` y `_call_agent_turn_groq` por un emulador determinista que atiende las consultas sobre reportes reales y reportes inexistentes sin generar tráfico de red.
+   - En [`backend/tests/test_ai_and_agent.py`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/backend/tests/test_ai_and_agent.py): Se integró la simulación de turnos en `hermetic_multimodal_adapter_fixture`.
+2. **Contador independiente y fallo no neutralizable en teardown (Requisitos 3 y 4):**
+   - En `backend/tests/conftest.py`: La fixture `guard_no_external_network_calls` acumula cada intento saliente hacia dominios externos en una lista independiente `unexpected_attempts`.
+   - Tras el `yield` de la prueba (fase de teardown de pytest, fuera del alcance de los manejadores `try/except` de la aplicación), si `unexpected_attempts` contiene registros, invoca `pytest.fail()`, convirtiendo cualquier intento de red en un fallo inapelable.
+3. **Separación de pruebas reales opcionales (Requisito 2):**
+   - `test_optional_live_provider_multimodal_connectivity` se marcó con `@pytest.mark.live` y `@pytest.mark.skipif`, quedando excluida de la suite hermética ordinaria y su centinela.
+4. **Verificación con claves sintéticas y vacías (Requisito 5):**
+   - Se comprobó la ejecución completa bajo claves sintéticas y bajo claves vacías: **cero intentos inesperados** registrados en ambos escenarios.
+
+#### Prueba adversarial permanente
+- `test_g2_1_4_hermetic_suite_zero_external_attempts_synthetic_and_empty`: Ejecuta el flujo conversacional del agente con claves sintéticas y con claves vacías, verificando respuesta correcta y cero intentos externos (**PASSED**).
+
+---
+
+## 10. Matriz de Pruebas Integradas Final (G2.1.4)
 
 Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`, `pytest-8.3.5` sobre PostgreSQL 17 real):
 
 | Suite | Archivo | Pruebas | Resultado |
 |---|---|---|---|
-| Remediación G2.1, G2.1.1, G2.1.2 y G2.1.3 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 26 | **26 PASSED** (0 fallos) |
+| Remediación G2.1, G2.1.1, G2.1.2, G2.1.3 y G2.1.4 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 31 | **31 PASSED** (0 fallos) |
 | Resiliencia y Control G2 | `tests/test_audit_g2_resilience.py` | 23 | **23 PASSED** (0 fallos) |
 | Seguridad e Integridad G1 | `tests/test_audit_g1_security.py` | 14 | **14 PASSED** (0 fallos) |
 | Integración IA y Agente (Hermética) | `tests/test_ai_and_agent.py` | 14 | **14 PASSED** (0 fallos) |
 | CRUD y Negocio Ciudadano | `tests/test_reports_crud.py` | 6 | **6 PASSED** (0 fallos) |
 | Salud de la API | `tests/test_health.py` | 1 | **1 PASSED** (0 fallos) |
 | Proxy Frontend PWA E2E | `tests/test_e2e_frontend_proxy.py` | 1 | **1 PASSED** (0 fallos) |
-| **Total suites backend CIVIA** | — | **85** | **85 PASSED (100% de éxito, 0 fallos, 10.40 s)** |
+| **Total suites backend CIVIA** | — | **90** | **90 PASSED (100% de éxito, 0 fallos en 10.87 s)** |
 
 ---
 
-## 10. Limitaciones Reconocidas y Fronteras de Garantía
+## 11. Limitaciones Reconocidas y Fronteras de Garantía
 
 1. **Límites de hilos en CPython vs procesos:**
-   - La arquitectura desvincula los workers no cooperativos y revoca su `ExecutionCapability` inmediatamente. En CPython, un hilo sin I/O (ej. bucle infinito de CPU) no puede ser terminado forzosamente por señales del sistema operativo sin arriesgar la corrupción de la memoria del proceso. La garantía se aplica a todas las fronteras de efectos: cualquier operación SQL (incluyendo cursores encadenados, conexiones directas y copy) y cualquier escritura/reemplazo de archivos en disco es bloqueada inmediatamente al verificarse la revocación de la capacidad.
+   - La arquitectura desvincula los workers no cooperativos y revoca su `ExecutionCapability` inmediatamente. En CPython, un hilo sin I/O (ej. bucle infinito de CPU) no puede ser terminado forzosamente por señales del sistema operativo sin arriesgar la corrupción de la memoria del proceso. La garantía se aplica a todas las fronteras de efectos: cualquier operación SQL (incluyendo cursores encadenados, conexiones directas, copy y commit diferido) y cualquier escritura/reemplazo de archivos en disco es bloqueada inmediatamente al verificarse la revocación de la capacidad o al expirar `transaction_timeout` en el servidor.
 2. **Estimación conservadora en consumos no cuantificables:**
    - Cuando un proveedor remoto falla por caída de red sin devolver metadatos de uso, se imputa una estimación conservadora basada en la longitud del prompt y se marca explícitamente con `tokens_estimated=True` y `unknown_consumption=True`, evitando tanto la subestimación como la certeza engañosa.
 3. **Aislamiento de red Docker:**

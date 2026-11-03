@@ -373,7 +373,34 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
             except Exception:
                 pass
 
-        timer = threading.Timer(rem_sec, conn.cancel)
+        # Re-verificar el tiempo disponible inmediatamente antes de iniciar COMMIT (Requisito 3)
+        rem_sec_commit = dl_check - time.monotonic()
+        if rem_sec_commit <= 0:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
+
+        # Si el tiempo disponible disminuyó tras aplicar la configuración inicial (ej. pausas de planificación),
+        # ajustar de inmediato el timeout en PostgreSQL antes de emitir COMMIT:
+        rem_ms_effective = max(1, int(rem_sec_commit * 1000))
+        if rem_ms_effective < timeout_ms:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT set_config('transaction_timeout', '{rem_ms_effective}', true);")
+            except Exception:
+                pass
+
+        rem_sec_final = dl_check - time.monotonic()
+        if rem_sec_final <= 0:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
+
+        timer = threading.Timer(max(0.001, rem_sec_final), conn.cancel)
         timer.daemon = True
         timer.start()
         try:
@@ -463,7 +490,32 @@ def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Conne
                 except Exception:
                     pass
 
-            timer = threading.Timer(rem_sec_commit, conn.cancel)
+            # Re-verificar el tiempo disponible inmediatamente antes de iniciar COMMIT (Requisito 3)
+            rem_sec_effective = dl_check - time.monotonic()
+            if rem_sec_effective <= 0:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
+
+            rem_ms_effective = max(1, int(rem_sec_effective * 1000))
+            if rem_ms_effective < timeout_ms_commit:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(f"SELECT set_config('transaction_timeout', '{rem_ms_effective}', true);")
+                except Exception:
+                    pass
+
+            rem_sec_final = dl_check - time.monotonic()
+            if rem_sec_final <= 0:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
+
+            timer = threading.Timer(max(0.001, rem_sec_final), conn.cancel)
             timer.daemon = True
             timer.start()
             try:

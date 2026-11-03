@@ -245,3 +245,26 @@
     - `test_ai_and_agent.py`: 14/14 passed.
     - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
     - Cero regresiones en controles aprobados G1, A-02 o N-02. Cero commits en `main` ni push remoto.
+
+### Bloque G2.1.4 — Cierre de Integridad Transaccional A-02 y Hermeticidad Total de Turnos de Agente (`docs/auditoria_codex_g2_1_3_4a99705.md`) completado (2026-11-03)
+- **Detalle completo por hallazgo, diagnóstico, corrección, pruebas adversariales y límites**: documentado en [`docs/remediacion_g2_1.md`](remediacion_g2_1.md).
+- **Cierres aplicados**:
+  1. **`A-02` (Integridad transaccional absoluta y eliminación de commits tardíos tras pausas de planificación)**:
+     - `backend/app/db.py`: Tanto en `checked_commit(conn)` como en `_wrapped_commit()`, se re-evalúa el saldo disponible contra el deadline monotónico inmediatamente antes de iniciar `COMMIT` (`rem_sec_commit = dl_check - time.monotonic()`). Si expiró (`rem_sec_commit <= 0`), aborta y ejecuta `conn.rollback()` de inmediato sin emitir `COMMIT`.
+     - Si el tiempo disponible disminuyó durante la espera o planificación previa (`rem_ms_effective < timeout_ms`), se ajusta dinámicamente el límite en PostgreSQL antes de emitir `COMMIT` mediante `SELECT set_config('transaction_timeout', '{rem_ms_effective}', true);`, anclando la expiración en el motor al saldo real del deadline original y garantizando que triggers diferidos lentos sean abortados a nivel de servidor por `TransactionTimeout`.
+     - El temporizador `threading.Timer` se inicializa con el saldo final monotónico exacto recalculado inmediatamente antes de invocar `conn.commit()`.
+     - Pruebas permanentes: `test_g2_1_4_a02_reproduction_scheduling_pause_and_delayed_cancel_preserves_original` para los cuatro casos (61, 62, 63 y 64) con pausa de planificación de 0.13 s y retraso de cancelación de 0.15 s; verifican que el worker aborta con `TimeoutError`, cero commits son confirmados y el estado final permanece estrictamente `ORIGINAL` (**PASSED**).
+  2. **Hermeticidad total de la suite**:
+     - `backend/tests/conftest.py`: Se implementó la fixture `hermetic_agent_turn_adapter_fixture` (`autouse=True`) que sustituye incondicionalmente `_call_agent_turn_gemini` y `_call_agent_turn_groq` por un emulador determinista, garantizando que ninguna consulta conversacional intente tráfico externo.
+     - `backend/tests/conftest.py`: La fixture `guard_no_external_network_calls` acumula intentos salientes en `unexpected_attempts` e invoca `pytest.fail()` en su teardown si se detecta cualquier intento imprevisto, impidiendo que el producto capture y absorba excepciones de red.
+     - `backend/tests/test_ai_and_agent.py`: `test_optional_live_provider_multimodal_connectivity` marcado como prueba opcional separada (`@pytest.mark.live`).
+     - Prueba permanente: `test_g2_1_4_hermetic_suite_zero_external_attempts_synthetic_and_empty` comprueba cero intentos tanto con claves sintéticas como con claves vacías (**PASSED**).
+- **Verificación oficial de la suite completa en PostgreSQL 17 real (`civia-api-1`)**:
+  - `docker exec civia-api-1 pytest -v`:
+    - **`90 PASSED`** (100% de éxito, 0 fallos, 1 warning en 10.87 s).
+    - `test_audit_g2_1_remediation.py`: 31/31 passed (incluyendo los 5 nuevos tests G2.1.4).
+    - `test_audit_g2_resilience.py`: 23/23 passed.
+    - `test_audit_g1_security.py`: 14/14 passed.
+    - `test_ai_and_agent.py`: 14/14 passed.
+    - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
+    - Cero regresiones en controles aprobados G1, A-02, N-02, M-02, M-03 COPY o M-06. Cero commits en `main` ni push remoto.
