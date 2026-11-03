@@ -29,13 +29,44 @@ from app.db import (
     ExecutionCapability,
     cancel_active_conns_for_thread,
     get_conn,
+    get_current_operation,
     get_deadline_context,
+    get_in_flight_commit_for_thread,
+    get_operation_by_idempotency_key,
+    get_operation_record,
+    is_deadline_cancellation,
+    mark_operation_aborted,
+    mark_operation_committed,
+    reconcile_operation,
+    register_operation_intent,
+    reset_current_operation,
     reset_deadline_context,
     reset_execution_capability,
+    set_current_operation,
     set_deadline_context,
     set_execution_capability,
 )
 from app.observability import record_ai_trace, sanitize_secret_text
+
+
+class OperationPendingError(TimeoutError):
+    """
+    Indica que el supervisor de CIVIA agotó su tiempo de espera mientras la
+    operación transaccional continuaba en confirmación en base de datos (IN-FLIGHT COMMIT).
+    A diferencia de un TimeoutError convencional (que aborta la operación),
+    esta excepción señala un resultado PENDING/INDETERMINADO que debe ser
+    consultado o reconciliado, sin presumir rollback ficticio (A-02 / G2.1.6).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        operation_id: uuid.UUID | str | None = None,
+        status: str = "PENDING",
+    ) -> None:
+        super().__init__(message)
+        self.operation_id = str(operation_id) if operation_id else None
+        self.status = status
 from app.repository import (
     get_report_by_tracking_code,
     get_report_raw,
@@ -572,6 +603,7 @@ def tool_proponer_actualizacion_critica(args: dict[str, Any]) -> dict[str, Any]:
     ident = str(args.get("identificador") or "")
     nuevo_estado = str(args.get("nuevo_estado") or "IN_REVIEW").strip().upper()
     motivo = str(args.get("motivo") or "Solicitud generada por asistente").strip()
+    idempotency_key = args.get("idempotency_key")
 
     if nuevo_estado not in ("CONFIRMED", "IN_REVIEW", "RESOLVED", "REJECTED"):
         return {
@@ -586,12 +618,46 @@ def tool_proponer_actualizacion_critica(args: dict[str, Any]) -> dict[str, Any]:
             "mensaje": f"No existe el reporte '{ident}' para proponer actualización.",
         }
 
+    # Prevención de duplicados e idempotencia (A-02 / G2.1.6)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, proposed_payload, reason, status
+                FROM pending_approvals
+                WHERE report_id = %s AND proposed_action = 'UPDATE_REPORT_STATUS' AND status = 'PENDING'
+                ORDER BY created_at DESC LIMIT 1;
+                """,
+                (row["id"],),
+            )
+            existing_pa = cur.fetchone()
+            if existing_pa:
+                return {
+                    "creado": False,
+                    "ya_existente": True,
+                    "requiere_aprobacion_humana": True,
+                    "approval_id": str(existing_pa["id"]),
+                    "tracking_code": row["tracking_code"],
+                    "estado_actual_reporte": row["status"],
+                    "estado_propuesto": (
+                        existing_pa["proposed_payload"].get("proposed_status")
+                        if isinstance(existing_pa.get("proposed_payload"), dict)
+                        else nuevo_estado
+                    ),
+                    "estado_aprobacion": "PENDING",
+                    "mensaje": f"Ya existe una solicitud de aprobación pendiente #{str(existing_pa['id'])[:8]} para este reporte.",
+                }
+
     approval_id = uuid.uuid4()
+    cur_op = get_current_operation()
+    op_id = cur_op.get("operation_id") if cur_op else None
+
     payload = {
         "tracking_code": row["tracking_code"],
         "previous_status": row["status"],
         "expected_version": int(row.get("version") or 1),
         "proposed_status": nuevo_estado,
+        "operation_id": str(op_id) if op_id else None,
     }
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -615,6 +681,7 @@ def tool_proponer_actualizacion_critica(args: dict[str, Any]) -> dict[str, Any]:
         "creado": True,
         "requiere_aprobacion_humana": True,
         "approval_id": str(approval_id),
+        "operation_id": str(op_id) if op_id else None,
         "tracking_code": row["tracking_code"],
         "estado_actual_reporte": row["status"],
         "estado_propuesto": nuevo_estado,
@@ -650,29 +717,61 @@ def execute_tool_with_timeout(
     capability = ExecutionCapability(deadline=eff_deadline, label=f"tool:{tool_name}")
     worker_tid: list[int] = []
 
+    # Manejo de intención durable e idempotencia para operaciones (A-02 / G2.1.6)
+    op_id: uuid.UUID = uuid.uuid4()
+    idempotency_key = tool_args.get("idempotency_key")
+    if idempotency_key:
+        existing = get_operation_by_idempotency_key(idempotency_key)
+        if existing:
+            if existing.get("status") == "COMMITTED" and existing.get("result_payload"):
+                return existing["result_payload"]
+            if existing.get("status") == "PENDING":
+                raise OperationPendingError(
+                    "La operación asociada a la clave de idempotencia se encuentra pendiente de confirmación.",
+                    operation_id=existing.get("operation_id"),
+                    status="PENDING",
+                )
+    target_id = str(tool_args.get("identificador") or tool_args.get("report_id") or "")
+    register_operation_intent(
+        operation_id=op_id,
+        operation_type=tool_name,
+        target_id=target_id or None,
+        idempotency_key=idempotency_key,
+        proposed_payload=tool_args,
+    )
+
     def _worker() -> dict[str, Any]:
         worker_tid.append(threading.get_ident())
         tok_cap = set_execution_capability(capability)
         tok_dl = set_deadline_context(eff_deadline)
         tok_tracker = _ACTIVE_TOKEN_TRACKER.set(active_tracker) if active_tracker is not None else None
+        tok_op = set_current_operation({"operation_id": op_id, "tool_name": tool_name}) if op_id else None
         try:
             res = fn(tool_args)
             capability.check_or_raise(f"resultado de herramienta '{tool_name}'")
             if time.monotonic() >= eff_deadline:
                 raise TimeoutError(f"La herramienta '{tool_name}' superó el deadline de ejecución ({timeout_sec}s).")
+            if op_id:
+                try:
+                    mark_operation_committed(op_id, result_payload=res)
+                except Exception:
+                    pass
             return res
         except (
             psycopg.errors.QueryCanceled,
             psycopg.errors.AdminShutdown,
             getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
         ) as exc:
+            if not is_deadline_cancellation(exc, eff_deadline):
+                raise
             raise TimeoutError(f"La herramienta '{tool_name}' fue cancelada por deadline en base de datos.") from exc
         except psycopg.OperationalError as exc:
-            msg = str(exc).lower()
-            if "canceling statement" in msg or "timeout" in msg:
+            if is_deadline_cancellation(exc, eff_deadline):
                 raise TimeoutError(f"La herramienta '{tool_name}' superó el límite por timeout en base de datos.") from exc
             raise
         finally:
+            if tok_op is not None:
+                reset_current_operation(tok_op)
             if tok_tracker is not None:
                 try:
                     _ACTIVE_TOKEN_TRACKER.reset(tok_tracker)
@@ -687,6 +786,14 @@ def execute_tool_with_timeout(
     try:
         return future.result(timeout=timeout_sec)
     except FuturesTimeoutError as exc:
+        in_flight = get_in_flight_commit_for_thread(worker_tid[0]) if worker_tid else None
+        if in_flight is not None:
+            active_op = in_flight.get("operation_id") or op_id
+            raise OperationPendingError(
+                f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s pero la confirmación en base de datos continúa en progreso.",
+                operation_id=active_op,
+                status="PENDING",
+            ) from exc
         capability.revoke()
         if worker_tid:
             threading.Thread(
@@ -694,12 +801,16 @@ def execute_tool_with_timeout(
                 args=(worker_tid[0],),
                 daemon=True,
             ).start()
+        if op_id:
+            mark_operation_aborted(op_id, f"Supervisor timeout ({timeout_sec}s) antes de confirmación.")
         raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s.") from exc
     except (
         psycopg.errors.QueryCanceled,
         psycopg.errors.AdminShutdown,
         getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
     ) as exc:
+        if not is_deadline_cancellation(exc, eff_deadline):
+            raise
         capability.revoke()
         if worker_tid:
             threading.Thread(
@@ -707,27 +818,32 @@ def execute_tool_with_timeout(
                 args=(worker_tid[0],),
                 daemon=True,
             ).start()
+        if op_id:
+            mark_operation_aborted(op_id, "Cancelación por deadline en base de datos.")
         raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s (cancelación en BD).") from exc
     except psycopg.OperationalError as exc:
+        if not is_deadline_cancellation(exc, eff_deadline):
+            raise
         capability.revoke()
-        msg = str(exc).lower()
-        if "canceling statement" in msg or "timeout" in msg:
+        if worker_tid:
+            threading.Thread(
+                target=cancel_active_conns_for_thread,
+                args=(worker_tid[0],),
+                daemon=True,
+            ).start()
+        if op_id:
+            mark_operation_aborted(op_id, "Timeout operacional en base de datos.")
+        raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s (timeout en BD).") from exc
+    finally:
+        in_flight = get_in_flight_commit_for_thread(worker_tid[0]) if worker_tid else None
+        if in_flight is None:
+            capability.revoke()
             if worker_tid:
                 threading.Thread(
                     target=cancel_active_conns_for_thread,
                     args=(worker_tid[0],),
                     daemon=True,
                 ).start()
-            raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s (timeout en BD).") from exc
-        raise
-    finally:
-        capability.revoke()
-        if worker_tid:
-            threading.Thread(
-                target=cancel_active_conns_for_thread,
-                args=(worker_tid[0],),
-                daemon=True,
-            ).start()
         executor.shutdown(wait=False, cancel_futures=True)
 
 
@@ -1105,6 +1221,8 @@ def run_civia_agent(
     fallback_used = False
 
     chain = get_provider_chain()
+    operation_id: str | None = None
+    operation_status: str | None = None
 
     try:
         for turn in range(1, eff_max_iter + 1):
@@ -1353,6 +1471,8 @@ def run_civia_agent(
                     "requires_human_approval": requires_human_approval,
                     "pending_approval_id": pending_approval_id,
                     "degraded_sql_mode": False,
+                    "operation_id": operation_id,
+                    "operation_status": operation_status,
                 }
 
             # Ejecutar cada herramienta solicitada con control de timeout por herramienta y deadline global
@@ -1387,6 +1507,22 @@ def run_civia_agent(
                         timeout_sec=eff_tool_timeout,
                         deadline=min(deadline_monotonic, time.monotonic() + eff_tool_timeout),
                     )
+                except OperationPendingError as exc:
+                    guardrail_triggered = "OPERATION_PENDING"
+                    operation_id = str(exc.operation_id) if exc.operation_id else None
+                    operation_status = exc.status
+                    _safe_record_trace(
+                        trace_group_id=trace_group_id,
+                        operation="tool_pending",
+                        provider=active_provider,
+                        model=active_model,
+                        attempt_number=turn,
+                        success=False,
+                        latency_ms=int(eff_tool_timeout * 1000),
+                        error_code="OPERATION_PENDING",
+                        error_detail=str(exc),
+                    )
+                    break
                 except TimeoutError as exc:
                     guardrail_triggered = "TIMEOUT"
                     _safe_record_trace(
@@ -1401,6 +1537,10 @@ def run_civia_agent(
                         error_detail=str(exc),
                     )
                     break
+
+                if t_res.get("operation_id"):
+                    operation_id = str(t_res.get("operation_id"))
+                    operation_status = "COMMITTED"
 
                 if t_res.get("requiere_aprobacion_humana"):
                     requires_human_approval = True
@@ -1417,15 +1557,21 @@ def run_civia_agent(
                     }
                 )
 
-            if guardrail_triggered == "TIMEOUT":
+            if guardrail_triggered in ("TIMEOUT", "OPERATION_PENDING"):
                 break
 
             if turn >= eff_max_iter:
                 guardrail_triggered = guardrail_triggered or "MAX_ITERATIONS"
                 break
 
-        # Si salimos del bucle por alcanzar un guardrail (MAX_ITERATIONS, MAX_TOKENS, TIMEOUT o HUMAN_APPROVAL_REQUIRED)
-        if guardrail_triggered == "TIMEOUT" and not executed_tools:
+        # Si salimos del bucle por alcanzar un guardrail (MAX_ITERATIONS, MAX_TOKENS, TIMEOUT, OPERATION_PENDING o HUMAN_APPROVAL_REQUIRED)
+        if guardrail_triggered == "OPERATION_PENDING":
+            answer = (
+                "La operación solicitada quedó pendiente de confirmación en base de datos debido a que "
+                "el supervisor agotó su tiempo de espera mientras se procesaba la transacción. "
+                f"Puede verificar el estado definitivo con el identificador de operación '{operation_id}'."
+            )
+        elif guardrail_triggered == "TIMEOUT" and not executed_tools:
             answer = "El agente no pudo completar el procesamiento dentro del límite de tiempo asignado (deadline agotado)."
         else:
             answer = _deterministic_sql_fallback_answer(query, executed_tools)
@@ -1448,6 +1594,31 @@ def run_civia_agent(
             "requires_human_approval": requires_human_approval,
             "pending_approval_id": pending_approval_id,
             "degraded_sql_mode": False,
+            "operation_id": operation_id,
+            "operation_status": operation_status,
+        }
+    except OperationPendingError as exc:
+        guardrail_triggered = "OPERATION_PENDING"
+        total_ms = int((time.perf_counter() - t_start) * 1000)
+        return {
+            "answer": "La operación solicitada quedó pendiente de confirmación en base de datos. Puede consultar su estado.",
+            "trace_group_id": str(trace_group_id),
+            "tools_invoked": executed_tools,
+            "iterations_used": iterations_used or 1,
+            "max_iterations": eff_max_iter,
+            "total_tokens_used": tracker.total_tokens,
+            "prompt_tokens_used": tracker.prompt_tokens,
+            "completion_tokens_used": tracker.completion_tokens,
+            "tokens_estimated": tracker.tokens_estimated,
+            "unknown_consumption": tracker.has_unknown_consumption,
+            "max_tokens_budget": eff_max_tokens,
+            "latency_ms": total_ms,
+            "guardrail_triggered": "OPERATION_PENDING",
+            "requires_human_approval": requires_human_approval,
+            "pending_approval_id": pending_approval_id,
+            "degraded_sql_mode": False,
+            "operation_id": str(exc.operation_id) if exc.operation_id else None,
+            "operation_status": exc.status,
         }
     except TimeoutError:
         guardrail_triggered = "TIMEOUT"
@@ -1469,6 +1640,8 @@ def run_civia_agent(
             "requires_human_approval": requires_human_approval,
             "pending_approval_id": pending_approval_id,
             "degraded_sql_mode": False,
+            "operation_id": operation_id,
+            "operation_status": operation_status,
         }
     finally:
         _ACTIVE_TOKEN_TRACKER.reset(token_tracker_ctx)

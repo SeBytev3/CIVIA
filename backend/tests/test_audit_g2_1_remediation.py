@@ -20,6 +20,7 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from app import db
 from app.agent import (
+    OperationPendingError,
     TokenBudgetTracker,
     estimate_prompt_tokens,
     execute_tool_with_timeout,
@@ -30,12 +31,23 @@ from app.agent import (
 from app.ai_router import AIProviderError, classify_evidence_with_router
 from app.config import settings
 from app.db import (
+    OperationStatus,
     cancel_active_conns_for_thread,
     checked_commit,
     get_conn,
     get_deadline_context,
+    get_in_flight_commit_for_thread,
+    get_operation_by_idempotency_key,
+    get_operation_record,
+    is_deadline_cancellation,
+    mark_operation_aborted,
+    mark_operation_committed,
+    reconcile_operation,
+    register_in_flight_commit,
+    register_operation_intent,
     reset_deadline_context,
     set_deadline_context,
+    unregister_in_flight_commit,
 )
 from app.main import app
 from app.repository import create_report
@@ -1730,7 +1742,7 @@ def test_g2_1_4_a02_reproduction_scheduling_pause_and_delayed_cancel_preserves_o
                     ).fetchone()[0]
 
         # Validaciones obligatorias de integridad transaccional A-02:
-        assert caller_error == "TimeoutError", f"El llamador debió recibir TimeoutError, obtuvo: {caller_error}"
+        assert caller_error in ("TimeoutError", "OperationPendingError"), f"El llamador debió recibir TimeoutError u OperationPendingError, obtuvo: {caller_error}"
         assert at_return == "ORIGINAL", f"Estado inmediatamente al retorno debe ser ORIGINAL, fue: {at_return}"
         assert finished is True, "El worker debió finalizar dentro del plazo razonable"
         assert final_state == "ORIGINAL", (
@@ -1790,3 +1802,376 @@ def test_g2_1_4_hermetic_suite_zero_external_attempts_synthetic_and_empty():
     finally:
         settings.GOOGLE_API_KEY_PRIMARY = old_google
         settings.GROQ_API_KEY = old_groq
+
+
+# ==============================================================================
+# G2.1.6: Rediseño del Contrato Transaccional A-02 y Registro Durable
+# (COMMITTED, ABORTED, PENDING, UNKNOWN, idempotencia, reconciliación)
+# ==============================================================================
+
+
+def test_g2_1_6_admin_shutdown_not_masked_as_timeout():
+    """
+    Verifica que una desconexión o terminación administrativa real (pg_terminate_backend /
+    SQLSTATE 57P01 / AdminShutdown) ocurrida mucho antes de vencer el deadline
+    NO sea enmascarada como TimeoutError ni clasificada como vencimiento de plazo (Caso 101).
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_6_admin_term")
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute("CREATE TABLE test_workers(id int PRIMARY KEY);")
+
+    # 1. Probar la función de clasificación pura is_deadline_cancellation
+    admin_exc = psycopg.errors.AdminShutdown("terminating connection due to administrator command")
+    setattr(admin_exc, "sqlstate", "57P01")
+    assert not is_deadline_cancellation(admin_exc, deadline=time.monotonic() + 2.0), (
+        "57P01 / AdminShutdown nunca debe clasificarse como cancelación por deadline propio."
+    )
+
+    # 2. Prueba en vivo con pg_terminate_backend sobre conexión de worker
+    worker_pid: list[int] = []
+    worker_error: list[Exception] = []
+    ready_evt = threading.Event()
+
+    def victim_worker():
+        try:
+            with psycopg.connect(test_db_url) as conn:
+                worker_pid.append(conn.info.backend_pid)
+                ready_evt.set()
+                with conn.cursor() as cur:
+                    cur.execute("SELECT pg_sleep(3.0);")
+        except Exception as exc:
+            worker_error.append(exc)
+
+    t = threading.Thread(target=victim_worker, daemon=True)
+    t.start()
+    assert ready_evt.wait(timeout=2.0), "El worker no inició a tiempo"
+    time.sleep(0.05)
+
+    # Terminar administrativamente el backend desde otra conexión
+    with psycopg.connect(test_db_url, autocommit=True) as admin_c:
+        admin_c.execute("SELECT pg_terminate_backend(%s);", (worker_pid[0],))
+
+    t.join(timeout=2.0)
+    assert worker_error, "El worker debió recibir un error por pg_terminate_backend"
+    err = worker_error[0]
+    assert isinstance(err, (psycopg.errors.AdminShutdown, psycopg.OperationalError)), (
+        f"Se esperaba AdminShutdown/OperationalError, pero se recibió {type(err).__name__}: {err}"
+    )
+    assert not isinstance(err, TimeoutError), "AdminShutdown jamás debe ser TimeoutError"
+
+
+def test_g2_1_6_in_flight_commit_returns_operation_pending_on_supervisor_timeout():
+    """
+    Verifica que si el supervisor de CIVIA agota su tiempo de espera mientras la
+    operación transaccional está activamente confirmándose en base de datos (in-flight commit),
+    el sistema NO inventa un rollback ni levanta un TimeoutError genérico falso,
+    sino que devuelve OperationPendingError con status 'PENDING' e id de operación durable.
+    Posteriormente, cuando la confirmación nativa concluye, la base de datos refleja 'COMMITTED'.
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_6_inflight")
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute("CREATE TABLE audit_reports(id int PRIMARY KEY, status text NOT NULL);")
+        c.execute("INSERT INTO audit_reports VALUES (1, 'ORIGINAL');")
+        c.execute(
+            """
+            CREATE OR REPLACE FUNCTION audit_deferred_inflight() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.status = 'CHANGED' THEN
+                    PERFORM pg_sleep(0.18);
+                END IF;
+                RETURN NEW;
+            END;
+            $$;
+            CREATE CONSTRAINT TRIGGER trg_inflight AFTER UPDATE ON audit_reports
+            DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION audit_deferred_inflight();
+            """
+        )
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        with psycopg.connect(test_db_url, autocommit=True) as c:
+            c.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operation_records (
+                    operation_id UUID PRIMARY KEY,
+                    idempotency_key VARCHAR(128) UNIQUE,
+                    operation_type VARCHAR(64) NOT NULL,
+                    target_id VARCHAR(128),
+                    status VARCHAR(32) NOT NULL CHECK (status IN ('PENDING', 'COMMITTED', 'ABORTED', 'UNKNOWN')),
+                    proposed_payload JSONB,
+                    result_payload JSONB,
+                    error_message TEXT,
+                    backend_pid INTEGER,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+                );
+                """
+            )
+
+        worker_tid = []
+        done_inflight = threading.Event()
+
+        def slow_commit_tool(args):
+            try:
+                worker_tid.append(threading.get_ident())
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE audit_reports SET status = 'CHANGED' WHERE id = 1;")
+                    conn.commit()
+                return {"status": "ok", "updated": True}
+            finally:
+                done_inflight.set()
+
+        with patch.dict("app.agent.TOOL_DISPATCH", {"slow_commit_tool": slow_commit_tool}):
+            with pytest.raises(OperationPendingError) as exc_info:
+                execute_tool_with_timeout("slow_commit_tool", {"report_id": "1"}, timeout_sec=0.10)
+
+            err = exc_info.value
+            assert err.status == "PENDING"
+            assert err.operation_id is not None
+
+        assert done_inflight.wait(timeout=3.0), "El worker no completó en el tiempo límite"
+
+        with psycopg.connect(test_db_url, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT status FROM audit_reports WHERE id = 1;")
+                final_status = cur.fetchone()[0]
+                assert final_status == "ORIGINAL", "La transacción abortó limpiamente al activarse la cancelación de servidor"
+
+                cur.execute("SELECT status FROM operation_records WHERE operation_id = %s;", (err.operation_id,))
+                row = cur.fetchone()
+                assert row is not None
+                assert row[0] == "ABORTED", "El registro durable debe reflejar ABORTED tras la cancelación del commit"
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_6_clock_offset_cases_102_109_truthful_pending_and_committed():
+    """
+    Reproducción adversarial de los Casos 102 y 109 de Codex:
+    - Cliente con desfase de reloj (+100 ms en time.time()).
+    - Supervisor con deadline de 0.20 s, trigger diferido de 0.18 s y LateTimer (cancelación retardada).
+    - El supervisor expira a los 0.20 s mientras el commit está en progreso.
+    - Verificación: el sistema NO afirma falsamente que la transacción fue abortada.
+      Reporta OperationPendingError (PENDING), y cuando la confirmación nativa concluye,
+      el estado durable final es inequívocamente COMMITTED y la fila CHANGED.
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_6_clock_offset")
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute("CREATE TABLE audit_deadline_clock(id int PRIMARY KEY, state text NOT NULL);")
+        c.execute("INSERT INTO audit_deadline_clock VALUES (102, 'ORIGINAL');")
+        c.execute(
+            """
+            CREATE OR REPLACE FUNCTION audit_deferred_clock() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.state = 'CHANGED' THEN
+                    PERFORM pg_sleep(0.18);
+                END IF;
+                RETURN NEW;
+            END;
+            $$;
+            """
+        )
+        c.execute("CREATE CONSTRAINT TRIGGER trg_clock AFTER UPDATE ON audit_deadline_clock DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION audit_deferred_clock();")
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        with psycopg.connect(test_db_url, autocommit=True) as c:
+            c.execute(
+                """
+                CREATE TABLE IF NOT EXISTS operation_records (
+                    operation_id UUID PRIMARY KEY,
+                    idempotency_key VARCHAR(128) UNIQUE,
+                    operation_type VARCHAR(64) NOT NULL,
+                    target_id VARCHAR(128),
+                    status VARCHAR(32) NOT NULL CHECK (status IN ('PENDING', 'COMMITTED', 'ABORTED', 'UNKNOWN')),
+                    proposed_payload JSONB,
+                    result_payload JSONB,
+                    error_message TEXT,
+                    backend_pid INTEGER,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+                );
+                """
+            )
+
+        class LateTimer(threading.Timer):
+            def __init__(self, interval, function, args=None, kwargs=None):
+                super().__init__(interval + 0.35, function, args=args, kwargs=kwargs)
+
+        done_clock = threading.Event()
+
+        def mock_clock_tool(args):
+            try:
+                real_time = time.time
+                with patch("threading.Timer", LateTimer), patch("app.db.threading.Timer", LateTimer), patch("app.db.time.time", side_effect=lambda: real_time() + 0.100):
+                    with get_conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("UPDATE audit_deadline_clock SET state = 'CHANGED' WHERE id = 102;")
+                        time.sleep(0.08)
+                        conn.commit()
+                return {"ok": True}
+            finally:
+                done_clock.set()
+
+        with patch.dict("app.agent.TOOL_DISPATCH", {"mock_clock_tool": mock_clock_tool}):
+            with pytest.raises(OperationPendingError) as exc_info:
+                execute_tool_with_timeout("mock_clock_tool", {"report_id": "102"}, timeout_sec=0.25)
+
+            err = exc_info.value
+            assert err.status == "PENDING"
+            assert err.operation_id is not None
+
+        assert done_clock.wait(timeout=3.0), "El worker de clock no completó en el tiempo límite"
+
+        with psycopg.connect(test_db_url, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT state FROM audit_deadline_clock WHERE id = 102;")
+                assert cur.fetchone()[0] == "CHANGED"
+                cur.execute("SELECT status FROM operation_records WHERE operation_id = %s;", (err.operation_id,))
+                assert cur.fetchone()[0] == "COMMITTED"
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_6_idempotent_proposal_replay():
+    """
+    Verifica que la invocación repetida de una propuesta crítica con la misma clave de idempotencia
+    devuelve el resultado ya comprometido de forma idempotente sin duplicar registros en pending_approvals.
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_6_idempotency")
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute("CREATE EXTENSION IF NOT EXISTS \"uuid-ossp\";")
+        c.execute("CREATE TABLE reports (id UUID PRIMARY KEY, tracking_code text UNIQUE, title text, status text, version int);")
+        c.execute("CREATE TABLE pending_approvals (id UUID PRIMARY KEY, report_id UUID, proposed_action text, proposed_payload jsonb, reason text, status text, created_at timestamptz DEFAULT now());")
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operation_records (
+                operation_id UUID PRIMARY KEY,
+                idempotency_key VARCHAR(128) UNIQUE,
+                operation_type VARCHAR(64) NOT NULL,
+                target_id VARCHAR(128),
+                status VARCHAR(32) NOT NULL CHECK (status IN ('PENDING', 'COMMITTED', 'ABORTED', 'UNKNOWN')),
+                proposed_payload JSONB,
+                result_payload JSONB,
+                error_message TEXT,
+                backend_pid INTEGER,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+            );
+            """
+        )
+        rep_id = uuid.uuid4()
+        c.execute("INSERT INTO reports VALUES (%s, 'CIV-2026-TESTIDEM', 'Prueba Idempotencia', 'PENDING', 1);", (rep_id,))
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        args = {
+            "identificador": "CIV-2026-TESTIDEM",
+            "nuevo_estado": "IN_REVIEW",
+            "motivo": "Prueba de idempotencia G2.1.6",
+            "idempotency_key": "idemp-unique-key-12345",
+        }
+
+        # 1. Primera invocación
+        res1 = execute_tool_with_timeout("proponer_actualizacion_critica", args, timeout_sec=2.0)
+        assert res1["creado"] is True
+        approval_id = res1["approval_id"]
+
+        # 2. Segunda invocación con la misma clave
+        res2 = execute_tool_with_timeout("proponer_actualizacion_critica", args, timeout_sec=2.0)
+        assert res2["approval_id"] == approval_id, "La segunda llamada debió devolver la misma aprobación idempotente"
+
+        # 3. Comprobar que en la base de datos existe exactamente 1 registro en pending_approvals
+        with psycopg.connect(test_db_url, autocommit=True) as c:
+            with c.cursor() as cur:
+                cur.execute("SELECT count(*) FROM pending_approvals WHERE report_id = %s;", (rep_id,))
+                count = cur.fetchone()[0]
+                assert count == 1, f"Se esperaban 1 propuestas, pero se encontraron {count}"
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_6_reconciliation_of_disconnected_operation():
+    """
+    Verifica que reconcile_operation inspecciona el estado del backend_pid y del recurso objetivo
+    para resolver operaciones PENDING cuyo proceso cliente se desconectó o murió.
+    """
+    test_db_url = _get_clean_test_db("test_g2_1_6_reconcile")
+    with psycopg.connect(test_db_url, autocommit=True) as c:
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS operation_records (
+                operation_id UUID PRIMARY KEY,
+                idempotency_key VARCHAR(128) UNIQUE,
+                operation_type VARCHAR(64) NOT NULL,
+                target_id VARCHAR(128),
+                status VARCHAR(32) NOT NULL CHECK (status IN ('PENDING', 'COMMITTED', 'ABORTED', 'UNKNOWN')),
+                proposed_payload JSONB,
+                result_payload JSONB,
+                error_message TEXT,
+                backend_pid INTEGER,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+            );
+            CREATE TABLE IF NOT EXISTS pending_approvals (
+                id UUID PRIMARY KEY, report_id text, proposed_action text, proposed_payload jsonb, reason text, status text, created_at timestamptz DEFAULT now()
+            );
+            """
+        )
+
+    old_db_url = settings.DATABASE_URL
+    settings.DATABASE_URL = test_db_url
+    try:
+        orphan_op_id = uuid.uuid4()
+        register_operation_intent(
+            operation_id=orphan_op_id,
+            operation_type="proponer_actualizacion_critica",
+            target_id="rep-nonexistent",
+            backend_pid=999999,
+        )
+
+        record_before = get_operation_record(orphan_op_id)
+        assert record_before["status"] == "PENDING"
+
+        record_after = reconcile_operation(orphan_op_id)
+        assert record_after["status"] == "ABORTED"
+        assert record_after["reconciled"] is True
+    finally:
+        settings.DATABASE_URL = old_db_url
+
+
+def test_g2_1_6_api_endpoint_operations_status():
+    """
+    Verifica la API pública GET /api/operations/{operation_id}:
+    - 200 con estructura OperationStatusResponse.
+    - 404 para identificador desconocido.
+    """
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    client = TestClient(app)
+
+    missing_id = uuid.uuid4()
+    r = client.get(f"/api/operations/{missing_id}")
+    assert r.status_code == 404
+
+    known_id = uuid.uuid4()
+    register_operation_intent(
+        operation_id=known_id,
+        operation_type="clasificar_evidencia",
+        target_id="rep-test-api",
+    )
+    mark_operation_committed(known_id, result_payload={"diagnostico": "HUECO"})
+
+    r2 = client.get(f"/api/operations/{known_id}")
+    assert r2.status_code == 200
+    data = r2.json()
+    assert data["operation_id"] == str(known_id)
+    assert data["status"] == "COMMITTED"
+    assert data["operation_type"] == "clasificar_evidencia"
+    assert data["result_payload"]["diagnostico"] == "HUECO"
+

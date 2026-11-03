@@ -421,24 +421,63 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
 
 ---
 
-## 11. Matriz de Pruebas Integradas Final (G2.1.5)
+## 13. Bloque G2.1.6 — Rediseño del Contrato Transaccional A-02 y Registro Durable (`docs/auditoria_codex_g2_1_5_cdc646b.md`)
+
+### Diagnóstico de la limitación arquitectónica (Codex G2.1.5)
+En el informe `docs/auditoria_codex_g2_1_5_cdc646b.md`, la auditoría independiente demostró que intentar equiparar el presupuesto de espera del supervisor con la decisión transaccional de PostgreSQL mediante conversiones monotónico→epoch y chequeos post-commit producía una discrepancia semántica insostenible:
+1. **Desfase de reloj (+100 ms, Casos 102 y 109)**: PostgreSQL calculaba el vencimiento con un epoch adelantado; el commit nativo retornaba éxito a los 0.29 s y persistía `CHANGED`, pero Python lanzaba `TimeoutError` post-commit, informando falsamente al llamador que la operación había abortado.
+2. **Pausa al muestrear `time.time` (Caso 104)**: La conversión no atómica extendía el tiempo asignado a PostgreSQL, confirmando `CHANGED` a los 0.279 s mientras el llamador recibía `TimeoutError`.
+3. **Temporizador preexistente en sesión (Casos 151 y 152)**: Si una conexión poseía un `transaction_timeout` previo de 1000 ms, PostgreSQL no rearmaba el temporizador activo, confirmando `CHANGED` a los 0.28-0.29 s.
+4. **Sobreclasificación de `AdminShutdown` (Caso 101)**: `pg_terminate_backend` (SQLSTATE 57P01) a los 0.0338 s era enmascarado como `TimeoutError` y clasificado como guardrail `TIMEOUT`, en lugar de preservar el error administrativo de infraestructura.
+
+### Rediseño del Contrato y Solución Aplicada (G2.1.6)
+
+1. **Eliminación del falso rollback post-commit**:
+   - En `backend/app/db.py:checked_commit`, se eliminó el chequeo post-commit `if time.monotonic() >= dl_check: raise TimeoutError`. Si el commit nativo retornó éxito, PostgreSQL confirmó la transacción de forma definitiva; mentir al llamador reportando un timeout mientras la base de datos persistió el cambio queda formalmente erradicado.
+2. **Estados internos inequívocos y seguimiento en vuelo**:
+   - `COMMITTED`: PostgreSQL confirmó la operación.
+   - `ABORTED`: Confirmación efectiva de que la transacción abortó sin persistir cambios.
+   - `PENDING`: El supervisor agotó su tiempo de espera mientras la confirmación estaba en curso en PostgreSQL (`_IN_FLIGHT_COMMITS`). Se levanta `OperationPendingError(operation_id=..., status="PENDING")` (subclase de `TimeoutError`).
+   - `UNKNOWN`: Fallo de conexión o incertidumbre no resuelta.
+3. **Registro durable de operaciones e idempotencia (`operation_records`)**:
+   - Migración `backend/migrations/004_operation_records.sql` con tabla `operation_records`: `operation_id UUID PRIMARY KEY`, `idempotency_key VARCHAR UNIQUE`, `operation_type`, `target_id`, `status CHECK ('PENDING', 'COMMITTED', 'ABORTED', 'UNKNOWN')`, `proposed_payload`, `result_payload`, `backend_pid`, `created_at`, `updated_at`.
+   - `register_operation_intent`: Registra durablemente la intención antes de ejecutar herramientas de mutación. Si existe una clave de idempotencia ya confirmada (`COMMITTED`), retorna inmediatamente su resultado previo sin re-ejecutar.
+   - En `checked_commit`: Se actualiza atómicamente `operation_records` dentro de la misma transacción (aislado con `SAVEPOINT op_rec_sp`).
+   - En `execute_tool_with_timeout`: Si expira el plazo del supervisor y el hilo está en `_IN_FLIGHT_COMMITS`, no se revoca la capacidad de confirmación ni se cancela la conexión; se retorna `OperationPendingError` señalando el estado `PENDING`.
+4. **Normalización determinista de excepciones (`is_deadline_cancellation`)**:
+   - `backend/app/db.py:is_deadline_cancellation` descarta explícitamente `AdminShutdown` y SQLSTATE `57P01`. Las terminaciones administrativas y caídas de backend no se convierten en `TimeoutError` ni activan el guardrail `TIMEOUT`.
+5. **Reconciliación y Endpoint Público**:
+   - `backend/app/db.py:reconcile_operation`: Si una operación quedó `PENDING`, verifica si el `backend_pid` sigue ejecutándose en `pg_stat_activity`. Si el proceso murió, inspecciona el recurso objetivo y resuelve a `COMMITTED` o `ABORTED`.
+   - `backend/app/main.py`: Endpoint `GET /api/operations/{operation_id}` (retorna `OperationStatusResponse`). En `POST /api/agent/query`, captura `OperationPendingError` retornando `guardrail_triggered="OPERATION_PENDING"` y el identificador de operación para seguimiento ciudadano.
+
+### Pruebas permanentes añadidas y verificadas (G2.1.6)
+- `test_g2_1_6_admin_shutdown_not_masked_as_timeout`: verifica que `pg_terminate_backend` (57P01) a los 0.05 s no se convierte en `TimeoutError` (**PASSED**).
+- `test_g2_1_6_in_flight_commit_returns_operation_pending_on_supervisor_timeout`: verifica que si el supervisor expira durante un commit en vuelo que aborta en el servidor, se reporta `PENDING` y concluye en `ABORTED` (**PASSED**).
+- `test_g2_1_6_clock_offset_cases_102_109_truthful_pending_and_committed`: reproduce adversarialmente los casos 102/109 con desfase de reloj (+100 ms), verificando que el supervisor reporta `PENDING` y la base de datos registra `COMMITTED` sin contradicción (**PASSED**).
+- `test_g2_1_6_idempotent_proposal_replay`: verifica que múltiples llamadas con la misma clave de idempotencia no duplican solicitudes en `pending_approvals` (**PASSED**).
+- `test_g2_1_6_reconciliation_of_disconnected_operation`: verifica que una operación huérfana por desconexión de proceso es reconciliada deterministamente a `ABORTED` (**PASSED**).
+- `test_g2_1_6_api_endpoint_operations_status`: verifica la API `GET /api/operations/{operation_id}` con 200 y 404 (**PASSED**).
+
+---
+
+## 14. Matriz de Pruebas Integradas Final (G2.1.6)
 
 Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`, `pytest-8.3.5` sobre PostgreSQL 17 real):
 
 | Suite | Archivo | Pruebas | Resultado |
 |---|---|---|---|
-| Remediación G2.1, G2.1.1, G2.1.2, G2.1.3, G2.1.4 y G2.1.5 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 34 | **34 PASSED** (0 fallos) |
+| Remediación G2.1 a G2.1.6 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 40 | **40 PASSED** (0 fallos) |
 | Resiliencia y Control G2 | `tests/test_audit_g2_resilience.py` | 23 | **23 PASSED** (0 fallos) |
 | Seguridad e Integridad G1 | `tests/test_audit_g1_security.py` | 14 | **14 PASSED** (0 fallos) |
 | Integración IA y Agente (Hermética) | `tests/test_ai_and_agent.py` | 14 | **14 PASSED** (0 fallos) |
 | CRUD y Negocio Ciudadano | `tests/test_reports_crud.py` | 6 | **6 PASSED** (0 fallos) |
 | Salud de la API | `tests/test_health.py` | 1 | **1 PASSED** (0 fallos) |
 | Proxy Frontend PWA E2E | `tests/test_e2e_frontend_proxy.py` | 1 | **1 PASSED** (0 fallos) |
-| **Total suites backend CIVIA** | — | **92** | **92 PASSED (100% de éxito, 0 fallos en 13.08 s)** |
+| **Total suites backend CIVIA** | — | **98** | **98 PASSED (100% de éxito, 0 fallos en 15.24 s)** |
 
 ---
 
-## 12. Limitaciones Reconocidas y Fronteras de Garantía
+## 15. Limitaciones Reconocidas y Fronteras de Garantía
 
 1. **Límites de hilos en CPython vs procesos:**
    - La arquitectura desvincula los workers no cooperativos y revoca su `ExecutionCapability` inmediatamente. En CPython, un hilo sin I/O (ej. bucle infinito de CPU) no puede ser terminado forzosamente por señales del sistema operativo sin arriesgar la corrupción de la memoria del proceso. La garantía se aplica a todas las fronteras de efectos: cualquier operación SQL (incluyendo cursores encadenados, conexiones directas, copy y commit diferido evaluado dinámicamente en servidor) y cualquier escritura/reemplazo de archivos en disco es bloqueada inmediatamente al verificarse la revocación de la capacidad o al expirar `transaction_timeout` en el servidor.
@@ -446,3 +485,5 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
    - Cuando un proveedor remoto falla por caída de red sin devolver metadatos de uso, se imputa una estimación conservadora basada en la longitud del prompt y se marca explícitamente con `tokens_estimated=True` y `unknown_consumption=True`, evitando tanto la subestimación como la certeza engañosa.
 3. **Aislamiento de red Docker:**
    - La confianza en `172.28.0.2` descansa en la asignación estática del bridge `civia_net`. En despliegues donde el proxy inverso opere fuera de Docker, `TRUSTED_PROXIES` debe configurarse con la IP estática del host de dicho proxy.
+4. **Resolución de operaciones pendientes (`PENDING`):**
+   - Cuando una operación transaccional permanece en vuelo tras la expiración del supervisor, la API reporta `status="PENDING"`. El resultado definitivo debe ser consultado mediante polling en `GET /api/operations/{operation_id}` o resuelto mediante reconciliación. No se garantiza finalización sincrónica instantánea en presencia de triggers diferidos externos que compitan con pausas de transporte.

@@ -127,6 +127,21 @@ class AgentQueryResponse(BaseModel):
     pending_approval_id: str | None = None
     tokens_estimated: bool = False
     unknown_consumption: bool = False
+    operation_id: str | None = None
+    operation_status: str | None = None
+
+
+class OperationStatusResponse(BaseModel):
+    operation_id: UUID
+    operation_type: str
+    status: Literal["PENDING", "COMMITTED", "ABORTED", "UNKNOWN"]
+    target_id: str | None = None
+    idempotency_key: str | None = None
+    result_payload: dict | None = None
+    error_message: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    reconciled: bool = False
 
 
 class ApprovalDecisionRequest(BaseModel):

@@ -288,10 +288,34 @@
      - `test_g2_1_a02_legitimate_commits_within_deadline`: confirma que transacciones legítimas dentro del plazo persisten `CHANGED` sin demoras (**PASSED**).
      - `test_g2_1_a02_cases_61_64_scheduling_delay`: verifica la resistencia ante pausas de 0.13 s (**PASSED**).
      - `test_g2_1_a02_active_conn_cancellation_on_slow_worker`: verifica cancelación de workers lentos y tipo de excepción `TimeoutError` (**PASSED**).
+### Bloque G2.1.6 — Rediseño del Contrato Transaccional A-02 y Registro Durable (`docs/auditoria_codex_g2_1_5_cdc646b.md`) completado (2026-11-03)
+- **Detalle completo por hallazgo, diagnóstico, corrección, pruebas adversariales y límites**: documentado en la sección 13 de [`docs/remediacion_g2_1.md`](remediacion_g2_1.md).
+- **Cierres aplicados**:
+  1. **`A-02` (Eliminación de falsos rollbacks post-commit y estados unívocos `COMMITTED`, `ABORTED`, `PENDING`, `UNKNOWN`)**:
+     - `backend/app/db.py:checked_commit`: Se eliminó el lanzamiento de `TimeoutError` post-commit. Si el commit nativo retornó éxito, PostgreSQL confirmó la transacción de forma definitiva; mentir al llamador reportando un timeout mientras la base de datos persistió el cambio queda formalmente erradicado.
+     - Registro en vuelo `_IN_FLIGHT_COMMITS` durante la ejecución nativa de commit.
+     - `backend/app/agent.py`: Cuando el supervisor agota su plazo de espera mientras la transacción está en confirmación nativa, levanta `OperationPendingError` con `status="PENDING"` e identificador durable, sin presumir rollback ficticio ni cancelar la conexión que está confirmando.
+  2. **Registro durable de operaciones e idempotencia (`operation_records`)**:
+     - Migración `backend/migrations/004_operation_records.sql` con tabla `operation_records`: `operation_id UUID PRIMARY KEY`, `idempotency_key`, `operation_type`, `target_id`, `status CHECK ('PENDING', 'COMMITTED', 'ABORTED', 'UNKNOWN')`, `proposed_payload`, `result_payload`, `backend_pid`, `created_at`, `updated_at`.
+     - `register_operation_intent`: Registra la intención durablemente en autocommit antes de ejecutar.
+     - En `checked_commit`: Actualización atómica de estado a `COMMITTED` dentro de la transacción protegida por `SAVEPOINT op_rec_sp`.
+     - Idempotencia en herramientas críticas (`tool_proponer_actualizacion_critica`): retornos consistentes ante reintentos con la misma clave de idempotencia sin duplicar solicitudes en `pending_approvals`.
+  3. **Normalización determinista de excepciones de infraestructura**:
+     - `backend/app/db.py:is_deadline_cancellation`: `AdminShutdown` y SQLSTATE `57P01` son explícitamente excluidos de cancelaciones de plazo, garantizando que terminaciones de backend por administrador o caídas de infraestructura no se disfracen de `TimeoutError` ni activen el guardrail `TIMEOUT`.
+  4. **Reconciliación y Endpoint Público**:
+     - `backend/app/db.py:reconcile_operation`: Inspecciona el `backend_pid` en `pg_stat_activity` y el recurso objetivo para resolver deterministamente operaciones `PENDING` a `COMMITTED` o `ABORTED`.
+     - `backend/app/main.py`: Endpoint `GET /api/operations/{operation_id}` y adaptación de respuesta en `/api/agent/query` con `guardrail_triggered="OPERATION_PENDING"` para trazabilidad ciudadana.
+  5. **Pruebas permanentes de regresión**:
+     - `test_g2_1_6_admin_shutdown_not_masked_as_timeout`: `pg_terminate_backend` (57P01) preservado como error administrativo (**PASSED**).
+     - `test_g2_1_6_in_flight_commit_returns_operation_pending_on_supervisor_timeout`: supervisor reporta `PENDING` en commit en vuelo y resuelve a `ABORTED` (**PASSED**).
+     - `test_g2_1_6_clock_offset_cases_102_109_truthful_pending_and_committed`: casos 102/109 con desfase de reloj (+100 ms) reportan verazmente `PENDING` al llamador y persisten `COMMITTED` en BD (**PASSED**).
+     - `test_g2_1_6_idempotent_proposal_replay`: idempotencia sin duplicados en `pending_approvals` (**PASSED**).
+     - `test_g2_1_6_reconciliation_of_disconnected_operation`: reconciliación determinista de operaciones huérfanas (**PASSED**).
+     - `test_g2_1_6_api_endpoint_operations_status`: API `GET /api/operations/{operation_id}` (**PASSED**).
 - **Verificación oficial de la suite completa en PostgreSQL 17 real (`civia-api-1`)**:
   - `docker exec civia-api-1 pytest tests -m "not live"`:
-    - **`92 PASSED, 1 deselected`** (100% de éxito, 0 fallos, 1 warning en 13.08 s).
-    - `test_audit_g2_1_remediation.py`: 34/34 passed (incluyendo los 3 nuevos tests de regresión A-02).
+    - **`98 PASSED, 1 deselected`** (100% de éxito, 0 fallos, 1 warning en 15.24 s).
+    - `test_audit_g2_1_remediation.py`: 40/40 passed (incluyendo los 6 nuevos tests G2.1.6).
     - `test_audit_g2_resilience.py`: 23/23 passed.
     - `test_audit_g1_security.py`: 14/14 passed.
     - `test_ai_and_agent.py`: 13/13 passed (1 deselected live).

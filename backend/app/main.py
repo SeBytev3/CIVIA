@@ -8,13 +8,18 @@ from typing import Any
 import uuid
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, File, Form, Header, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 
-from app.agent import decide_pending_approval, list_pending_approvals, run_civia_agent
+from app.agent import (
+    OperationPendingError,
+    decide_pending_approval,
+    list_pending_approvals,
+    run_civia_agent,
+)
 from app.ai_router import (
     classify_evidence_with_router,
     get_all_circuit_states,
@@ -25,7 +30,12 @@ from app.ai_router import (
     transcribe_audio_optional,
 )
 from app.config import is_strong_admin_token, settings, validate_admin_token_or_raise
-from app.db import check_db_health, run_migrations
+from app.db import (
+    check_db_health,
+    get_operation_record,
+    reconcile_operation,
+    run_migrations,
+)
 from app.observability import get_observability_summary
 from app.repository import (
     confirm_report_category,
@@ -43,6 +53,7 @@ from app.schemas import (
     AgentQueryResponse,
     ApprovalDecisionRequest,
     FaultInjectionRequest,
+    OperationStatusResponse,
     ReportConfirmRequest,
     ReportListResponse,
     ReportPublicResponse,
@@ -543,6 +554,22 @@ def query_civia_agent(request: Request, payload: AgentQueryRequest):
             tool_timeout_seconds=payload.tool_timeout_seconds or 4.0,
             total_timeout_seconds=payload.total_timeout_seconds,
         )
+    except OperationPendingError as exc:
+        return {
+            "answer": "La operación transaccional quedó pendiente de confirmación en base de datos. Puede consultar su estado con el identificador de operación.",
+            "trace_group_id": str(uuid.uuid4()),
+            "tools_invoked": [],
+            "iterations_used": 1,
+            "max_iterations": payload.max_iterations or settings.AGENT_MAX_ITERATIONS,
+            "total_tokens_used": 0,
+            "max_tokens_budget": payload.max_tokens_budget or settings.AGENT_MAX_TOKENS,
+            "latency_ms": int((payload.total_timeout_seconds or settings.AI_TIMEOUT_SECONDS) * 1000),
+            "guardrail_triggered": "OPERATION_PENDING",
+            "requires_human_approval": False,
+            "pending_approval_id": None,
+            "operation_id": str(exc.operation_id) if exc.operation_id else None,
+            "operation_status": exc.status,
+        }
     except TimeoutError:
         return {
             "answer": "El agente no pudo completar el procesamiento dentro del límite de tiempo asignado (deadline agotado).",
@@ -556,6 +583,8 @@ def query_civia_agent(request: Request, payload: AgentQueryRequest):
             "guardrail_triggered": "TIMEOUT",
             "requires_human_approval": False,
             "pending_approval_id": None,
+            "operation_id": None,
+            "operation_status": None,
         }
     return {
         "answer": res["answer"],
@@ -569,7 +598,30 @@ def query_civia_agent(request: Request, payload: AgentQueryRequest):
         "guardrail_triggered": res.get("guardrail_triggered"),
         "requires_human_approval": res.get("requires_human_approval", False),
         "pending_approval_id": res.get("pending_approval_id"),
+        "operation_id": res.get("operation_id"),
+        "operation_status": res.get("operation_status"),
     }
+
+
+@app.get("/api/operations/{operation_id}", response_model=OperationStatusResponse)
+def get_operation_status(operation_id: UUID) -> OperationStatusResponse:
+    rec = get_operation_record(operation_id)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Operación no encontrada.")
+    if rec.get("status") == "PENDING":
+        rec = reconcile_operation(operation_id)
+    return OperationStatusResponse(
+        operation_id=rec["operation_id"],
+        operation_type=rec["operation_type"],
+        status=rec["status"],
+        target_id=rec.get("target_id"),
+        idempotency_key=rec.get("idempotency_key"),
+        result_payload=rec.get("result_payload"),
+        error_message=rec.get("error_message"),
+        created_at=rec["created_at"],
+        updated_at=rec["updated_at"],
+        reconciled=rec.get("reconciled", False),
+    )
 
 
 @app.get("/api/admin/observability", dependencies=[Depends(verify_admin_token)])
