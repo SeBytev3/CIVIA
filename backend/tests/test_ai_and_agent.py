@@ -58,21 +58,6 @@ def hermetic_multimodal_adapter_fixture(monkeypatch):
     monkeypatch.setattr(ai_router_module, "_call_groq_multimodal", _mock_multimodal)
 
 
-@pytest.fixture(autouse=True)
-def guard_no_external_network_calls(monkeypatch):
-    """Bloquea incondicionalmente cualquier conexión HTTP hacia proveedores externos en pruebas herméticas."""
-    import httpx
-    orig_send = httpx.Client.send
-
-    def guarded_send(self, request, *args, **kwargs):
-        host = getattr(request.url, "host", "")
-        if host in ("generativelanguage.googleapis.com", "api.groq.com"):
-            raise RuntimeError(f"Intento de llamada HTTP externa no permitida hacia {host} en prueba hermética.")
-        return orig_send(self, request, *args, **kwargs)
-
-    monkeypatch.setattr(httpx.Client, "send", guarded_send)
-
-
 @pytest.fixture(scope="module", autouse=True)
 def setup_phase_d_db():
     settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)

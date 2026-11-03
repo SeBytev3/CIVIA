@@ -557,6 +557,7 @@ def classify_evidence_with_router(
     trace_group_id: UUID | None = None,
     total_timeout_override: float | None = None,
     token_tracker: Any = None,
+    token_reservation: Any = None,
     already_reserved: int = 0,
 ) -> tuple[AIAnalysisContract | None, dict[str, Any]]:
     """
@@ -603,6 +604,7 @@ def classify_evidence_with_router(
     accumulated_completion_tokens = 0
     has_unknown_consumption = False
     insufficient_budget = False
+    pending_initial_reservation = token_reservation
 
     for idx, node in enumerate(chain):
         if insufficient_budget:
@@ -651,17 +653,15 @@ def classify_evidence_with_router(
                 break
 
             # Reserva atómica previa para este intento individual (M-02)
-            reserved_this_try = False
-            est_call_tokens = est_attempt_tokens
-            if already_reserved > 0 and attempt_global == 0:
-                reserved_this_try = True
-                est_call_tokens = already_reserved
-                already_reserved = 0
+            active_reservation = None
+            if attempt_global == 0 and pending_initial_reservation is not None:
+                active_reservation = pending_initial_reservation
+                pending_initial_reservation = None
             elif eff_tracker is not None:
-                if not eff_tracker.try_reserve(est_attempt_tokens):
+                active_reservation = eff_tracker.try_reserve(est_attempt_tokens)
+                if not active_reservation:
                     insufficient_budget = True
                     break
-                reserved_this_try = True
 
             attempt_global += 1
             t0 = time.perf_counter()
@@ -694,28 +694,26 @@ def classify_evidence_with_router(
                 if in_tok > 0 or out_tok > 0:
                     accumulated_prompt_tokens += in_tok
                     accumulated_completion_tokens += out_tok
-                    if eff_tracker is not None and reserved_this_try:
-                        eff_tracker.reconcile_usage(
-                            reserved=est_call_tokens,
+                    if active_reservation is not None:
+                        active_reservation.reconcile(
                             actual_prompt=in_tok,
                             actual_completion=out_tok,
                             estimated=False,
                             unknown=False,
                         )
-                        reserved_this_try = False
+                        active_reservation = None
                 else:
                     has_unknown_consumption = True
                     accumulated_prompt_tokens += (est_prompt_tokens + est_image_tokens)
                     accumulated_completion_tokens += est_output_tokens
-                    if eff_tracker is not None and reserved_this_try:
-                        eff_tracker.reconcile_usage(
-                            reserved=est_call_tokens,
+                    if active_reservation is not None:
+                        active_reservation.reconcile(
                             actual_prompt=est_prompt_tokens + est_image_tokens,
                             actual_completion=est_output_tokens,
                             estimated=True,
                             unknown=True,
                         )
-                        reserved_this_try = False
+                        active_reservation = None
 
                 # Post-call deadline verification: reject if call finished outside deadline
                 post_elapsed = time.perf_counter() - t_start
@@ -767,12 +765,22 @@ def classify_evidence_with_router(
                 }
 
             except AIProviderError as exc:
-                if in_tok == 0 and out_tok == 0:
-                    has_unknown_consumption = True
-                    if eff_tracker is not None and reserved_this_try:
-                        eff_tracker.release_reservation(est_call_tokens)
-                        eff_tracker.has_unknown_consumption = True
-                        reserved_this_try = False
+                if active_reservation is not None:
+                    if in_tok > 0 or out_tok > 0:
+                        accumulated_prompt_tokens += in_tok
+                        accumulated_completion_tokens += out_tok
+                        active_reservation.reconcile(
+                            actual_prompt=in_tok,
+                            actual_completion=out_tok,
+                            estimated=False,
+                            unknown=False,
+                        )
+                    else:
+                        active_reservation.release()
+                        has_unknown_consumption = True
+                        if eff_tracker is not None:
+                            eff_tracker.has_unknown_consumption = True
+                    active_reservation = None
 
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_failure(exc.code)
@@ -807,12 +815,22 @@ def classify_evidence_with_router(
                 backoff = min(0.6, 0.15 * (2**node_try) + random.uniform(0.01, 0.08))
                 time.sleep(backoff)
             except Exception as exc:
-                if in_tok == 0 and out_tok == 0:
-                    has_unknown_consumption = True
-                    if eff_tracker is not None and reserved_this_try:
-                        eff_tracker.release_reservation(est_call_tokens)
-                        eff_tracker.has_unknown_consumption = True
-                        reserved_this_try = False
+                if active_reservation is not None:
+                    if in_tok > 0 or out_tok > 0:
+                        accumulated_prompt_tokens += in_tok
+                        accumulated_completion_tokens += out_tok
+                        active_reservation.reconcile(
+                            actual_prompt=in_tok,
+                            actual_completion=out_tok,
+                            estimated=False,
+                            unknown=False,
+                        )
+                    else:
+                        active_reservation.release()
+                        has_unknown_consumption = True
+                        if eff_tracker is not None:
+                            eff_tracker.has_unknown_consumption = True
+                    active_reservation = None
 
                 dt_ms = int((time.perf_counter() - t0) * 1000)
                 cb.record_failure("UNEXPECTED_ERROR")
@@ -831,11 +849,15 @@ def classify_evidence_with_router(
                 )
                 break
             finally:
-                if eff_tracker is not None and reserved_this_try:
-                    eff_tracker.release_reservation(est_call_tokens)
-                    reserved_this_try = False
+                if active_reservation is not None and getattr(active_reservation, "is_active", False):
+                    active_reservation.release()
+                    active_reservation = None
 
         provider_switches += 1
+
+    if pending_initial_reservation is not None and getattr(pending_initial_reservation, "is_active", False):
+        pending_initial_reservation.release()
+        pending_initial_reservation = None
 
     dt_total = int((time.perf_counter() - t_start) * 1000)
     total_acc = accumulated_prompt_tokens + accumulated_completion_tokens

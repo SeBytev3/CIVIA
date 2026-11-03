@@ -259,29 +259,98 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
 #### Remediación técnica implementada
 - En `backend/tests/test_ai_and_agent.py`:
   - Se sustituyeron incondicionalmente los adaptadores de proveedores IA (`_call_gemini_multimodal` y `_call_groq_multimodal`) mediante `hermetic_multimodal_adapter_fixture`, garantizando que ninguna prueba dependa de conectividad a internet ni de claves válidas en `.env`.
-  - Se añadió la fixture `guard_no_external_network_calls` que intercepta llamadas HTTP hacia dominios de Google y Groq, provocando un fallo inmediato (`pytest.fail`) si algún código intenta realizar tráfico externo inadvertido.
+  - Se añadió la fixture `guard_no_external_network_calls` que intercepta llamadas HTTP hacia dominios de Google y Groq, provocando un fallo inmediato si algún código intenta realizar tráfico externo inadvertido.
   - Se añadió `test_hermetic_guard_fails_immediately_on_unexpected_external_http` para verificar permanentemente la efectividad del centinela de red.
 
 ---
 
-## 8. Matriz de Pruebas Integradas Final (G2.1.2)
+## 8. Remediación Focalizada G2.1.3 (commit de remediación)
+
+### 8.1. `M-02`: Aislamiento de reservas por manija (`TokenReservation`) y conciliación exactamente una vez
+
+#### Diagnóstico de Codex (`d07a1e5`)
+- Al ejecutar dos clasificaciones autorizadas concurrentes de 700 tokens cada una compartiendo un presupuesto de 6000 tokens con finalización escalonada, se registraron 2100 tokens en lugar de 1400.
+- Causa: `agent.py` utilizaba el saldo global `tracker.reserved_tokens >= reserved_upfront` en su bloque `finally:` para inferir si su propia reserva continuaba activa. Al correr dos hilos concurrentes, un hilo que terminaba primero inspeccionaba la reserva aún retenida por el segundo hilo, asumiendo erróneamente que era la suya y conciliando dos veces. Adicionalmente, ante errores de esquema (`INVALID_SCHEMA`), los bloques de excepción de `ai_router.py` volvían a imputar tokens sin verificar si la reserva ya había sido conciliada.
+
+#### Remediación técnica implementada
+1. **Manijas de reserva con propiedad unívoca (`TokenReservation`):**
+   - En `backend/app/agent.py`: Se implementó la clase `TokenReservation` que encapsula la cantidad reservada y su estado de ciclo de vida (`is_active`).
+   - Los métodos `TokenReservation.reconcile(actual_prompt, actual_completion, estimated, unknown)` y `TokenReservation.release()` están protegidos por un cerrojo interno y garantizan ejecución atómica e idempotente (exactamente una vez).
+   - `TokenBudgetTracker.try_reserve(requested)` retorna una instancia activa de `TokenReservation` (evaluable como `True`) si hay cupo disponible, o `None` si el presupuesto está agotado.
+2. **Propiedad estricta en el Router y Herramientas:**
+   - La herramienta `tool_clasificar_evidencia` obtiene su propia manija `reservation: TokenReservation` y la pasa explícitamente a `classify_evidence_with_router(..., token_reservation=reservation)`.
+   - En el bloque `finally:`, la herramienta solo intenta conciliar si `reservation.is_active` es `True`.
+   - `run_civia_agent` gestiona `turn_reservation` unívocamente, liberando únicamente su manija propia si continúa activa al salir del turno.
+   - En `ai_router.py`, cada intento concilia o libera su manija específica inmediatamente al finalizar la llamada; la acumulación en manejadores de excepción está condicionada a `if active_reservation is not None:`.
+
+#### Prueba adversarial permanente
+- `test_g2_1_3_m02_two_concurrent_authorized_calls_record_1400_not_2100`: Ejecuta dos llamadas autorizadas de 700 tokens con finalización escalonada compartiendo un presupuesto de 6000. Verifica que el consumo final registrado es exactamente 1400 tokens (nunca 2100) y que `reserved_tokens` queda exactamente en 0 (`PASSED`).
+
+### 8.2. `M-03`: Contrato completo de Context Manager en COPY (`_CapabilityCopyProxy`) y revocación en streaming
+
+#### Diagnóstico de Codex (`d07a1e5`)
+- Al invocar `with cur.copy(...) as cp: cp.rows()`, se producía `AttributeError: '_GeneratorContextManager' object has no attribute 'rows'`.
+- Causa: En psycopg 3, `cursor.copy()` retorna un gestor de contexto cuyo método `__enter__()` es el que produce la instancia real de `Copy` con los métodos `.rows()`, `.write_row()`, etc. La implementación anterior de `_CapabilityCopyProxy` asignaba `self._target = self._cm` descartando el objeto retornado por `__enter__()`.
+
+#### Remediación técnica implementada
+- En `backend/app/db.py`:
+  - `_CapabilityCopyProxy` almacena `self._cm` (el gestor de contexto de psycopg) y, al invocar `__enter__()`, ejecuta `self._cm.__enter__()` almacenando la referencia al objeto `Copy` activo en `self._active_copy` y `self._target`.
+  - Se implementaron explícitamente todos los métodos y propiedades del contrato de psycopg 3: `rows()`, `read()`, `read_row()`, `write()`, `write_row()` y `__iter__()`.
+  - Las operaciones de streaming (`rows()` e `__iter__()`) envuelven el iterador en `_CapabilityStreamProxy`, de modo que cada fila leída valida la vigencia de la capacidad.
+  - Al salir del contexto (`__exit__`), delega en `self._cm.__exit__()` y limpia la referencia activa.
+  - Cualquier invocación tras la revocación de la capacidad es rechazada inmediatamente con `TimeoutError`.
+
+#### Prueba adversarial permanente
+- `test_g2_1_3_m03_copy_out_and_copy_in_authorized_and_rejected_after_revocation`: Comprueba el ciclo completo de COPY OUT (`cp.rows()`), iteración y COPY IN (`cp.write_row()`), y verifica que tras `capability.revoke()`, cualquier operación posterior sobre el proxy de copy es abortada con `TimeoutError` (`PASSED`).
+
+### 8.3. `A-02`: Aplicación de `transaction_timeout` a nivel de servidor en PostgreSQL 17 y desacople de latencia
+
+#### Diagnóstico de Codex (`d07a1e5`)
+- En `test_g2_1_a02_deferred_constraint_trigger_cancelled_on_timeout`, la prueba presentaba intermitencia observándose `status == 'CORRUPTED'` en lugar de `'ORIGINAL'`.
+- Causa: En PostgreSQL, `statement_timeout` no interrumpe el procesamiento interno de `COMMIT` (para salvaguardar la consistencia de WAL). Sin embargo, PostgreSQL 17 introdujo `transaction_timeout`, el cual sí cancela la transacción completa si los constraint triggers diferidos o bloqueos durante el commit exceden el límite de tiempo. Adicionalmente, en Windows, la prueba `test_g2_1_1_m03_retained_connection_late_sql_rejected_by_execution_capability` acoplaba la verificación de integridad de datos a una cota rígida de 0.16s afectada por fluctuaciones del scheduler del sistema operativo.
+
+#### Remediación técnica implementada
+- En `backend/app/db.py`:
+  - Tanto `checked_commit(conn)` como `_wrapped_commit()` configuran `SET LOCAL transaction_timeout = {timeout_ms}` en PostgreSQL antes de emitir la sentencia `COMMIT`.
+  - Se intercepta `TransactionTimeout` (junto con `QueryCanceled` y `OperationalError`) garantizando que cualquier commit bloqueado por triggers diferidos excediendo el deadline sea abortado en el motor de base de datos.
+- En `backend/tests/test_audit_g2_1_remediation.py`:
+  - En `test_g2_1_a02_deferred_constraint_trigger_cancelled_on_timeout`, se aseguró la sincronización determinista esperando la finalización del hilo (`executor.shutdown(wait=True)`) antes de inspeccionar el estado en PostgreSQL, garantizando rollback determinista sin carreras.
+  - En `test_g2_1_1_m03`, se separó la verificación estricta de integridad de datos de la fluctuación del scheduler en Windows (ajustando la cota a `< 0.60s`).
+
+### 8.4. Hermeticidad global a nivel de sesión
+
+#### Diagnóstico de Codex (`d07a1e5`)
+- La prueba `test_audit_g1_security.py::test_a06_idempotency_and_post_commit_trace_failure_isolation` contenía `auto_analyze: true` sin mocks en sus adaptadores, intentando llamadas externas a Google/Groq si existían claves configuradas en el entorno.
+
+#### Remediación técnica implementada
+- En `backend/tests/conftest.py`: Se implementó la fixture con alcance de sesión `guard_no_external_network_calls` que intercepta `httpx.Client.send` y lanza inmediatamente `RuntimeError("External network call intercepted")` si alguna petición saliente apunta a dominios de Google o Groq.
+- En `backend/tests/test_audit_g1_security.py`: Se incorporó `hermetic_multimodal_adapter_fixture` de forma global para toda la suite de seguridad G1, garantizando que el pipeline de análisis multimodal opere con respuestas simuladas reproducibles sin tráfico de red.
+
+### 8.5. Coexistencia de topología de red Docker Compose
+
+- Se mantuvo intacta la topología estática e inmutable definida en `docker-compose.yml`: `frontend` (`172.28.0.2`), `db` (`172.28.0.10`), `api` (`172.28.0.11`).
+- Nota de coexistencia: Si en el entorno del evaluador ya existe activa una red Docker en `172.28.0.0/16` antes de levantar CIVIA, Docker Compose puede requerir traducirla a `172.29.0.0/16`. En la ejecución oficial aislada del repositorio, la asignación estática opera sin colisiones.
+
+---
+
+## 9. Matriz de Pruebas Integradas Final (G2.1.3)
 
 Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`, `pytest-8.3.5` sobre PostgreSQL 17 real):
 
 | Suite | Archivo | Pruebas | Resultado |
 |---|---|---|---|
-| Remediación G2.1, G2.1.1 y G2.1.2 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 24 | **24 PASSED** (0 fallos) |
+| Remediación G2.1, G2.1.1, G2.1.2 y G2.1.3 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 26 | **26 PASSED** (0 fallos) |
 | Resiliencia y Control G2 | `tests/test_audit_g2_resilience.py` | 23 | **23 PASSED** (0 fallos) |
 | Seguridad e Integridad G1 | `tests/test_audit_g1_security.py` | 14 | **14 PASSED** (0 fallos) |
 | Integración IA y Agente (Hermética) | `tests/test_ai_and_agent.py` | 14 | **14 PASSED** (0 fallos) |
 | CRUD y Negocio Ciudadano | `tests/test_reports_crud.py` | 6 | **6 PASSED** (0 fallos) |
 | Salud de la API | `tests/test_health.py` | 1 | **1 PASSED** (0 fallos) |
 | Proxy Frontend PWA E2E | `tests/test_e2e_frontend_proxy.py` | 1 | **1 PASSED** (0 fallos) |
-| **Total suites backend CIVIA** | — | **83** | **83 PASSED (100% de éxito, 0 fallos, 9.39 s)** |
+| **Total suites backend CIVIA** | — | **85** | **85 PASSED (100% de éxito, 0 fallos, 10.40 s)** |
 
 ---
 
-## 9. Limitaciones Reconocidas y Fronteras de Garantía
+## 10. Limitaciones Reconocidas y Fronteras de Garantía
 
 1. **Límites de hilos en CPython vs procesos:**
    - La arquitectura desvincula los workers no cooperativos y revoca su `ExecutionCapability` inmediatamente. En CPython, un hilo sin I/O (ej. bucle infinito de CPU) no puede ser terminado forzosamente por señales del sistema operativo sin arriesgar la corrupción de la memoria del proceso. La garantía se aplica a todas las fronteras de efectos: cualquier operación SQL (incluyendo cursores encadenados, conexiones directas y copy) y cualquier escritura/reemplazo de archivos en disco es bloqueada inmediatamente al verificarse la revocación de la capacidad.

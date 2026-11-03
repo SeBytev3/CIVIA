@@ -95,3 +95,26 @@ def initialize_isolated_test_db():
     yield
     cleanup_tracked_test_records()
     shutil.rmtree(_test_upload_dir, ignore_errors=True)
+
+
+@pytest.fixture(autouse=True)
+def guard_no_external_network_calls(monkeypatch, request):
+    """
+    Bloquea incondicionalmente cualquier conexión HTTP hacia proveedores externos
+    (Google Gemini / Groq) en toda la suite ordinaria de pruebas (G2.1.3).
+    """
+    if "live" in request.keywords:
+        yield
+        return
+
+    import httpx
+    orig_send = httpx.Client.send
+
+    def guarded_send(self, req, *args, **kwargs):
+        host = getattr(req.url, "host", "")
+        if host in ("generativelanguage.googleapis.com", "api.groq.com"):
+            raise RuntimeError(f"Intento de llamada HTTP externa no permitida hacia {host} en prueba hermética.")
+        return orig_send(self, req, *args, **kwargs)
+
+    monkeypatch.setattr(httpx.Client, "send", guarded_send)
+    yield

@@ -112,10 +112,11 @@ def atomic_publish_file(src: Path | str, dst: Path | str) -> None:
 
 
 class _CapabilityCopyProxy:
-    """Proxy para objetos Copy de psycopg que valida la capacidad de ejecución."""
+    """Proxy para operaciones Copy de psycopg que valida la capacidad de ejecución."""
 
     def __init__(self, copy_obj: Any, cap: ExecutionCapability | None) -> None:
-        self._copy_obj = copy_obj
+        self._cm = copy_obj
+        self._active_copy = copy_obj if not hasattr(copy_obj, "__enter__") else None
         self._cap = cap
 
     def _check(self, op: str = "operación copy") -> None:
@@ -123,44 +124,54 @@ class _CapabilityCopyProxy:
             self._cap.check_or_raise(op)
         check_execution_capability_or_raise(op)
 
+    @property
+    def _target(self) -> Any:
+        return self._active_copy if self._active_copy is not None else self._cm
+
     def read(self, *args: Any, **kwargs: Any) -> Any:
         self._check("lectura copy")
-        return self._copy_obj.read(*args, **kwargs)
+        return self._target.read(*args, **kwargs)
 
     def read_row(self, *args: Any, **kwargs: Any) -> Any:
         self._check("lectura copy")
-        return self._copy_obj.read_row(*args, **kwargs)
+        return self._target.read_row(*args, **kwargs)
 
     def rows(self, *args: Any, **kwargs: Any) -> Any:
         self._check("filas copy")
-        return self._copy_obj.rows(*args, **kwargs)
+        raw_rows = self._target.rows(*args, **kwargs)
+        return _CapabilityStreamProxy(raw_rows, self._cap)
 
     def write(self, *args: Any, **kwargs: Any) -> Any:
         self._check("escritura copy")
-        return self._copy_obj.write(*args, **kwargs)
+        return self._target.write(*args, **kwargs)
 
     def write_row(self, *args: Any, **kwargs: Any) -> Any:
         self._check("escritura copy")
-        return self._copy_obj.write_row(*args, **kwargs)
+        return self._target.write_row(*args, **kwargs)
 
     def __iter__(self) -> Any:
         self._check("iteración copy")
-        return iter(self._copy_obj)
+        return _CapabilityStreamProxy(iter(self._target), self._cap)
 
     def __enter__(self) -> "_CapabilityCopyProxy":
         self._check("apertura copy")
-        self._copy_obj.__enter__()
+        if hasattr(self._cm, "__enter__"):
+            self._active_copy = self._cm.__enter__()
+        else:
+            self._active_copy = self._cm
         return self
 
     def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
-        return self._copy_obj.__exit__(exc_type, exc_val, exc_tb)
+        if hasattr(self._cm, "__exit__"):
+            return self._cm.__exit__(exc_type, exc_val, exc_tb)
+        return None
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._copy_obj, name)
+        return getattr(self._target, name)
 
 
 class _CapabilityStreamProxy:
-    """Proxy para streams/iteradores de cursores psycopg."""
+    """Proxy para streams/iteradores de cursores y copy de psycopg que valida cada iteración."""
 
     def __init__(self, stream_obj: Any, cap: ExecutionCapability | None) -> None:
         self._stream_obj = stream_obj
@@ -349,12 +360,30 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
             except Exception:
                 pass
             raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
+        
+        timeout_ms = max(1, int(rem_sec * 1000))
+        # Aplicar límites server-side deterministas directamente en PostgreSQL antes de emitir COMMIT (A-02)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SET LOCAL transaction_timeout = {timeout_ms};")
+        except Exception:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SET LOCAL statement_timeout = {timeout_ms};")
+            except Exception:
+                pass
+
         timer = threading.Timer(rem_sec, conn.cancel)
         timer.daemon = True
         timer.start()
         try:
             conn.commit()
-        except (psycopg.errors.QueryCanceled, psycopg.errors.AdminShutdown, psycopg.OperationalError) as exc:
+        except (
+            psycopg.errors.QueryCanceled,
+            psycopg.errors.AdminShutdown,
+            psycopg.OperationalError,
+            getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
+        ) as exc:
             try:
                 conn.rollback()
             except Exception:
@@ -422,12 +451,29 @@ def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Conne
                 except Exception:
                     pass
                 raise TimeoutError("Operación abortada por expiración del deadline antes de commit.")
+            
+            timeout_ms_commit = max(1, int(rem_sec_commit * 1000))
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SET LOCAL transaction_timeout = {timeout_ms_commit};")
+            except Exception:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(f"SET LOCAL statement_timeout = {timeout_ms_commit};")
+                except Exception:
+                    pass
+
             timer = threading.Timer(rem_sec_commit, conn.cancel)
             timer.daemon = True
             timer.start()
             try:
                 return orig_commit()
-            except (psycopg.errors.QueryCanceled, psycopg.errors.AdminShutdown, psycopg.OperationalError) as exc:
+            except (
+                psycopg.errors.QueryCanceled,
+                psycopg.errors.AdminShutdown,
+                psycopg.OperationalError,
+                getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
+            ) as exc:
                 try:
                     conn.rollback()
                 except Exception:

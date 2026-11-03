@@ -49,6 +49,60 @@ logger = logging.getLogger("civia.agent")
 _ON_APPROVAL_CREATED_HOOK: Callable[[UUID], None] | None = None
 
 
+class TokenReservation:
+    """
+    Representa una reserva de tokens individual e identificable (M-02 G2.1.3).
+    Garantiza conciliación o liberación exactamente una vez, evitando colisiones
+    o doble facturación entre ejecuciones concurrentes.
+    """
+
+    def __init__(self, reservation_id: str, amount: int, tracker: "TokenBudgetTracker") -> None:
+        self.id = reservation_id
+        self.amount = amount
+        self.tracker = tracker
+        self.is_active = True
+        self._lock = threading.Lock()
+
+    def __bool__(self) -> bool:
+        return True
+
+    def reconcile(
+        self,
+        actual_prompt: int,
+        actual_completion: int,
+        estimated: bool = False,
+        unknown: bool = False,
+    ) -> bool:
+        """
+        Concilia exactamente una vez esta reserva individual con el consumo observado.
+        Retorna True si la conciliación se aplicó, False si ya estaba inactiva.
+        """
+        with self._lock:
+            if not self.is_active:
+                return False
+            self.is_active = False
+        self.tracker._reconcile_reservation(
+            self.amount,
+            actual_prompt,
+            actual_completion,
+            estimated=estimated,
+            unknown=unknown,
+        )
+        return True
+
+    def release(self) -> bool:
+        """
+        Libera exactamente una vez esta reserva individual sin imputar consumo.
+        Retorna True si se liberó, False si ya estaba inactiva.
+        """
+        with self._lock:
+            if not self.is_active:
+                return False
+            self.is_active = False
+        self.tracker._release_reservation(self.amount)
+        return True
+
+
 class TokenBudgetTracker:
     def __init__(self, max_budget: int) -> None:
         self.max_budget = max_budget
@@ -60,24 +114,24 @@ class TokenBudgetTracker:
         self.has_unknown_consumption = False
         self._lock = threading.Lock()
 
-    def try_reserve(self, requested: int) -> bool:
+    def try_reserve(self, requested: int) -> TokenReservation | None:
         """
         Intenta reservar atómicamente 'requested' tokens dentro del presupuesto (M-02).
-        Retorna True si hay saldo suficiente y la reserva se registró, False de lo contrario.
+        Retorna un TokenReservation individual si hay saldo suficiente, o None si no hay cupo.
         """
         with self._lock:
             effective_usage = self.total_tokens + self.reserved_tokens
             if (effective_usage + requested) > self.max_budget:
-                return False
+                return None
             self.reserved_tokens += requested
-            return True
+            res_id = uuid.uuid4().hex
+            return TokenReservation(res_id, requested, self)
 
-    def release_reservation(self, reserved: int) -> None:
-        """Libera tokens reservados sin registrar consumo adicional."""
+    def _release_reservation(self, reserved: int) -> None:
         with self._lock:
             self.reserved_tokens = max(0, self.reserved_tokens - reserved)
 
-    def reconcile_usage(
+    def _reconcile_reservation(
         self,
         reserved: int,
         actual_prompt: int,
@@ -85,10 +139,6 @@ class TokenBudgetTracker:
         estimated: bool = False,
         unknown: bool = False,
     ) -> None:
-        """
-        Reconcilia de forma atómica una reserva previa con el consumo real observado (M-02).
-        Libera la reserva y suma el consumo exacto o estimado.
-        """
         with self._lock:
             self.reserved_tokens = max(0, self.reserved_tokens - reserved)
             self.prompt_tokens += max(0, actual_prompt)
@@ -98,6 +148,21 @@ class TokenBudgetTracker:
                 self.tokens_estimated = True
             if unknown:
                 self.has_unknown_consumption = True
+
+    def release_reservation(self, reserved: int) -> None:
+        """Compatibilidad hacia atrás para liberación directa de tokens reservados."""
+        self._release_reservation(reserved)
+
+    def reconcile_usage(
+        self,
+        reserved: int,
+        actual_prompt: int,
+        actual_completion: int,
+        estimated: bool = False,
+        unknown: bool = False,
+    ) -> None:
+        """Compatibilidad hacia atrás para conciliación directa de tokens."""
+        self._reconcile_reservation(reserved, actual_prompt, actual_completion, estimated, unknown)
 
     def record_usage(
         self,
@@ -425,9 +490,10 @@ def tool_clasificar_evidencia(args: dict[str, Any]) -> dict[str, Any]:
     est_total_multimodal = est_input_tokens + est_image_tokens + est_output_tokens
 
     tracker = _ACTIVE_TOKEN_TRACKER.get()
-    reserved_upfront = 0
+    reservation: TokenReservation | None = None
     if tracker is not None:
-        if not tracker.try_reserve(est_total_multimodal):
+        reservation = tracker.try_reserve(est_total_multimodal)
+        if not reservation:
             return {
                 "encontrado": True,
                 "tracking_code": row["tracking_code"],
@@ -436,7 +502,6 @@ def tool_clasificar_evidencia(args: dict[str, Any]) -> dict[str, Any]:
                 "mensaje": f"Presupuesto de tokens del agente insuficiente para clasificación multimodal (requiere ~{est_total_multimodal} tokens, saldo restante {tracker.remaining()}).",
                 "guardrail_triggered": "MAX_TOKENS",
             }
-        reserved_upfront = est_total_multimodal
 
     try:
         contract, meta = classify_evidence_with_router(
@@ -449,23 +514,23 @@ def tool_clasificar_evidencia(args: dict[str, Any]) -> dict[str, Any]:
             audio_transcript=row.get("audio_transcript"),
             report_id=row["id"],
             token_tracker=tracker,
-            already_reserved=reserved_upfront,
+            token_reservation=reservation,
+            already_reserved=est_total_multimodal if reservation else 0,
         )
     finally:
-        if tracker is not None and reserved_upfront > 0 and tracker.reserved_tokens >= reserved_upfront:
+        if reservation is not None and reservation.is_active:
             p_tok = int(meta.get("prompt_tokens") or 0) if "meta" in locals() else 0
             c_tok = int(meta.get("completion_tokens") or 0) if "meta" in locals() else 0
             if p_tok > 0 or c_tok > 0:
-                tracker.reconcile_usage(
-                    reserved=reserved_upfront,
-                    actual_prompt=p_tok,
-                    actual_completion=c_tok,
+                reservation.reconcile(
+                    p_tok,
+                    c_tok,
                     estimated=False,
                     unknown=bool(meta.get("unknown_consumption", False)),
                 )
             else:
-                tracker.release_reservation(reserved_upfront)
-                if tracker.total_tokens == 0:
+                reservation.release()
+                if tracker is not None and tracker.total_tokens == 0:
                     tracker.record_estimate(est_total_multimodal, is_unknown=True)
 
     if contract is None:
@@ -1044,13 +1109,13 @@ def run_civia_agent(
                     break
 
                 # Reserva atómica para este intento individual (M-02)
-                if not tracker.try_reserve(est_turn_total):
+                turn_reservation = tracker.try_reserve(est_turn_total)
+                if not turn_reservation:
                     guardrail_triggered = "MAX_TOKENS"
                     break
 
                 t_call = time.perf_counter()
                 call_timeout = min(remaining_sec, 6.0)
-                reserved_node_try = True
                 in_tok = 0
                 out_tok = 0
 
@@ -1085,13 +1150,11 @@ def run_civia_agent(
                         out_tok = max(10, int(math.ceil(len(turn_text or "") / 3.0)))
                         est = True
 
-                    tracker.reconcile_usage(
-                        reserved=est_turn_total,
+                    turn_reservation.reconcile(
                         actual_prompt=in_tok,
                         actual_completion=out_tok,
                         estimated=est,
                     )
-                    reserved_node_try = False
                     active_provider = provider
                     active_model = model
                     if idx > 0:
@@ -1119,17 +1182,15 @@ def run_civia_agent(
                     break
                 except AIProviderError as exc:
                     if in_tok > 0 or out_tok > 0:
-                        tracker.reconcile_usage(
-                            reserved=est_turn_total,
+                        turn_reservation.reconcile(
                             actual_prompt=in_tok,
                             actual_completion=out_tok,
                             estimated=False,
                             unknown=False,
                         )
                     else:
-                        tracker.release_reservation(est_turn_total)
+                        turn_reservation.release()
                         tracker.has_unknown_consumption = True
-                    reserved_node_try = False
                     dt_ms = int((time.perf_counter() - t_call) * 1000)
                     cb.record_failure(exc.code)
                     _safe_record_trace(
@@ -1148,17 +1209,15 @@ def run_civia_agent(
                     continue
                 except Exception as exc:
                     if in_tok > 0 or out_tok > 0:
-                        tracker.reconcile_usage(
-                            reserved=est_turn_total,
+                        turn_reservation.reconcile(
                             actual_prompt=in_tok,
                             actual_completion=out_tok,
                             estimated=False,
                             unknown=False,
                         )
                     else:
-                        tracker.release_reservation(est_turn_total)
+                        turn_reservation.release()
                         tracker.has_unknown_consumption = True
-                    reserved_node_try = False
                     dt_ms = int((time.perf_counter() - t_call) * 1000)
                     cb.record_failure("UNEXPECTED_ERROR")
                     _safe_record_trace(
@@ -1176,9 +1235,8 @@ def run_civia_agent(
                     fallback_used = True
                     continue
                 finally:
-                    if reserved_node_try:
-                        tracker.release_reservation(est_turn_total)
-                        reserved_node_try = False
+                    if turn_reservation is not None and getattr(turn_reservation, "is_active", False):
+                        turn_reservation.release()
 
             if not turn_succeeded:
                 if tracker.total_tokens == 0:

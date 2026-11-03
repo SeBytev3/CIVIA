@@ -216,3 +216,32 @@
     - `test_ai_and_agent.py`: 14/14 passed.
     - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
     - Cero regresiones en controles aprobados G1, A-02 o N-02. Cero commits en `main` ni push remoto.
+
+### Bloque G2.1.3 — Cierre de Reserva Concurrente, Contrato COPY, Transaction Timeout y Hermeticidad Global (`docs/auditoria_codex_g2_1_2_d07a1e5.md`) completado (2026-11-02)
+- **Detalle completo por hallazgo, diagnóstico, corrección, pruebas adversariales y límites**: documentado en [`docs/remediacion_g2_1.md`](remediacion_g2_1.md).
+- **Cierres aplicados**:
+  1. **`M-02` (Aislamiento de reservas por manija `TokenReservation` y conciliación exactamente una vez)**:
+     - `backend/app/agent.py`: Se implementó la clase `TokenReservation` con propiedad unívoca y métodos `reconcile()` y `release()` atómicos e idempotentes (`is_active`). `TokenBudgetTracker.try_reserve()` devuelve un objeto `TokenReservation` específico.
+     - `backend/app/agent.py` y `ai_router.py`: `tool_clasificar_evidencia` y `run_civia_agent` operan exclusivamente sobre sus manijas de reserva individuales. En los bloques `finally:`, solo se concilia/libera si la manija propia está activa, eliminando la colisión donde dos clasificaciones concurrentes de 700 tokens con presupuesto compartido de 6000 registraban 2100 tokens en lugar de 1400. En `ai_router.py`, los manejadores de excepción verifican `if active_reservation is not None:` antes de imputar tokens en fallos de esquema.
+     - Prueba permanente `test_g2_1_3_m02_two_concurrent_authorized_calls_record_1400_not_2100` añadida y verificada (`PASSED`).
+  2. **`M-03` (Contrato completo de Context Manager en COPY `_CapabilityCopyProxy` y revocación en streaming)**:
+     - `backend/app/db.py`: `_CapabilityCopyProxy` ahora retiene el generador gestor de contexto de psycopg 3 (`self._cm`) e invoca `__enter__()` produciendo la instancia real de `Copy` con soporte íntegro para `rows()`, `read()`, `read_row()`, `write()`, `write_row()` e `__iter__()`.
+     - Las lecturas por filas delegan en `_CapabilityStreamProxy`, validando la capacidad fila por fila e interrumpiendo con `TimeoutError` si se supera el deadline o se revoca la capacidad.
+     - Prueba permanente `test_g2_1_3_m03_copy_out_and_copy_in_authorized_and_rejected_after_revocation` añadida y verificada (`PASSED`).
+  3. **`A-02` (Aplicación de `transaction_timeout` a nivel de servidor en PostgreSQL 17 y desacople de latencia)**:
+     - `backend/app/db.py`: Tanto `checked_commit(conn)` como `_wrapped_commit()` configuran `SET LOCAL transaction_timeout = {timeout_ms}` en PostgreSQL antes de ejecutar `COMMIT`, asegurando que constraint triggers diferidos lentos sean cancelados directamente por el motor de base de datos con `TransactionTimeout`.
+     - `backend/tests/test_audit_g2_1_remediation.py`: Sincronización determinista con `executor.shutdown(wait=True)` en la prueba de triggers diferidos, y desacople de la verificación de integridad de datos respecto a fluctuaciones del scheduler de hilos en Windows (`< 0.60s`).
+  4. **Hermeticidad global a nivel de sesión**:
+     - `backend/tests/conftest.py`: Fixture de sesión `guard_no_external_network_calls` que intercepta `httpx.Client.send` y lanza `RuntimeError` ante cualquier intento de tráfico hacia dominios de Google o Groq.
+     - `backend/tests/test_audit_g1_security.py`: Incorporado `hermetic_multimodal_adapter_fixture` de forma global para toda la suite de seguridad G1, garantizando que `test_a06` con `auto_analyze: true` no intente llamadas salientes.
+  5. **Coexistencia de red Docker Compose**:
+     - Preservada la topología fija (`frontend` en `172.28.0.2`, `db` en `172.28.0.10`, `api` en `172.28.0.11`).
+- **Verificación oficial de la suite completa en PostgreSQL 17 real (`civia-api-1`)**:
+  - `docker exec civia-api-1 pytest -v`:
+    - **`85 PASSED`** (100% de éxito, 0 fallos en 10.40 s).
+    - `test_audit_g2_1_remediation.py`: 26/26 passed (incluyendo los 2 nuevos tests adversariales G2.1.3).
+    - `test_audit_g2_resilience.py`: 23/23 passed.
+    - `test_audit_g1_security.py`: 14/14 passed.
+    - `test_ai_and_agent.py`: 14/14 passed.
+    - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
+    - Cero regresiones en controles aprobados G1, A-02 o N-02. Cero commits en `main` ni push remoto.

@@ -40,6 +40,25 @@ from tests.conftest import (
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def hermetic_multimodal_adapter_fixture(monkeypatch):
+    """Sustituye adaptadores de IA por mocks herméticos en suite de seguridad G1 (G2.1.3)."""
+    import app.ai_router as ai_router_module
+
+    def _mock_multimodal(*, model: str, api_key: str, prompt_text: str, image_bytes: bytes | None, image_mime: str | None, timeout_sec: float) -> tuple[str, int, int]:
+        payload = {
+            "category": "HUECO",
+            "severity": "ALTA",
+            "confidence": 0.9,
+            "summary": "Hueco detectado en calzada.",
+            "keywords": ["hueco"],
+        }
+        return json.dumps(payload), 450, 85
+
+    monkeypatch.setattr(ai_router_module, "_call_gemini_multimodal", _mock_multimodal)
+    monkeypatch.setattr(ai_router_module, "_call_groq_multimodal", _mock_multimodal)
+
+
 @pytest.fixture(scope="module", autouse=True)
 def setup_g1_audit_db():
     settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
