@@ -129,6 +129,7 @@ class AgentQueryResponse(BaseModel):
     unknown_consumption: bool = False
     operation_id: str | None = None
     operation_status: str | None = None
+    query_token: str | None = None
 
 
 class OperationStatusResponse(BaseModel):

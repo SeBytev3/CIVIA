@@ -531,7 +531,11 @@ def change_report_status(report_id: UUID, payload: ReportStatusUpdateRequest):
     clean_note = (
         sanitize_text(payload.note, field_name="nota de estado", max_len=500, required=False) or None
     )
-    updated = update_report_status(report_id, status=payload.status, note=clean_note)
+    try:
+        updated = update_report_status(report_id, status=payload.status, note=clean_note)
+    except Exception as exc:
+        logger.error("Fallo al actualizar estado de reporte %s: %s", report_id, exc)
+        raise HTTPException(status_code=500, detail="Error interno al actualizar estado del reporte.") from exc
     assert updated is not None
     return row_to_public_dict(updated)
 
@@ -572,6 +576,7 @@ def query_civia_agent(request: Request, payload: AgentQueryRequest):
             "pending_approval_id": None,
             "operation_id": str(exc.operation_id) if exc.operation_id else None,
             "operation_status": exc.status,
+            "query_token": getattr(exc, "query_token", None),
         }
     except TimeoutError:
         return {
@@ -603,6 +608,7 @@ def query_civia_agent(request: Request, payload: AgentQueryRequest):
         "pending_approval_id": res.get("pending_approval_id"),
         "operation_id": res.get("operation_id"),
         "operation_status": res.get("operation_status"),
+        "query_token": res.get("query_token"),
     }
 
 
@@ -611,6 +617,7 @@ def get_operation_status(
     operation_id: UUID,
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
     x_operation_token: str | None = Header(default=None, alias="X-Operation-Token"),
+    x_edit_token: str | None = Header(default=None, alias="X-Edit-Token"),
 ) -> OperationStatusResponse:
     rec = get_operation_record(operation_id)
     if not rec:
@@ -618,7 +625,7 @@ def get_operation_status(
     if rec.get("status") == "PENDING":
         rec = reconcile_operation(operation_id)
 
-    # Determinar si el consultante está autorizado (admin o poseedor del token de consulta de la operación)
+    # Determinar si el consultante está autorizado (admin, poseedor del token de consulta o del edit_token del reporte)
     is_authorized = False
     if x_admin_token:
         try:
@@ -632,15 +639,31 @@ def get_operation_status(
         if hmac.compare_digest(hashed, rec["query_token_hash"]):
             is_authorized = True
 
-    # Minimización de datos: result_payload y detalle interno solo para invocadores autorizados
+    if not is_authorized and x_edit_token and rec.get("target_id"):
+        try:
+            target_report = get_report_raw(UUID(str(rec["target_id"])))
+            if target_report and target_report.get("edit_token_hash"):
+                hashed_edit = hashlib.sha256(x_edit_token.encode("utf-8")).hexdigest()
+                if hmac.compare_digest(hashed_edit, target_report["edit_token_hash"]):
+                    is_authorized = True
+        except Exception:
+            pass
+
+    # Operaciones privadas o administrativas: si no está autorizado, responder 404 para evitar enumeración (G2.1.8)
+    is_private_op = (rec.get("requester_id") != "citizen") or rec.get("operation_type", "").startswith("ADMIN_") or rec.get("operation_type", "").startswith("admin_")
+    if not is_authorized and is_private_op:
+        raise HTTPException(status_code=404, detail="Operación no encontrada.")
+
+    # Minimización de datos: result_payload y error solo para invocadores autorizados
     safe_result = rec.get("result_payload") if is_authorized else None
     safe_error = rec.get("error_message") if is_authorized else None
+    safe_target = rec.get("target_id") if (is_authorized or not is_private_op) else None
 
     return OperationStatusResponse(
         operation_id=rec["operation_id"],
         operation_type=rec["operation_type"],
         status=rec["status"],
-        target_id=rec.get("target_id"),
+        target_id=safe_target,
         result_payload=safe_result,
         error_message=safe_error,
         created_at=rec["created_at"],

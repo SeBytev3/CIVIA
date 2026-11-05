@@ -536,8 +536,26 @@ def update_report_status(
                 (status, note, rid),
             )
             row = cur.fetchone()
-            conn.commit()
-            return row
+            if not row:
+                conn.rollback()
+                return None
+
+            # Auditoría administrativa síncrona obligatoria en la MISMA transacción PostgreSQL (G2.1.8)
+            # Si operation_records no existe o falla el INSERT, rollback revierte el cambio del reporte
+            cur.execute(
+                """
+                INSERT INTO operation_records (
+                    operation_id, requester_id, operation_type, target_id, status,
+                    created_at, updated_at
+                ) VALUES (
+                    %s, 'admin', 'admin_update_report_status', %s, 'COMMITTED',
+                    clock_timestamp(), clock_timestamp()
+                );
+                """,
+                (str(uuid.uuid4()), str(rid)),
+            )
+        conn.commit()
+        return row
 
 
 def list_reports(

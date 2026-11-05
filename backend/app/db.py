@@ -115,7 +115,7 @@ def is_deadline_cancellation(exc: BaseException, deadline: float | None = None) 
         if cap is not None and not cap.is_valid():
             return True
         dl = deadline if deadline is not None else get_deadline_context()
-        if dl is not None and time.monotonic() >= (dl - 0.05):
+        if dl is not None and time.monotonic() >= dl:
             return True
         return False
 
@@ -125,7 +125,7 @@ def is_deadline_cancellation(exc: BaseException, deadline: float | None = None) 
         if cap is not None and not cap.is_valid():
             return True
         dl = deadline if deadline is not None else get_deadline_context()
-        if dl is not None and time.monotonic() >= (dl - 0.05):
+        if dl is not None and time.monotonic() >= dl:
             return True
         return False
 
@@ -136,14 +136,14 @@ def is_deadline_cancellation(exc: BaseException, deadline: float | None = None) 
             if cap is not None and not cap.is_valid():
                 return True
             dl = deadline if deadline is not None else get_deadline_context()
-            if dl is not None and time.monotonic() >= (dl - 0.05):
+            if dl is not None and time.monotonic() >= dl:
                 return True
         if "transaction timeout" in msg:
             cap = get_current_capability()
             if cap is not None and not cap.is_valid():
                 return True
             dl = deadline if deadline is not None else get_deadline_context()
-            if dl is not None and time.monotonic() >= (dl - 0.05):
+            if dl is not None and time.monotonic() >= dl:
                 return True
             return False
 
@@ -158,6 +158,7 @@ def register_operation_intent(
     proposed_payload: dict[str, Any] | None = None,
     requester_id: str = "citizen",
     backend_pid: int | None = None,
+    client_token: str | None = None,
 ) -> dict[str, Any]:
     """
     Registra durablemente la intención de una operación transaccional en estado PENDING.
@@ -166,7 +167,7 @@ def register_operation_intent(
     la excepción se propaga para impedir la ejecución del negocio sin registro durable.
     Realiza un reclamo atómico mediante INSERT ... ON CONFLICT si se suministra idempotency_key.
     """
-    query_token = secrets.token_urlsafe(32)
+    query_token = client_token or secrets.token_urlsafe(32)
     query_token_hash = hashlib.sha256(query_token.encode("utf-8")).hexdigest()
     payload_hash = canonical_payload_hash(proposed_payload) if proposed_payload is not None else None
     payload_json = json.dumps(proposed_payload) if proposed_payload is not None else None
@@ -214,9 +215,23 @@ def register_operation_intent(
                             f"Conflicto de clave de idempotencia: el payload suministrado no coincide con la operación registrada previamente para la clave '{idempotency_key}'."
                         )
                     claim["claim_acquired"] = False
+                    # Comprobar si el llamador demostró posesión de la credencial legítima
+                    stored_hash = claim.get("query_token_hash")
+                    if client_token and stored_hash:
+                        caller_hash = hashlib.sha256(client_token.encode("utf-8")).hexdigest()
+                        if hmac.compare_digest(caller_hash, stored_hash):
+                            claim["query_token"] = client_token
+                            claim["is_owner"] = True
+                        else:
+                            claim["query_token"] = None
+                            claim["is_owner"] = False
+                    else:
+                        claim["query_token"] = None
+                        claim["is_owner"] = False
                 else:
                     claim["claim_acquired"] = True
-                claim["query_token"] = query_token
+                    claim["query_token"] = query_token
+                    claim["is_owner"] = True
                 return claim
             else:
                 cur.execute(
@@ -253,6 +268,7 @@ def register_operation_intent(
                 res = dict(row)
                 res["claim_acquired"] = True
                 res["query_token"] = query_token
+                res["is_owner"] = True
                 return res
 
 
@@ -262,16 +278,17 @@ def mark_operation_committed(
     conn: psycopg.Connection[Any] | None = None,
 ) -> None:
     """
-    Marca la operación como COMMITTED.
+    Marca la operación como COMMITTED o anexa el payload de resultado si ya fue confirmada.
     Si se pasa `conn`, se ejecuta dentro de la MISMA transacción para atomicidad absoluta.
     Exige que cur.rowcount == 1 y falla cerrado si no puede actualizar el registro.
+    El estado terminal ABORTED jamás puede transicionar a COMMITTED (WHERE status != 'ABORTED').
     """
     sql_stmt = """
         UPDATE operation_records
         SET status = 'COMMITTED',
             result_payload = COALESCE(%s, result_payload),
             updated_at = clock_timestamp()
-        WHERE operation_id = %s;
+        WHERE operation_id = %s AND status != 'ABORTED';
     """
     payload_json = json.dumps(result_payload) if result_payload is not None else None
     if conn is not None:
@@ -285,13 +302,25 @@ def mark_operation_committed(
         with psycopg.connect(settings.DATABASE_URL, autocommit=True, connect_timeout=5) as c:
             with c.cursor() as cur:
                 cur.execute(sql_stmt, (payload_json, str(operation_id)))
+                if cur.rowcount != 1:
+                    cur.execute("SELECT status FROM operation_records WHERE operation_id = %s;", (str(operation_id),))
+                    row = cur.fetchone()
+                    curr_st = row[0] if row else "NONEXISTENT"
+                    if curr_st == "ABORTED":
+                        raise RuntimeError(
+                            f"Operación {operation_id} está en estado terminal ABORTED y no puede pasar a COMMITTED."
+                        )
+                    if curr_st != "COMMITTED":
+                        raise RuntimeError(
+                            f"Fallo al actualizar operation_records {operation_id} a COMMITTED (estado actual: {curr_st})."
+                        )
 
 
 def mark_operation_aborted(
     operation_id: uuid.UUID | str,
     error_message: str | None = None,
 ) -> None:
-    """Marca la operación como ABORTED en conexión independiente (si estaba en PENDING)."""
+    """Marca la operación como ABORTED en conexión independiente (si estaba en PENDING o UNKNOWN)."""
     try:
         with psycopg.connect(settings.DATABASE_URL, autocommit=True, connect_timeout=5) as conn:
             with conn.cursor() as cur:
@@ -301,7 +330,7 @@ def mark_operation_aborted(
                     SET status = 'ABORTED',
                         error_message = %s,
                         updated_at = clock_timestamp()
-                    WHERE operation_id = %s AND status = 'PENDING';
+                    WHERE operation_id = %s AND status IN ('PENDING', 'UNKNOWN');
                     """,
                     (error_message, str(operation_id)),
                 )
@@ -408,12 +437,15 @@ def reconcile_operation(operation_id: uuid.UUID | str) -> dict[str, Any]:
                     UPDATE operation_records
                     SET status = 'COMMITTED',
                         updated_at = clock_timestamp()
-                    WHERE operation_id = %s AND status = 'PENDING'
+                    WHERE operation_id = %s AND status IN ('PENDING', 'UNKNOWN')
                     RETURNING *;
                     """,
                     (str(operation_id),),
                 )
                 updated = cur.fetchone()
+                if not updated:
+                    cur.execute("SELECT * FROM operation_records WHERE operation_id = %s;", (str(operation_id),))
+                    updated = cur.fetchone()
                 res = dict(updated) if updated else record
                 res["reconciled"] = True
                 return res
@@ -422,6 +454,7 @@ def reconcile_operation(operation_id: uuid.UUID | str) -> dict[str, Any]:
     backend_pid = record.get("backend_pid")
     if backend_pid is not None:
         is_pid_alive = False
+        stat_failed = False
         try:
             with psycopg.connect(settings.DATABASE_URL, autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
                 with conn.cursor() as cur:
@@ -430,8 +463,14 @@ def reconcile_operation(operation_id: uuid.UUID | str) -> dict[str, Any]:
                         (backend_pid,),
                     )
                     is_pid_alive = cur.fetchone() is not None
-        except Exception:
-            is_pid_alive = False
+        except Exception as exc:
+            logger.debug("Fallo al observar pg_stat_activity para pid %s: %s", backend_pid, exc)
+            stat_failed = True
+
+        if stat_failed:
+            # Fallo de observación: NO es prueba de aborto, conservar estado actual sin modificar BD (Contrato B)
+            record["reconciled"] = False
+            return record
 
         if is_pid_alive:
             # El backend sigue en ejecución en PostgreSQL: permanece PENDING

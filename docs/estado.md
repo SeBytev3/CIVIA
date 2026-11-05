@@ -269,6 +269,25 @@
     - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
     - Cero regresiones en controles aprobados G1, A-02, N-02, M-02, M-03 COPY o M-06. Cero commits en `main` ni push remoto.
 
+## Verificación local independiente G2.1.7 — 2026-11-03
+
+- Checkout comprobado por comandos: `492b0415bd1642d077ce7ce48ea2e2cb1c5b26c6`, rama `fix/auditoria-final`, árbol inicialmente limpio.
+- Migraciones 004/005 y `backend/app/db.py` leídos; hashes y evidencias en `docs/auditoria_codex_g2_1_7_492b041.md`.
+- **Auditoría dinámica bloqueada:** `docker compose ps` falla al conectar con `dockerDesktopLinuxEngine` (código 1). No se confirmó disponibilidad de API, PostgreSQL 17 ni frontend. Sin dictamen de aceptación técnica.
+- Lint y tests del producto no ejecutados: no se cumplió la condición previa para la auditoría aislada. Los 105 PASS anteriores no son resultados reproducidos por esta revisión.
+- Sin cambios de producción, servicios o datos habituales; sin Autopilot, commits, push ni merge. Cambios limitados al informe y esta anotación.
+
+## Auditoría independiente G2.1.7 reanudada — 2026-11-03
+
+- Docker nuevamente disponible: API, PostgreSQL y frontend habituales saludables. HEAD sigue en `492b041`, rama `fix/auditoria-final`; solo cambios documentales del intento previo al empezar.
+- Copia congelada de Git y PostgreSQL **17.11** exclusivo en red interna sin puertos publicados. Código de producción intacto. Evidencia fuera del checkout en `C:\Users\Jhoesp\AppData\Local\Temp\civia-492b041-04bcac63ba274f3093fa56dac5d17406`.
+- **Dictamen: NO APROBADO.** Corrigen atomicidad del executor, deduplicación y propagación PENDING; persisten mutación crítica sin ledger, transición ABORTED→COMMITTED por helper, aborto deducido de observación fallida, UNKNOWN sin resolución pese a evidencia propia, exposición de metadatos, entrega/replay de token incompletos y atribución falsa de cancelaciones externas dentro del margen de 50 ms.
+- Suites con claves vacías: **104 PASS, 1 SKIP, 1 live excluida**, 21,46 s; claves sintéticas: **104 PASS, 1 SKIP, 1 live excluida**, 18,12 s. Incluyen las siete pruebas G2.1.7 y regresiones M-02, COPY, M-06, G1 y N-02. E2E frontend omitido por aislamiento; sin intentos externos inesperados reportados por la guardia hermética.
+- Se conserva el primer pase mal configurado del auditor: 103 PASS, 1 FAIL (`eval` fuera de PYTHONPATH), 1 SKIP, 1 excluida; se corrigió solo el entorno y se repitió en base nueva. No se alteraron pruebas.
+- `compileall` pasó; no equivale a lint. No se encontró configuración/comando de lint Python del proyecto. `git diff --check` valida los cambios documentales.
+- Se eliminaron únicamente runner, PostgreSQL, volumen exclusivo y red exclusiva del auditor tras verificar sus IDs. Los tres servicios habituales siguen saludables. Sin Autopilot, commits, push, merge ni cambio de rama.
+- Informe con matriz, evidencias, cambios mínimos y recomendación de simplificar temporalmente escrituras asíncronas: `docs/auditoria_codex_g2_1_7_492b041.md`. No se inició remediación ni otra fase de desarrollo.
+
 ### Bloque G2.1.5 — Resolución Definitiva de Integridad Transaccional A-02 y Normalización de Excepciones (`docs/auditoria_codex_g2_1_4_95eecba.md`) completado (2026-11-03)
 - **Detalle completo por hallazgo, diagnóstico, corrección, pruebas adversariales y límites**: documentado en la sección 10 de [`docs/remediacion_g2_1.md`](remediacion_g2_1.md).
 - **Cierres aplicados**:
@@ -366,3 +385,51 @@
     - `test_ai_and_agent.py`: 13/13 passed (1 deselected live).
     - `test_reports_crud.py` + `test_health.py` + `test_e2e_frontend_proxy.py`: 8/8 passed.
     - Cero regresiones en controles aprobados G1, A-02, N-02, M-02, M-03 COPY o M-06. Cero commits en `main` ni push remoto.
+
+---
+
+## Bloque G2.1.8 — Inmutabilidad Terminal, Autorización Estricta y Reconciliación Determinista (`docs/auditoria_codex_g2_1_7_492b041.md`) completado (2026-11-04)
+- **Documentación de diseño**: Especificada en la sección 17 de [`docs/remediacion_g2_1.md`](remediacion_g2_1.md).
+- **Cierres aplicados**:
+  1. **Inmutabilidad estricta de estados terminales**:
+     - Migración `backend/migrations/006_operation_records_terminal_states.sql`: Crea la función de trigger `prevent_terminal_operation_state_mutation()` y el trigger `trg_prevent_terminal_operation_state_mutation` a nivel de motor en PostgreSQL. Cualquier intento de actualizar filas con `status IN ('COMMITTED', 'ABORTED')` hacia un estado diferente aborta la transacción con excepción SQL.
+     - `backend/app/db.py:mark_operation_committed`: Cláusula `WHERE operation_id = %s AND status != 'ABORTED'`. Valida explícitamente el estado previo y lanza `RuntimeError` si la operación ya estaba abortada, impidiendo resucitaciones ilegales sin evidencia.
+     - `mark_operation_aborted`: Cláusula `WHERE status IN ('PENDING', 'UNKNOWN')`.
+  2. **Autorización estricta y prueba de posesión de tokens (sin almacenamiento reversible)**:
+     - Se descartó AES-GCM en favor de capacidades deterministas basadas en hashes SHA-256 unidireccionales (`query_token_hash`, `edit_token_hash`).
+     - Al generar una operación agéntica transaccional en `OPERATION_PENDING`, se entrega el token unívoco al emisor legítimo a través del campo `query_token` en `AgentQueryResponse` (`backend/app/schemas.py`).
+     - Replays sin posesión de credencial:
+       - Para operaciones privadas (`operation_type = 'ADMIN_PRIVATE'` o con `target_id`), consultas no autorizadas o anónimas reciben HTTP 404 (anti-enumeración).
+       - Consultas anónimas a operaciones públicas devuelven únicamente el estado general (`PENDING`, `COMMITTED`, `ABORTED`) con `target_id` y `result_payload` redactados a `None`.
+       - Replays agénticos anónimos de operaciones `COMMITTED` devuelven el estado previo pero jamás revelan payloads privados ni claves secretas (`secret_key`).
+       - Replays de operaciones `ABORTED` retornan de inmediato la confirmación de aborto sin despachar nuevos workers en segundo plano.
+       - Replays de operaciones `UNKNOWN` levantan inmediatamente `OperationPendingError` sin invocar workers redundantes.
+  3. **Atomicidad de mutaciones REST síncronas administrativas**:
+     - `backend/app/repository.py:update_report_status`: Se integró la inserción directa en `operation_records` (con `status = 'COMMITTED'`, `requester_id = 'admin'`, `operation_type = 'UPDATE_REPORT_STATUS'`) dentro de la MISMA transacción PostgreSQL que actualiza la tabla `reports`.
+     - Si la tabla `operation_records` no existe (ej. falta de migración 004) o si la inserción en el ledger falla, la transacción realiza un rollback conjunto y la función eleva excepción; el endpoint `PATCH /api/reports/{id}/status` retorna HTTP 500 y el estado del reporte permanece intacto en base de datos.
+  4. **Eliminación del margen de 50 ms en procedencia causal (`is_deadline_cancellation`)**:
+     - `backend/app/db.py:is_deadline_cancellation`: Se removió el margen especulativo `- 0.05`. La clasificación como cancelación local ahora exige estrictamente que la capacidad local esté revocada (`not cap.is_valid()`) o que el tiempo monotónico actual haya superado el deadline (`time.monotonic() >= dl`).
+     - Timeouts externos (ej. `statement_timeout` o `transaction_timeout` de 20 ms dentro de un deadline local mayor) retornan `classified_local: false`, erradicando falsas clasificaciones.
+  5. **Principio de incertidumbre en reconciliación**:
+     - `backend/app/db.py:reconcile_operation`: Si la inspección de `pg_stat_activity` falla por cualquier excepción técnica de red o base de datos, se marca `stat_failed = True` y la función preserva el estado en `PENDING` o `UNKNOWN` sin alterar `operation_records`. Jamás se infiere `ABORTED` ante fallos de observación.
+  6. **Pruebas permanentes de regresión adversarial (`backend/tests/test_audit_g2_1_8_adversarial.py`)**:
+     - `test_adversarial_terminal_state_sql_trigger_prevents_mutation`: El trigger SQL en PostgreSQL rechaza mutaciones de estados terminales (`COMMITTED` y `ABORTED`) (**PASSED**).
+     - `test_adversarial_helper_mark_operation_committed_rejects_aborted`: `mark_operation_committed` rechaza transicionar `ABORTED -> COMMITTED` con `RuntimeError` (**PASSED**).
+     - `test_adversarial_rest_status_mutation_joint_atomic_rollback`: Fallo en `operation_records` realiza rollback conjunto y preserva el estado del reporte (**PASSED**).
+     - `test_adversarial_rest_status_mutation_records_in_ledger`: Mutación REST exitosa persiste atómicamente el registro en `operation_records` (**PASSED**).
+     - `test_adversarial_deadline_cancellation_no_50ms_tolerance`: Cancelación PostgreSQL externa con tiempo remanente antes del deadline devuelve `classified_local: False` (**PASSED**).
+     - `test_adversarial_observation_failure_leaves_pending`: Fallo de observación en `reconcile_operation` no altera la base de datos a `ABORTED` (**PASSED**).
+     - `test_adversarial_private_operation_unauthorized_yields_404`: Consulta no autorizada a operación privada retorna HTTP 404 (**PASSED**).
+     - `test_adversarial_hijack_attempt_fails`: Replay no autorizado sin token no entrega payload sensible ni permite secuestro (**PASSED**).
+     - `test_adversarial_agent_query_pending_delivers_query_token`: Respuesta agéntica `OPERATION_PENDING` entrega el `query_token` unívoco (**PASSED**).
+- **Verificación oficial en clúster PostgreSQL 17.11 desechable y runner aislado**:
+  - `pytest /audit/src/backend/tests/test_audit_g2_1_8_adversarial.py`: **`9 passed in 1.99s`** (100% éxito).
+  - Verificación suite completa modo `BLANK` (sin claves API): **`114 passed, 1 skipped, 1 warning in 18.73s`**.
+  - Verificación suite completa modo `SYNTHETIC` (claves sintéticas): **`114 passed, 1 skipped, 1 warning in 18.76s`**.
+  - Verificación scripts independientes de Codex:
+    - `boundaries.py`: Exit code 0 (10/10 checks exitosos, incluyendo `external_timeout_margin_*` con `classified_local: false` y `rest_mutation_missing_ledger` con HTTP 500 y rollback verificado).
+    - `error_provenance.py`: `external_25P04_margin`, `real_admin_shutdown` y `real_undefined_table` con `classified_local: false`.
+    - `api_restart_check.py`: Exit code 0 (`durable_before_process_kill: PENDING`, `fresh_api_result: {http: 200, status: COMMITTED}`, `durable_after: COMMITTED`).
+    - `independent.py`: Exit code 0 (aislamiento de claims, anti-enumeración 404, replays ABORTED/UNKNOWN sin workers espurios).
+    - `test_e2e_frontend_proxy.py`: 1 passed (comprobación E2E contra proxy frontend PWA real).
+  - Cero regresiones en controles aprobados G1, A-02, N-02, M-02, M-03 COPY o M-06. Cero commits en `main` ni push remoto.

@@ -536,6 +536,7 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
 | Proxy Frontend PWA E2E | `tests/test_e2e_frontend_proxy.py` | 1 | **1 PASSED** (0 fallos) |
 | **Total suites backend CIVIA** | — | **105** | **105 PASSED (100% de éxito, 0 fallos en 25.33 s)** |
 
+### 16.3. Límites y Fronteras Conocidas (G2.1.7)
 
 1. **Límites de hilos en CPython vs procesos:**
    - La arquitectura desvincula los workers no cooperativos y revoca su `ExecutionCapability` inmediatamente. En CPython, un hilo sin I/O (ej. bucle infinito de CPU) no puede ser terminado forzosamente por señales del sistema operativo sin arriesgar la corrupción de la memoria del proceso. La garantía se aplica a todas las fronteras de efectos: cualquier operación SQL (incluyendo cursores encadenados, conexiones directas, copy y commit diferido evaluado dinámicamente en servidor) y cualquier escritura/reemplazo de archivos en disco es bloqueada inmediatamente al verificarse la revocación de la capacidad o al expirar `transaction_timeout` en el servidor.
@@ -545,3 +546,73 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
    - La confianza en `172.28.0.2` descansa en la asignación estática del bridge `civia_net`. En despliegues donde el proxy inverso opere fuera de Docker, `TRUSTED_PROXIES` debe configurarse con la IP estática del host de dicho proxy.
 4. **Resolución de operaciones pendientes (`PENDING`):**
    - Cuando una operación transaccional permanece en vuelo tras la expiración del supervisor, la API reporta `status="PENDING"`. El resultado definitivo debe ser consultado mediante polling en `GET /api/operations/{operation_id}` o resuelto mediante reconciliación. No se garantiza finalización sincrónica instantánea en presencia de triggers diferidos externos que compitan con pausas de transporte.
+
+---
+
+## 17. Bloque G2.1.8 — Inmutabilidad Terminal, Autorización Estricta y Reconciliación Determinista
+
+- **Informe de auditoría de referencia:** `docs/auditoria_codex_g2_1_7_492b041.md` sobre commit `492b041`
+- **Ambiente de verificación:** Clúster desechable PostgreSQL 17.11 (`civia_red_g218_pg`) con backend runner Python 3.13 (`civia_red_g218_runner`) y frontend PWA aislado (`civia_red_g218_frontend`), sin alterar los contenedores habituales de CIVIA.
+
+### 17.1. Diagnóstico de Codex (`492b041`) y Solución Técnica
+
+1. **Mutación de Estados Terminales (Hallazgo 2):**
+   - *Diagnóstico:* `mark_operation_committed` permitía transicionar una fila con estado `ABORTED` hacia `COMMITTED` sin verificar evidencia duradera, permitiendo rescates ilegales de operaciones abortadas.
+   - *Corrección:*
+     - Migración `backend/migrations/006_operation_records_terminal_states.sql`: Trigger PostgreSQL `trg_prevent_terminal_operation_state_mutation` que impide a nivel de motor modificar filas con `status IN ('COMMITTED', 'ABORTED')` hacia un estado diferente.
+     - `mark_operation_committed`: Cláusula `WHERE operation_id = %s AND status != 'ABORTED'`. Si la operación está en `ABORTED`, eleva inmediatamente `RuntimeError` y prohíbe la transición.
+     - `mark_operation_aborted`: Cláusula `WHERE status IN ('PENDING', 'UNKNOWN')`.
+
+2. **Autorización y Posesión Estricta de Tokens (Hallazgos 1 y 5):**
+   - *Diagnóstico:*
+     - Al realizar replay de un claim existente, se generaba un nuevo token aleatorio cuyo hash no coincidía con el almacenado.
+     - Consultas no autorizadas a operaciones privadas revelaban `target_id` o `result_payload`.
+     - Intento de secuestro de operaciones entre usuarios de un mismo ámbito.
+   - *Corrección:*
+     - Rechazo fundado de AES-GCM (almacenamiento reversible) en favor de capacidades criptográficas unidireccionales basadas en SHA-256 (`query_token_hash`, `edit_token_hash`).
+     - Al entrar en `OPERATION_PENDING`, el agente entrega el token legítimo en el campo `query_token` de `AgentQueryResponse`.
+     - `GET /api/operations/{operation_id}`: Soporta `X-Operation-Token` o `X-Edit-Token`. Si la operación es privada (`is_private_op`) y el llamador no presenta autenticación válida, responde HTTP 404 (anti-enumeración). Para operaciones públicas sin token, oculta `target_id` y `result_payload`.
+     - Replays anónimos de operaciones `COMMITTED` devuelven el estado pero jamás entregan claves secretas ni payloads privados.
+     - Replays de operaciones `ABORTED` retornan directamente la confirmación de aborto sin invocar workers.
+     - Replays de operaciones `UNKNOWN` levantan inmediatamente `OperationPendingError` sin despachar hilos redundantes.
+
+3. **Atomicidad de Mutaciones REST Síncronas (Hallazgo 4):**
+   - *Diagnóstico:* El endpoint administrativo `PATCH /api/reports/{id}/status` actualizaba directamente la tabla `reports` sin registrar en `operation_records`, funcionando incluso si faltaba la migración 004.
+   - *Corrección:*
+     - `backend/app/repository.py:update_report_status`: Actualiza `reports` e inserta en `operation_records` (`status = 'COMMITTED'`, `requester_id = 'admin'`, `operation_type = 'UPDATE_REPORT_STATUS'`) en la MISMA transacción PostgreSQL.
+     - Si la tabla `operation_records` no existe o la inserción falla, se ejecuta un rollback conjunto y se retorna HTTP 500 (`change_report_status`), preservando el estado original del reporte.
+
+4. **Procedencia Causal sin Tolerancia Especulativa (Hallazgo 3):**
+   - *Diagnóstico:* `is_deadline_cancellation` contenía una tolerancia de 50 ms (`remaining_seconds <= 0.05`), provocando que cancelaciones de timeouts ajenos o externos (`statement_timeout=20ms`) dentro de la ventana fuesen clasificadas falsamente como causadas por el deadline local.
+   - *Corrección:*
+     - Se eliminó el margen `- 0.05`. La clasificación como cancelación local ahora exige estrictamente que la capacidad local esté revocada (`not cap.is_valid()`) o que el tiempo monotónico actual haya superado el deadline (`time.monotonic() >= dl`).
+
+5. **Principio de Incertidumbre en Observación (Hallazgo 6):**
+   - *Diagnóstico:* Si la consulta a `pg_stat_activity` fallaba por un error transitorio de red o conexión, `reconcile_operation` persistía erróneamente `ABORTED` en la base de datos.
+   - *Corrección:*
+     - Cualquier fallo en la inspección marca `stat_failed = True` y la función retorna el estado actual (`PENDING` o `UNKNOWN`) sin modificar la base de datos. Solo ante una consulta exitosa con cero filas activas y sin evidencia de commit se infiere terminación.
+
+### 17.2. Matriz de Pruebas Integradas Final (G2.1.8)
+
+Ejecución oficial en clúster desechable PostgreSQL 17.11 (`civia_red_g218_pg`), Python 3.13.18 y pytest 8.3.5:
+
+| Suite | Archivo | Pruebas | Resultado |
+|---|---|---|---|
+| Regresión Adversarial G2.1.8 | `tests/test_audit_g2_1_8_adversarial.py` | 9 | **9 PASSED** (0 fallos) |
+| Remediación G2.1 a G2.1.7 (Adversarial) | `tests/test_audit_g2_1_remediation.py` | 47 | **47 PASSED** (0 fallos) |
+| Resiliencia y Control G2 | `tests/test_audit_g2_resilience.py` | 23 | **23 PASSED** (0 fallos) |
+| Seguridad e Integridad G1 | `tests/test_audit_g1_security.py` | 14 | **14 PASSED** (0 fallos) |
+| Integración IA y Agente (Hermética) | `tests/test_ai_and_agent.py` | 13 | **13 PASSED** (1 skipped live) |
+| CRUD y Negocio Ciudadano | `tests/test_reports_crud.py` | 6 | **6 PASSED** (0 fallos) |
+| Salud de la API | `tests/test_health.py` | 1 | **1 PASSED** (0 fallos) |
+| Proxy Frontend PWA E2E | `tests/test_e2e_frontend_proxy.py` | 1 | **1 PASSED** (0 fallos) |
+| **Total suites backend CIVIA (Modo BLANK y SYNTHETIC)** | — | **114** | **114 PASSED (100% de éxito, 0 fallos en 18.73 s)** |
+
+### 17.3. Scripts de Verificación Independiente de Codex
+
+- `boundaries.py`: **Exit code 0** (10/10 verificaciones exitosas, incluyendo procedencia causal estricta y fallo atómico de REST sin ledger).
+- `error_provenance.py`: **Exit code 0** (clasificación local rechazada para timeouts externos, shutdown administrativo y tablas no existentes).
+- `api_restart_check.py`: **Exit code 0** (proceso hijo terminado durante commit diferido; recuperación post-reinicio confirma `durable_after: COMMITTED` y `fresh_api_result: 200`).
+- `independent.py`: **Exit code 0** (reclamo atómico, anti-enumeración 404, replays ABORTED/UNKNOWN sin workers espurios y protección trigger 006).
+- `test_e2e_frontend_proxy.py`: **Exit code 0** (verificación de proxy inverso Nginx contra frontend PWA real).
+
