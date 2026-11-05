@@ -6,61 +6,99 @@ CIVIA es una aplicación web progresiva (PWA) conectada a una API FastAPI, Postg
 
 ---
 
-## Requisitos
-- **Docker Desktop** con Docker Compose v2 (en Windows 11, con backend WSL2 activo).
-- **No se requiere** instalar Node.js ni Python globalmente en el computador del evaluador (toda la compilación y ejecución ocurre dentro de los contenedores).
-- Tres claves API en el archivo `.env` local:
-  - `GOOGLE_API_KEY_PRIMARY`
-  - `GOOGLE_API_KEY_SECONDARY`
-  - `GROQ_API_KEY`
+## Requisitos del sistema
+- **Sistema Operativo:** Windows 11 (64-bit) con soporte para virtualización habilitado en BIOS/UEFI.
+- **Herramientas base del host:**
+  - **Git para Windows** (v2.40+).
+  - **Docker Desktop** (v4.30+) con el backend **WSL2** activo (`wsl --status` en ejecución).
+- **Recursos mínimos recomendados:**
+  - 4 GB de memoria RAM libre asignada a Docker/WSL2.
+  - 10 GB de espacio libre en disco para imágenes, volúmenes de PostgreSQL y almacenamiento local de fotos.
+- **Aislamiento absoluto:** **No se requiere** instalar Node.js, npm ni Python globalmente en el computador evaluador. Toda la compilación, dependencias y ejecución ocurren estrictamente dentro de los contenedores Docker oficiales (`node:22-alpine`, `python:3.13-slim`, `postgres:17-alpine`, `nginx:1.27-alpine`).
+- **Claves API de Inteligencia Artificial (opcionales para el arranque y pruebas sintéticas, requeridas para análisis multimodal en vivo):**
+  - `GOOGLE_API_KEY_PRIMARY` (Google AI Studio - Gemini).
+  - `GOOGLE_API_KEY_SECONDARY` (Google AI Studio - segundo modelo Gemini de respaldo).
+  - `GROQ_API_KEY` (Groq Cloud - proveedor independiente Qwen / Whisper).
 
 ---
 
 ## Arranque desde un clon limpio en un comando
 
-1. Copia `.env.example` como `.env` en la raíz del proyecto, genera localmente `ADMIN_TOKEN` con `secrets.token_urlsafe(32)` y completa las claves API (nunca imprimas el secreto en logs ni subas `.env` a Git):
+> [!IMPORTANT]
+> **Rama de entrega aprobada:** La versión auditada y aprobada por Codex (G2.1.8, contratos F1–F8) se encuentra en la rama **`fix/auditoria-final`** (commit `cf48e71` y su cierre documental). Hasta que se efectúe la fusión formal en `main`, asegúrate de hacer checkout a esta rama tras clonar.
+
+Abre PowerShell en Windows 11 y ejecuta:
+
+```powershell
+# 1. Clonar el repositorio
+git clone https://github.com/SeBytev3/CIVIA.git
+cd CIVIA
+
+# 2. Situarse en la rama aprobada por auditoria
+git checkout fix/auditoria-final
+
+# 3. Preparar el entorno e iniciar los servicios
+# (El script genera automaticamente un ADMIN_TOKEN unico y robusto con CSPRNG si no existe)
+.\scripts\run.ps1
+```
+
+*(En entornos basados en Unix / macOS / WSL2 directo, el equivalente es `./run.sh`).*
+
+### Procedimiento manual equivalente (paso a paso)
+
+Si prefieres no usar los scripts automáticos:
+
+1. **Copiar plantilla de configuración:**
    ```powershell
    Copy-Item .env.example .env
-   # Procedimiento estándar: generar ADMIN_TOKEN con CSPRNG (sin imprimirlo en consola):
-   python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); p.write_text(re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', p.read_text()))"
-   # Alternativamente, .\scripts\run.ps1 (PowerShell) o ./run.sh (Bash) generan ADMIN_TOKEN con CSPRNG automáticamente si está vacío.
    ```
-   > **Política de `ADMIN_TOKEN`:** No existe ninguna credencial predeterminada ni ruta de demostración en desarrollo o producción. El servidor exige por defecto el formato URL-safe base64 de `secrets.token_urlsafe(32)` (`>= 32` caracteres, `>= 12` caracteres únicos, sin secuencias, repeticiones ni términos contextuales del proyecto/rol/año/Demo/Test). Si un gestor externo de secretos requiere caracteres fuera de base64url, puede declararse explícitamente `ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT=true` manteniendo todas las demás restricciones; ten en cuenta que ningún filtro sobre cadenas puede demostrar matemáticamente la entropía criptográfica de un valor arbitrario.
-2. Levanta todos los servicios (`db`, `api` y `frontend` PWA) con un solo comando:
+2. **Generar credencial administrativa segura (`ADMIN_TOKEN`):**
+   ```powershell
+   python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); p.write_text(re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', p.read_text()))"
+   ```
+   > **Política de `ADMIN_TOKEN`:** No existe ninguna credencial predeterminada ni modo demo predecible. El sistema exige una cadena generada por CSPRNG (`secrets.token_urlsafe(32)`, `>= 32` caracteres, `>= 12` caracteres únicos, sin secuencias ni términos contextuales como "demo", "admin", "test" o "2026"). Si falta o es débil, el backend falla inmediatamente al iniciar (*fail-closed*).
+3. **Levantar los contenedores:**
    ```powershell
    docker compose up --build -d
    ```
-   *(También puedes usar `.\scripts\run.ps1` en PowerShell o `./run.sh` en Bash).*
-3. Al iniciar, el backend aplica automáticamente las migraciones SQL idempotentes (`backend/migrations/001_initial_schema.sql`) y carga 10 reportes sintéticos identificados de demostración en Cali (`CIV-2026-DEMO0001` a `CIV-2026-DEMO0010`, marcados con `is_synthetic = true`).
-
-### URLs de la aplicación
-- **Interfaz Ciudadana PWA (React + TypeScript + Vite + Leaflet)**: http://localhost:5173
-- **Salud del Backend API**: http://localhost:8000/health
-- **Documentación interactiva OpenAPI**: http://localhost:8000/docs
+4. **Inicialización automática:** Al arrancar, el contenedor `api` aplica de forma idempotente las migraciones SQL (`backend/migrations/001_initial_schema.sql` y `002_add_operation_records.sql`) y siembra 10 reportes sintéticos de prueba en Cali (`CIV-2026-DEMO0001` a `CIV-2026-DEMO0010`, con `is_synthetic = true`).
 
 ---
 
-## Variables de entorno (`.env.example`)
+### URLs de los servicios
 
-| Variable | Descripción | Valor por defecto |
+| Servicio | URL | Descripción |
 |---|---|---|
-| `POSTGRES_DB` | Base de datos PostgreSQL | `civia` |
-| `POSTGRES_USER` | Usuario de PostgreSQL | `civia` |
-| `POSTGRES_PASSWORD` | Contraseña local de BD | `local_dev_change_me` |
-| `DATABASE_URL` | Cadena de conexión SQL | `postgresql://civia:local_dev_change_me@db:5432/civia` |
-| `GOOGLE_API_KEY_PRIMARY` | Clave Google AI Studio primaria | *(requerida para IA real)* |
-| `GOOGLE_API_KEY_SECONDARY` | Clave Google AI Studio secundaria | *(opcional / respaldo)* |
-| `GROQ_API_KEY` | Clave proveedor independiente Groq | *(requerida para fallback real)* |
+| **PWA Ciudadana** | http://localhost:5173 | Interfaz React 19 + TypeScript + Vite + Leaflet (mapa interactivo de Cali) servida por Nginx |
+| **API Backend** | http://localhost:8000 | FastAPI REST API con validación estricta y seguridad por capas |
+| **Salud del Backend** | http://localhost:8000/health | Verificación JSON de conectividad a PostgreSQL, migraciones listas y catálogo de modelos |
+| **Documentación OpenAPI** | http://localhost:8000/docs | Documentación Swagger interactiva de todos los endpoints REST públicos y administrativos |
+
+---
+
+## Variables de entorno y configuración (`.env.example`)
+
+Todas las variables se configuran en el archivo `.env` en la raíz del proyecto. **NUNCA subas el archivo `.env` a Git ni compartas tus claves privadas.**
+
+| Variable | Descripción | Valor por defecto / Requisito |
+|---|---|---|
+| `POSTGRES_DB` | Nombre de la base de datos PostgreSQL | `civia` |
+| `POSTGRES_USER` | Usuario administrador de la base de datos | `civia` |
+| `POSTGRES_PASSWORD` | Contraseña local de la base de datos | `local_dev_change_me` *(debe coincidir con DATABASE_URL)* |
+| `DATABASE_URL` | Cadena de conexión SQL directa para el backend | `postgresql://civia:local_dev_change_me@db:5432/civia` |
+| `ADMIN_TOKEN` | Token secreto obligatorio para observabilidad y endpoints `/api/admin/*` | Generado con CSPRNG (`secrets.token_urlsafe(32)`) por `.\scripts\run.ps1` |
+| `GOOGLE_API_KEY_PRIMARY` | Clave Google AI Studio para modelo primario | Requerida para análisis multimodal real (Gemini) |
+| `GOOGLE_API_KEY_SECONDARY` | Clave Google AI Studio para modelo terciario | Opcional (respaldo independiente de Gemini) |
+| `GROQ_API_KEY` | Clave Groq Cloud para modelo de respaldo independiente | Requerida para fallback real (Qwen 2.5 27B / Whisper) |
 | `AI_PRIMARY_MODEL` | Modelo primario multimodal | `gemini-3.8-flash` |
-| `AI_FALLBACK_MODEL` | Modelo de respaldo independiente (Groq) | `qwen/qwen3.8-27b` |
-| `AI_TERTIARY_MODEL` | Tercer modelo alternativo (Google) | `gemini-3.6-flash` |
-| `AI_TIMEOUT_SECONDS` | Timeout de operación IA | `15` |
-| `AI_MAX_RETRIES` | Reintentos acotados por proveedor | `2` |
-| `AGENT_MAX_ITERATIONS` | Límite #1: máximo de vueltas del agente | `5` |
-| `AGENT_MAX_TOKENS` | Límite #2: presupuesto máximo de tokens | `6000` |
-| `FALLA_FORZADA` | Simulación de fallos (`429`, `503`, `TIMEOUT`, `INVALID_JSON`, `GROQ_FAIL`, `TOTAL`) | *(vacío = operación normal)* |
-| `AUTO_SEED_SYNTHETIC` | Semilla automática de datos sintéticos identificados | `true` |
-| `ADMIN_TOKEN` | Credencial administrativa obligatoria generada con CSPRNG (`secrets.token_urlsafe(32)`) por instalación para observabilidad y operaciones administrativas (`X-Admin-Token`) | *(sin valor por defecto; falla al iniciar si falta o presenta patrones predecibles)* |
+| `AI_FALLBACK_MODEL` | Modelo de respaldo independiente | `qwen/qwen3.8-27b` |
+| `AI_TERTIARY_MODEL` | Tercer modelo alternativo | `gemini-3.6-flash` |
+| `AI_TIMEOUT_SECONDS` | Tiempo límite por llamada a proveedores de IA | `15` segundos |
+| `AI_MAX_RETRIES` | Reintentos acotados con backoff exponencial y jitter | `2` reintentos |
+| `AGENT_MAX_ITERATIONS` | Límite #1: máximo de turnos del agente por consulta | `5` iteraciones |
+| `AGENT_MAX_TOKENS` | Límite #2: presupuesto estricto de tokens por sesión | `6000` tokens |
+| `FALLA_FORZADA` | Inyección de fallas en caliente (`429`, `503`, `TIMEOUT`, `INVALID_JSON`, `TOTAL`) | Vacío en operación normal |
+| `AUTO_SEED_SYNTHETIC` | Creación automática de 10 reportes sintéticos de prueba | `true` |
 
 ---
 
@@ -161,19 +199,102 @@ python -m pytest orchestrator/tests/test_orchestrator_scenarios.py -v
 
 ---
 
-## Reset de datos, mantenimiento y solución de problemas en Windows 11
+## Mantenimiento, diagnóstico y solución de problemas en Windows 11
 
-- **Detener conservando los datos**: `docker compose down`
-- **Reiniciar desde cero (elimina volúmenes de BD y fotos)**: `docker compose down -v`
-- **Restablecer únicamente los reportes sintéticos de demostración (solo en BD de prueba `*_test` / `*_eval`)**:
+### 1. Comandos de ciclo de vida seguro (No destructivos)
+
+- **Verificar estado de los contenedores:**
   ```powershell
-  Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/seed?force_reset=true" -Headers @{"X-Admin-Token"="$env:ADMIN_TOKEN"}
+  docker compose ps
   ```
-- **Solución de problemas frecuentes en Windows 11**:
-  1. *Docker Desktop no responde*: Asegúrate de que el motor WSL2 esté activo (`wsl --status`) y Docker Desktop muestre `Engine running`.
-  2. *Puerto `5173` o `8000` ocupado*: Comprueba con `netstat -ano | findstr :5173` o `:8000` que otra instancia previa no esté escuchando y ejecuta `docker compose down` antes de levantar.
-  3. *Política de ejecución de PowerShell al usar `.\scripts\run.ps1`*: Puedes ejecutar directamente `docker compose up --build -d` o `powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1`.
-  4. *Cuotas de capa gratuita (Google AI Studio / Groq)*: Si alguna clave gratuita alcanza su tope por minuto (RPM), espera 60 segundos o usa `--mode deterministic` en `eval/evaluar.py`.
+- **Monitorear registros (logs) en tiempo real:**
+  ```powershell
+  # Logs combinados de todos los servicios:
+  docker compose logs -f
+
+  # Logs específicos del backend API o de la base de datos:
+  docker compose logs -f api
+  docker compose logs -f db
+  docker compose logs -f frontend
+  ```
+- **Reiniciar servicios conservando los datos:**
+  ```powershell
+  # Reinicio directo de contenedores:
+  docker compose restart
+
+  # O detención y reanudación segura (los datos en volúmenes persisten intactos):
+  docker compose down
+  docker compose up -d
+  ```
+- **Reconstruir imágenes tras cambios de código:**
+  ```powershell
+  docker compose build --no-cache
+  docker compose up -d
+  ```
+
+---
+
+### 2. Comandos destructivos (Uso exclusivo para reinicio total)
+
+> [!CAUTION]
+> **Pérdida irreversible de datos locales:** El comando `docker compose down -v` elimina por completo los volúmenes de almacenamiento (`civia_postgres` y `civia_uploads`), borrando todos los reportes, fotos y trazabilidad acumulados. **NO utilices este comando como solución rutinaria.**
+> ```powershell
+> # ÚNICAMENTE si deseas resetear el sistema a su estado inicial de fábrica:
+> docker compose down -v
+> docker compose up --build -d
+> ```
+
+---
+
+### 3. Solución de problemas frecuentes en Windows 11
+
+1. **Conflicto de puertos (`5173`, `8000` o `5432` ocupados):**
+   Si otro proceso o una instancia previa está escuchando en los puertos requeridos, identifícalo con:
+   ```powershell
+   Get-NetTCPConnection -LocalPort 5173, 8000, 5432 -ErrorAction SilentlyContinue | Format-Table -Property LocalPort, OwningProcess, State
+   # O mediante comando clásico:
+   netstat -ano | findstr ":5173 :8000 :5432"
+   ```
+   Detén la instancia anterior con `docker compose down` o termina el proceso conflictivo antes de iniciar CIVIA.
+
+2. **Docker Desktop o motor WSL2 no responden:**
+   - Comprueba el estado de WSL2:
+     ```powershell
+     wsl --status
+     ```
+   - Si el subsistema está bloqueado, apágalo limpiamente y reinícialo:
+     ```powershell
+     wsl --shutdown
+     ```
+   - Abre Docker Desktop y espera a que el icono en la bandeja del sistema indique `Engine running`.
+
+3. **Error al validar configuración de entorno (`.env`):**
+   Comprueba que Docker Compose interprete las variables correctamente sin errores de sintaxis:
+   ```powershell
+   docker compose config
+   ```
+   Si muestra advertencias sobre `ADMIN_TOKEN`, asegúrate de que `.env` contenga una clave no vacía de al menos 32 caracteres generada por `.\scripts\run.ps1`.
+
+4. **Política de ejecución restringida de scripts en PowerShell (`PSSecurityException`):**
+   Si Windows 11 bloquea la ejecución de `.\scripts\run.ps1`, ejecuta:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
+   # O utiliza directamente:
+   docker compose up --build -d
+   ```
+
+5. **Límite de cuota o latencia en proveedores gratuitos de IA:**
+   Si Google AI Studio o Groq devuelven `429 (Too Many Requests)` durante pruebas continuas, el sistema conmuta automáticamente al siguiente nivel de la cadena (`Gemini` → `Groq` → `Gemini`). También puedes ejecutar las suites en modo determinista local sin consumir cuota:
+   ```powershell
+   docker compose exec -T api python eval/evaluar.py --mode deterministic
+   ```
+
+---
+
+## Guía detallada para clonación e instalación en otro computador
+
+Para una guía paso a paso completa con capturas conceptuales, checklist de sustentación académica para el profesor y protocolo de verificación reproducible en un segundo computador limpio, consulta:
+- **[`docs/guia_instalacion_otro_pc.md`](docs/guia_instalacion_otro_pc.md)**
 
 ---
 
