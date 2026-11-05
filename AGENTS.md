@@ -19,3 +19,9 @@ Equipo: Stefania Córdoba y Sebastian Espinosa. Proyecto de Ingeniería de Aplic
 - No publicar despliegue hasta proteger logs y configuraciones.
 - Un agente escribe por módulo; Codex audita y propone fixes en rama separada, evitando ediciones simultáneas.
 - No interpretar este esqueleto inicial como producto terminado.
+
+## Uso disciplinado de skills
+- Antes de modificar código o arquitectura, identificar y leer los `SKILL.md` pertinentes en el entorno (`api-security`, `backend-security-coder`, `systematic-debugging`, `frontend-api-integration-patterns`, `react-patterns`, `playwright-skill`, `postgres-best-practices`, `code-review-and-quality`).
+- Extraer instrucciones concretas y aplicables para el problema en curso; evitar parches reactivos o atajos heurísticos.
+- Documentar explícitamente en cada ciclo la matriz de correspondencia: hallazgo/tarea -> skill utilizada -> instrucción aplicada -> verificación adversarial realizada.
+- Verificar invariantes mediante TDD adversarial: reproducir y confirmar el fallo exacto (RED) antes de implementar (GREEN) y proteger regresiones con suites herméticas.

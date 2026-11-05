@@ -39,26 +39,41 @@ class IdempotencyConflictError(Exception):
     pass
 
 
+CREDENTIAL_KEYS: set[str] = {
+    "operation_token",
+    "client_token",
+    "edit_token",
+    "x_operation_token",
+    "x_edit_token",
+    "admin_token",
+    "token",
+}
+CONTROL_KEYS: set[str] = {
+    "idempotency_key",
+    "operation_id",
+}
+
+
+def sanitize_credentials_deep(obj: Any, include_control_keys: bool = False) -> Any:
+    """Elimina recursivamente claves de credenciales (y opcionalmente de control) en estructuras anidadas."""
+    keys_to_remove = CREDENTIAL_KEYS | CONTROL_KEYS if include_control_keys else CREDENTIAL_KEYS
+    if isinstance(obj, dict):
+        return {
+            k: sanitize_credentials_deep(v, include_control_keys=include_control_keys)
+            for k, v in obj.items()
+            if k not in keys_to_remove
+        }
+    if isinstance(obj, list):
+        return [sanitize_credentials_deep(item, include_control_keys=include_control_keys) for item in obj]
+    if isinstance(obj, tuple):
+        return tuple(sanitize_credentials_deep(item, include_control_keys=include_control_keys) for item in obj)
+    return obj
+
+
 def canonical_payload_hash(payload: Any) -> str:
-    """Calcula el hash SHA-256 canónico y determinista de un payload (ignorando claves de control como idempotency_key y credenciales)."""
+    """Calcula el hash SHA-256 canónico y determinista de un payload (ignorando claves de control como idempotency_key y credenciales recursivamente)."""
     try:
-        if isinstance(payload, dict):
-            filtered = {
-                k: v for k, v in payload.items()
-                if k not in (
-                    "idempotency_key",
-                    "operation_id",
-                    "operation_token",
-                    "client_token",
-                    "edit_token",
-                    "x_operation_token",
-                    "x_edit_token",
-                    "admin_token",
-                    "token",
-                )
-            }
-        else:
-            filtered = payload
+        filtered = sanitize_credentials_deep(payload, include_control_keys=True)
         serialized = json.dumps(filtered, sort_keys=True, separators=(",", ":"), default=str)
     except Exception:
         serialized = str(payload)
@@ -115,7 +130,23 @@ def is_deadline_cancellation(exc: BaseException, deadline: float | None = None) 
     Determina si una excepción de base de datos fue causada inequívocamente por
     la expiración de un plazo/deadline local, y NO por un fallo de infraestructura,
     terminación administrativa ajena (57P01 AdminShutdown), o un timer de sesión ajeno (G2.1.7).
+    El resultado se memoriza de forma inmutable respecto al deadline evaluado.
     """
+    if hasattr(exc, "_civia_cached_deadline") and getattr(exc, "_civia_cached_deadline") == deadline:
+        cached = getattr(exc, "_civia_is_local_cancellation", None)
+        if cached is not None:
+            return bool(cached)
+
+    res = _evaluate_is_deadline_cancellation(exc, deadline)
+    try:
+        setattr(exc, "_civia_is_local_cancellation", res)
+        setattr(exc, "_civia_cached_deadline", deadline)
+    except Exception:
+        pass
+    return res
+
+
+def _evaluate_is_deadline_cancellation(exc: BaseException, deadline: float | None = None) -> bool:
     # 1. Terminación administrativa ajena nunca es deadline propio
     if isinstance(exc, psycopg.errors.AdminShutdown):
         return False
@@ -123,36 +154,36 @@ def is_deadline_cancellation(exc: BaseException, deadline: float | None = None) 
     if sqlstate == "57P01":
         return False
 
-    # Evidencia directa de cancelación activa iniciada por CIVIA
+    # Evidencia directa de cancelación activa iniciada con éxito por CIVIA
     if getattr(exc, "_civia_cancelled_by_deadline", False):
         return True
 
-    # Momento causal en que ocurrió o fue observada la excepción
     seen_at = getattr(exc, "_civia_raised_at", getattr(exc, "_civia_first_seen_at", None))
     if seen_at is None:
         seen_at = time.monotonic()
-        setattr(exc, "_civia_first_seen_at", seen_at)
-
-    cap = get_current_capability()
-    cap_invalid = (cap is not None and not cap.is_valid())
+        try:
+            setattr(exc, "_civia_first_seen_at", seen_at)
+        except Exception:
+            pass
 
     dl = deadline if deadline is not None else get_deadline_context()
     time_expired = (dl is not None and seen_at >= dl)
 
     # 2. TransactionTimeout de PostgreSQL (25P04)
+    timeout_set = getattr(exc, "_civia_transaction_timeout_set", False)
     if sqlstate == "25P04" or isinstance(exc, getattr(psycopg.errors, "TransactionTimeout", ())):
-        return cap_invalid or time_expired
+        return (timeout_set and time_expired) or getattr(exc, "_civia_cancelled_by_deadline", False)
 
     # 3. QueryCanceled (57014) o timeout operacional
     if isinstance(exc, psycopg.errors.QueryCanceled) or sqlstate == "57014":
-        return cap_invalid or time_expired
+        return getattr(exc, "_civia_cancelled_by_deadline", False) or time_expired
 
     if isinstance(exc, psycopg.OperationalError):
         msg = str(exc).lower()
         if "canceling statement due to statement timeout" in msg or "canceling statement due to user request" in msg:
-            return cap_invalid or time_expired
+            return getattr(exc, "_civia_cancelled_by_deadline", False) or time_expired
         if "transaction timeout" in msg:
-            return cap_invalid or time_expired
+            return (timeout_set and time_expired) or getattr(exc, "_civia_cancelled_by_deadline", False)
         return False
 
     return False
@@ -175,22 +206,8 @@ def register_operation_intent(
     la excepción se propaga para impedir la ejecución del negocio sin registro durable.
     Realiza un reclamo atómico mediante INSERT ... ON CONFLICT si se suministra idempotency_key.
     """
-    # Separar capacidades y secretos del payload de negocio persistido
-    if isinstance(proposed_payload, dict):
-        safe_proposed = {
-            k: v for k, v in proposed_payload.items()
-            if k not in (
-                "operation_token",
-                "client_token",
-                "edit_token",
-                "x_operation_token",
-                "x_edit_token",
-                "admin_token",
-                "token",
-            )
-        }
-    else:
-        safe_proposed = proposed_payload
+    # Separar capacidades y secretos del payload de negocio persistido recursivamente (F1)
+    safe_proposed = sanitize_credentials_deep(proposed_payload, include_control_keys=False) if proposed_payload is not None else None
 
     query_token = client_token or secrets.token_urlsafe(32)
     query_token_hash = hashlib.sha256(query_token.encode("utf-8")).hexdigest()
@@ -315,7 +332,8 @@ def mark_operation_committed(
             updated_at = clock_timestamp()
         WHERE operation_id = %s AND status IN ('PENDING', 'COMMITTED');
     """
-    payload_json = json.dumps(result_payload) if result_payload is not None else None
+    safe_result = sanitize_credentials_deep(result_payload, include_control_keys=False) if result_payload is not None else None
+    payload_json = json.dumps(safe_result) if safe_result is not None else None
     if conn is not None:
         with conn.cursor() as cur:
             cur.execute(sql_stmt, (payload_json, str(operation_id)))
@@ -745,8 +763,8 @@ def cancel_active_conns_for_thread(tid: int) -> int:
     canceled_count = 0
     for c in conns:
         try:
-            setattr(c, "_civia_cancelled_by_deadline", True)
             c.cancel()
+            setattr(c, "_civia_cancelled_by_deadline", True)
             canceled_count += 1
         except Exception:
             pass
@@ -882,11 +900,18 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
                     """,
                     (target_epoch, target_epoch),
                 )
+                setattr(conn, "_civia_transaction_timeout_set", True)
         except (
             psycopg.errors.QueryCanceled,
             psycopg.errors.AdminShutdown,
             getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
         ) as exc:
+            if not hasattr(exc, "_civia_raised_at"):
+                setattr(exc, "_civia_raised_at", time.monotonic())
+            if getattr(conn, "_civia_cancelled_by_deadline", False):
+                setattr(exc, "_civia_cancelled_by_deadline", True)
+            if getattr(conn, "_civia_transaction_timeout_set", False):
+                setattr(exc, "_civia_transaction_timeout_set", True)
             try:
                 conn.rollback()
             except Exception:
@@ -930,11 +955,18 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
                     """,
                     (target_epoch_commit, target_epoch_commit),
                 )
+                setattr(conn, "_civia_transaction_timeout_set", True)
         except (
             psycopg.errors.QueryCanceled,
             psycopg.errors.AdminShutdown,
             getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
         ) as exc:
+            if not hasattr(exc, "_civia_raised_at"):
+                setattr(exc, "_civia_raised_at", time.monotonic())
+            if getattr(conn, "_civia_cancelled_by_deadline", False):
+                setattr(exc, "_civia_cancelled_by_deadline", True)
+            if getattr(conn, "_civia_transaction_timeout_set", False):
+                setattr(exc, "_civia_transaction_timeout_set", True)
             try:
                 conn.rollback()
             except Exception:
@@ -970,6 +1002,12 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
             psycopg.OperationalError,
             getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
         ) as exc:
+            if not hasattr(exc, "_civia_raised_at"):
+                setattr(exc, "_civia_raised_at", time.monotonic())
+            if getattr(conn, "_civia_cancelled_by_deadline", False):
+                setattr(exc, "_civia_cancelled_by_deadline", True)
+            if getattr(conn, "_civia_transaction_timeout_set", False):
+                setattr(exc, "_civia_transaction_timeout_set", True)
             try:
                 conn.rollback()
             except Exception:
@@ -1067,6 +1105,7 @@ def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Conne
                             """,
                             (target_epoch_early, target_epoch_early),
                         )
+                        setattr(conn, "_civia_transaction_timeout_set", True)
                     except Exception:
                         pass
         yield conn
@@ -1075,6 +1114,8 @@ def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Conne
             setattr(exc, "_civia_raised_at", time.monotonic())
         if getattr(conn, "_civia_cancelled_by_deadline", False):
             setattr(exc, "_civia_cancelled_by_deadline", True)
+        if getattr(conn, "_civia_transaction_timeout_set", False):
+            setattr(exc, "_civia_transaction_timeout_set", True)
         raise
     finally:
         unregister_active_conn(conn)

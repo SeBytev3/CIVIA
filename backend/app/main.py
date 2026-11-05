@@ -36,6 +36,7 @@ from app.db import (
     get_operation_record,
     reconcile_operation,
     run_migrations,
+    sanitize_credentials_deep,
 )
 from app.observability import get_observability_summary
 from app.repository import (
@@ -606,7 +607,7 @@ def query_civia_agent(
     return {
         "answer": res["answer"],
         "trace_group_id": res["trace_group_id"],
-        "tools_invoked": res["tools_invoked"],
+        "tools_invoked": sanitize_credentials_deep(res.get("tools_invoked", [])),
         "iterations_used": res["iterations_used"],
         "max_iterations": res["max_iterations"],
         "total_tokens_used": res["total_tokens_used"],
@@ -667,8 +668,8 @@ def get_operation_status(
     if not is_authorized and is_admin_or_private:
         raise HTTPException(status_code=404, detail="Operación no encontrada.")
 
-    # 2. Reconciliación: SOLO para consultas autorizadas o públicas (F5 y F6)
-    if rec.get("status") in ("PENDING", "UNKNOWN"):
+    # 2. Reconciliación con escritura reservada exclusivamente a peticiones autorizadas (F6)
+    if is_authorized and rec.get("status") in ("PENDING", "UNKNOWN"):
         rec = reconcile_operation(operation_id)
 
     # 3. Minimización de datos: result_payload, target_id y error solo para invocadores autorizados (F2)

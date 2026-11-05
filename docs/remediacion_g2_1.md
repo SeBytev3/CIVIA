@@ -698,6 +698,33 @@ Archivo: `backend/tests/test_audit_g2_1_8_remediation.py` ejecutado en PostgreSQ
   - Modo SYNTHETIC: **`121 passed, 2 skipped, 0 failed in 25.08s`** (100% éxito).
 - **Scripts Independientes de Codex:**
   - `error_provenance.py`: Verificado (`classified_local: false` para `external_25P04_margin`, `real_admin_shutdown` y `real_undefined_table`).
+
+---
+
+## 19. Remediación Definitiva F1, F2, F4, F6 y F8 con Skills Obligatorias (2026-11-05)
+
+### 19.1. Matriz de Skills Obligatorias Aplicadas
+
+| Hallazgo | Skill Utilizada | Instrucción Concreta Aplicada | Verificación Realizada |
+|---|---|---|---|
+| **F1** (Secretos anidados en proposed, fingerprint, result, trazas y proveedor) | `api-security` & `backend-security-coder` | Implementar `sanitize_credentials_deep` recursivo para dicts/listas/tuplas. Excluir credenciales recursivamente de huella SHA-256 (`canonical_payload_hash`), `register_operation_intent`, `mark_operation_committed`, `record_ai_trace` y `conversation_messages` al LLM. Mantener credenciales exclusivamente fuera de banda. | `closure.py`: `secret_in_proposed: false`, `legitimate_preserved: true`, `secret_affects_fingerprint: false`, `secret_in_result: false`, `secret_in_traces: false`, `nested_secret_in_public_response: false`, `nested_secret_back_to_provider: false`. |
+| **F2** (Fuga de `approval_id` privado en replay no autorizado) | `api-security` & `backend-security-coder` | Eliminar incondicionalmente la exposición de `approval_id` y de cualquier metadato sensible en respuestas a invocadores sin credencial legítima (`is_owner == False`), tanto en COMMITTED como en polling PENDING. Retornar exclusivamente `operation_id`, `status`, `target_id: None`, `replayed: True` y `mensaje`. | `closure.py`: `F2_matrix` en 12 combinaciones (COMMITTED, ABORTED, PENDING, UNKNOWN para owner, wrong y anonymous). `approval_exposed: false`, `result_exposed: false`, `target_exposed: false`. |
+| **F4** (Recuperación PWA real tras pérdida de respuesta) | `frontend-api-integration-patterns` & `react-patterns` & `playwright-skill` | Crear objeto de intento `civia_pwa_agent_attempt` en `localStorage` antes de emitir la petición HTTP. En caso de pérdida de respuesta (502 / drop), reintentar reutiliza exactamente la misma `idempotencyKey` y `operationToken` (evitando duplicar efectos). Al recargar la página, restaurar la interfaz de seguimiento `ID Operación:` y permitir polling definitivo. Botón explícito para limpiar sesión. | `pwa.cjs` con Edge headless real contra Nginx/FastAPI/PG: `same_key: true`, `same_capability: true`, `committed_visible: true`, `private_result_visible: true`, `operation_ui_restored: true`, 1 solo efecto en `audit_pwa_business`. |
+| **F6** (Reconciliación con escritura reservada a peticiones autorizadas) | `postgres-best-practices` & `api-security` | Condicionar la invocación de `reconcile_operation` en `GET /api/operations/{id}` estrictamente a `is_authorized == True`. Consultas públicas anónimas a operaciones UNKNOWN leen el estado actual sin mutar la base de datos. | `public_reconcile_and_snapshot.py`: `check: public_unauthorized_reconcile`, `http: 200`, `before: UNKNOWN`, `after: UNKNOWN`, `result_exposed: false`. |
+| **F8** (Procedencia causal de cancelación demostrable e inmutable) | `systematic-debugging` & `backend-security-coder` | 1) Sellar `_civia_cancelled_by_deadline = True` únicamente tras el retorno exitoso de `c.cancel()`. 2) Memoizar inmutablemente el resultado de `is_deadline_cancellation` respecto al deadline evaluado en `_civia_is_local_cancellation`. 3) No inferir causalidad local por paso del tiempo o expiración posterior de capability. | `closure.py`: `F8_capability_expiry` (`first: false`, `second: false`, `own_cancellation_marked: false`), `F8_failed_cancel_origin` (`cancel_success_count: 0`, `classified_local: false`), `F8_first_observation_late` (`classified_local: true`, `own_marker: false`). |
+
+### 19.2. Resultados de Verificación de Suites Completas
+
+- **Suites Backend CIVIA:**
+  - Suite BLANK (`test_suite_blank`): **`121 passed, 2 skipped, 0 failed in 25.38s`** (100% éxito).
+  - Suite SYNTHETIC (`test_suite_synthetic`): **`121 passed, 2 skipped, 0 failed in 25.01s`** (100% éxito).
+- **Prueba Playwright PWA E2E (`pwa.cjs`):**
+  - `first_response_dropped`: HTTP 502, storage `["civia_pwa_agent_attempt"]`.
+  - `pwa_retry`: HTTP 200, `same_key: true`, `same_capability: true`.
+  - `pwa_poll`: `committed_visible: true`, `private_result_visible: true`.
+  - `page_reload`: `operation_ui_restored: true`, storage `["civia_pwa_agent_attempt"]`.
+  - Integridad en BD: `business_effects: 1` (cero duplicación).
+
   - `migration_and_unknown.py`: Verificado (`http_state: COMMITTED`, `helper_state: COMMITTED`).
   - `final_probes.py`: Verificado (`private_message_exposed: false`, `target_exposed: null`, upgrade 005→006 preservado).
   - `adversarial.py`: Verificado (sin fugas en replays, trigger terminal inmutable, `rest_concurrent` con detalles completos).

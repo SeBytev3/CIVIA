@@ -108,6 +108,16 @@ function createCanvasDemoPhoto(category: ReportCategory): Promise<File> {
   });
 }
 
+interface AgentQueryAttempt {
+  query: string;
+  idempotencyKey: string;
+  operationToken: string;
+  operationId?: string | null;
+  operationStatus?: string | null;
+  lastResponse?: AgentQueryResponse;
+  updatedAt: number;
+}
+
 export function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('explorar');
   const [stats, setStats] = useState<ReportStats | null>(null);
@@ -160,6 +170,17 @@ export function App() {
   const [trackingBusy, setTrackingBusy] = useState<boolean>(false);
 
   // Asistente agéntico
+  const [activeAttempt, setActiveAttempt] = useState<AgentQueryAttempt | null>(() => {
+    try {
+      const saved = localStorage.getItem('civia_pwa_agent_attempt');
+      if (saved) {
+        return JSON.parse(saved) as AgentQueryAttempt;
+      }
+    } catch {
+      // Ignorar fallo de parseo
+    }
+    return null;
+  });
   const [agentInput, setAgentInput] = useState<string>(
     '¿Cuántos reportes de HUECO y QUEMA hay registrados en la Comuna 2 de Cali?'
   );
@@ -167,6 +188,18 @@ export function App() {
   const [agentResponse, setAgentResponse] = useState<AgentQueryResponse | null>(null);
   const [operationStatus, setOperationStatus] = useState<OperationStatusResponse | null>(null);
   const [checkingOperation, setCheckingOperation] = useState<boolean>(false);
+
+  // Sincronizar estado inicial desde intento previo en localStorage (F4)
+  useEffect(() => {
+    if (activeAttempt) {
+      if (activeAttempt.query) {
+        setAgentInput(activeAttempt.query);
+      }
+      if (activeAttempt.lastResponse) {
+        setAgentResponse(activeAttempt.lastResponse);
+      }
+    }
+  }, []);
 
   // Zona Admin protegida (no hardcodear secretos en el bundle cliente)
   const [adminToken, setAdminToken] = useState<string>('');
@@ -471,6 +504,17 @@ export function App() {
     }
   };
 
+  const handleClearAgentSession = () => {
+    try {
+      localStorage.removeItem('civia_pwa_agent_attempt');
+    } catch {
+      // Ignorar fallo de storage
+    }
+    setActiveAttempt(null);
+    setAgentResponse(null);
+    setOperationStatus(null);
+  };
+
   const handleRunAgentQuery = async (e?: React.FormEvent, presetQuery?: string) => {
     if (e) e.preventDefault();
     const q = (presetQuery ?? agentInput).trim();
@@ -479,15 +523,59 @@ export function App() {
     setAgentBusy(true);
     setGlobalError(null);
     setOperationStatus(null);
+
+    // Obtener o reutilizar intento persistente para la misma consulta (F4)
+    let currentAttempt: AgentQueryAttempt | null = null;
     try {
-      const idempKey = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `idemp-${Date.now()}`;
-      const opToken = typeof crypto !== 'undefined' && crypto.randomUUID ? `opt-${crypto.randomUUID()}` : `opt-${Date.now()}`;
+      const saved = localStorage.getItem('civia_pwa_agent_attempt');
+      if (saved) {
+        const parsed = JSON.parse(saved) as AgentQueryAttempt;
+        if (parsed.query === q && parsed.idempotencyKey && parsed.operationToken) {
+          currentAttempt = parsed;
+        }
+      }
+    } catch {
+      // Fallback si localStorage falla
+    }
+
+    if (!currentAttempt) {
+      const idempKey =
+        typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `idemp-${Date.now()}`;
+      const opToken =
+        typeof crypto !== 'undefined' && crypto.randomUUID ? `opt-${crypto.randomUUID()}` : `opt-${Date.now()}`;
+      currentAttempt = {
+        query: q,
+        idempotencyKey: idempKey,
+        operationToken: opToken,
+        updatedAt: Date.now(),
+      };
+      try {
+        localStorage.setItem('civia_pwa_agent_attempt', JSON.stringify(currentAttempt));
+      } catch {
+        // Fallback
+      }
+      setActiveAttempt(currentAttempt);
+    }
+
+    try {
       const res = await queryAgent({
         query: q,
-        idempotency_key: idempKey,
-        operation_token: opToken,
+        idempotency_key: currentAttempt.idempotencyKey,
+        operation_token: currentAttempt.operationToken,
       });
       setAgentResponse(res);
+      currentAttempt.lastResponse = res;
+      if (res.operation_id) {
+        currentAttempt.operationId = res.operation_id;
+        currentAttempt.operationStatus = res.operation_status;
+      }
+      currentAttempt.updatedAt = Date.now();
+      try {
+        localStorage.setItem('civia_pwa_agent_attempt', JSON.stringify(currentAttempt));
+      } catch {
+        // Fallback
+      }
+      setActiveAttempt(currentAttempt);
     } catch (err) {
       setGlobalError(err instanceof Error ? err.message : 'Error al consultar el asistente.');
     } finally {
@@ -1355,99 +1443,126 @@ export function App() {
               </button>
             </form>
 
-            {agentResponse && (
-              <div style={{ background: '#f5f9f8', padding: '1.1rem', borderRadius: '10px', border: '1px solid var(--civia-border)' }}>
-                <div className="civia-badge-row" style={{ marginBottom: '0.65rem' }}>
-                  <span className="civia-badge status">
-                    Vueltas: {agentResponse.iterations_used} / {agentResponse.max_iterations}
-                  </span>
-                  <span className="civia-badge status">
-                    Tokens: {agentResponse.total_tokens_used} / {agentResponse.max_tokens_budget}
-                  </span>
-                  <span className="civia-badge status">Latencia: {agentResponse.latency_ms} ms</span>
-                  {agentResponse.guardrail_triggered && (
-                    <span className="civia-badge synthetic">
-                      Límite activado: {agentResponse.guardrail_triggered}
-                    </span>
-                  )}
-                </div>
+            {(() => {
+              const effectiveOpId = agentResponse?.operation_id || activeAttempt?.operationId;
+              const effectiveOpToken = agentResponse?.query_token || activeAttempt?.operationToken;
+              const effectiveOpStatus = agentResponse?.operation_status || activeAttempt?.operationStatus;
 
-                <div style={{ background: '#ffffff', padding: '0.9rem', borderRadius: '8px', border: '1px solid #dce4e2', marginBottom: '0.85rem', whiteSpace: 'pre-wrap' }}>
-                  <strong>Respuesta del Agente:</strong>
-                  <p style={{ margin: '0.4rem 0 0' }}>{agentResponse.answer}</p>
-                </div>
+              if (!agentResponse && !effectiveOpId) {
+                return null;
+              }
 
-                {agentResponse.requires_human_approval && (
-                  <div className="civia-alert info">
-                    <strong>Guardrail #4 activo (Aprobación Humana Obligatoria):</strong> La IA no modificó directamente la tabla de reportes. Se registró la solicitud pendiente #{agentResponse.pending_approval_id?.slice(0, 8)} en la bandeja de Observabilidad Admin.
-                  </div>
-                )}
-
-                <div>
-                  <strong style={{ fontSize: '0.88rem' }}>
-                    Herramientas tipadas invocadas ({agentResponse.tools_invoked.length}):
-                  </strong>
-                  {agentResponse.tools_invoked.map((t, idx) => (
-                    <pre
-                      key={`${t.tool}-${idx}`}
-                      style={{
-                        background: '#14242b',
-                        color: '#e2f1ef',
-                        padding: '0.65rem',
-                        borderRadius: '8px',
-                        fontSize: '0.78rem',
-                        overflowX: 'auto',
-                        marginTop: '0.4rem',
-                      }}
-                    >
-                      {`Herramienta: ${t.tool}(${JSON.stringify(t.args)})\nResultado SQL/Acción: ${JSON.stringify(t.result, null, 2)}`}
-                    </pre>
-                  ))}
-                </div>
-
-                {agentResponse.operation_id && (
-                  <div style={{ marginTop: '0.8rem', padding: '0.8rem', background: '#eef6f5', borderRadius: '8px', border: '1px solid #c8deda' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
-                      <span style={{ fontSize: '0.85rem' }}>
-                        <strong>ID Operación:</strong> <code>{agentResponse.operation_id}</code>
-                        {agentResponse.operation_status && (
-                          <span className="civia-badge status" style={{ marginLeft: '0.5rem' }}>
-                            {agentResponse.operation_status}
+              return (
+                <div style={{ background: '#f5f9f8', padding: '1.1rem', borderRadius: '10px', border: '1px solid var(--civia-border)' }}>
+                  {agentResponse && (
+                    <>
+                      <div className="civia-badge-row" style={{ marginBottom: '0.65rem' }}>
+                        <span className="civia-badge status">
+                          Vueltas: {agentResponse.iterations_used} / {agentResponse.max_iterations}
+                        </span>
+                        <span className="civia-badge status">
+                          Tokens: {agentResponse.total_tokens_used} / {agentResponse.max_tokens_budget}
+                        </span>
+                        <span className="civia-badge status">Latencia: {agentResponse.latency_ms} ms</span>
+                        {agentResponse.guardrail_triggered && (
+                          <span className="civia-badge synthetic">
+                            Límite activado: {agentResponse.guardrail_triggered}
                           </span>
                         )}
-                      </span>
-                      <button
-                        type="button"
-                        className="civia-btn secondary"
-                        style={{ padding: '0.3rem 0.7rem', fontSize: '0.8rem' }}
-                        disabled={checkingOperation}
-                        onClick={() => handleCheckOperationStatus(agentResponse.operation_id!, agentResponse.query_token ?? undefined)}
-                      >
-                        {checkingOperation ? 'Consultando...' : 'Verificar estado definitivo'}
-                      </button>
-                    </div>
-
-                    {operationStatus && (
-                      <div style={{ marginTop: '0.6rem', padding: '0.6rem', background: '#ffffff', borderRadius: '6px', fontSize: '0.82rem' }}>
-                        <div><strong>Estado persistido:</strong> {operationStatus.status}</div>
-                        {operationStatus.target_id && <div><strong>Reporte objetivo:</strong> {operationStatus.target_id}</div>}
-                        {operationStatus.operation_type && <div><strong>Tipo de operación:</strong> {operationStatus.operation_type}</div>}
-                        {operationStatus.result_payload && (
-                          <pre style={{ margin: '0.4rem 0 0', padding: '0.4rem', background: '#f5f5f5', borderRadius: '4px', maxHeight: '120px', overflow: 'auto' }}>
-                            {JSON.stringify(operationStatus.result_payload, null, 2)}
-                          </pre>
-                        )}
-                        {operationStatus.error_message && (
-                          <div style={{ color: '#d32f2f', marginTop: '0.3rem' }}>
-                            <strong>Fallo:</strong> {operationStatus.error_message}
-                          </div>
-                        )}
                       </div>
-                    )}
+
+                      <div style={{ background: '#ffffff', padding: '0.9rem', borderRadius: '8px', border: '1px solid #dce4e2', marginBottom: '0.85rem', whiteSpace: 'pre-wrap' }}>
+                        <strong>Respuesta del Agente:</strong>
+                        <p style={{ margin: '0.4rem 0 0' }}>{agentResponse.answer}</p>
+                      </div>
+
+                      {agentResponse.requires_human_approval && (
+                        <div className="civia-alert info">
+                          <strong>Guardrail #4 activo (Aprobación Humana Obligatoria):</strong> La IA no modificó directamente la tabla de reportes. Se registró la solicitud pendiente #{agentResponse.pending_approval_id?.slice(0, 8)} en la bandeja de Observabilidad Admin.
+                        </div>
+                      )}
+
+                      {agentResponse.tools_invoked && agentResponse.tools_invoked.length > 0 && (
+                        <div>
+                          <strong style={{ fontSize: '0.88rem' }}>
+                            Herramientas tipadas invocadas ({agentResponse.tools_invoked.length}):
+                          </strong>
+                          {agentResponse.tools_invoked.map((t, idx) => (
+                            <pre
+                              key={`${t.tool}-${idx}`}
+                              style={{
+                                background: '#14242b',
+                                color: '#e2f1ef',
+                                padding: '0.65rem',
+                                borderRadius: '8px',
+                                fontSize: '0.78rem',
+                                overflowX: 'auto',
+                                marginTop: '0.4rem',
+                              }}
+                            >
+                              {`Herramienta: ${t.tool}(${JSON.stringify(t.args)})\nResultado SQL/Acción: ${JSON.stringify(t.result, null, 2)}`}
+                            </pre>
+                          ))}
+                        </div>
+                      )}
+                    </>
+                  )}
+
+                  {effectiveOpId && (
+                    <div style={{ marginTop: '0.8rem', padding: '0.8rem', background: '#eef6f5', borderRadius: '8px', border: '1px solid #c8deda' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                        <span style={{ fontSize: '0.85rem' }}>
+                          <strong>ID Operación:</strong> <code>{effectiveOpId}</code>
+                          {effectiveOpStatus && (
+                            <span className="civia-badge status" style={{ marginLeft: '0.5rem' }}>
+                              {effectiveOpStatus}
+                            </span>
+                          )}
+                        </span>
+                        <button
+                          type="button"
+                          className="civia-btn secondary"
+                          style={{ padding: '0.3rem 0.7rem', fontSize: '0.8rem' }}
+                          disabled={checkingOperation}
+                          onClick={() => handleCheckOperationStatus(effectiveOpId, effectiveOpToken ?? undefined)}
+                        >
+                          {checkingOperation ? 'Consultando...' : 'Verificar estado definitivo'}
+                        </button>
+                      </div>
+
+                      {operationStatus && (
+                        <div style={{ marginTop: '0.6rem', padding: '0.6rem', background: '#ffffff', borderRadius: '6px', fontSize: '0.82rem' }}>
+                          <div><strong>Estado persistido:</strong> {operationStatus.status}</div>
+                          {operationStatus.target_id && <div><strong>Reporte objetivo:</strong> {operationStatus.target_id}</div>}
+                          {operationStatus.operation_type && <div><strong>Tipo de operación:</strong> {operationStatus.operation_type}</div>}
+                          {operationStatus.result_payload && (
+                            <pre style={{ margin: '0.4rem 0 0', padding: '0.4rem', background: '#f5f5f5', borderRadius: '4px', maxHeight: '120px', overflow: 'auto' }}>
+                              {JSON.stringify(operationStatus.result_payload, null, 2)}
+                            </pre>
+                          )}
+                          {operationStatus.error_message && (
+                            <div style={{ color: '#d32f2f', marginTop: '0.3rem' }}>
+                              <strong>Fallo:</strong> {operationStatus.error_message}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  <div style={{ marginTop: '0.85rem', display: 'flex', justifyContent: 'flex-end' }}>
+                    <button
+                      type="button"
+                      className="civia-btn secondary"
+                      style={{ fontSize: '0.78rem', padding: '0.3rem 0.65rem' }}
+                      onClick={handleClearAgentSession}
+                    >
+                      Nueva consulta / Limpiar sesión
+                    </button>
                   </div>
-                )}
-              </div>
-            )}
+                </div>
+              );
+            })()}
           </section>
         )}
 

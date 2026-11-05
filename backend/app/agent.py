@@ -43,6 +43,7 @@ from app.db import (
     reset_current_operation,
     reset_deadline_context,
     reset_execution_capability,
+    sanitize_credentials_deep,
     set_current_operation,
     set_deadline_context,
     set_execution_capability,
@@ -771,19 +772,8 @@ def execute_tool_with_timeout(
         target_id = str(tool_args.get("identificador") or tool_args.get("report_id") or "")
         eff_client_token = client_token or str(tool_args.get("operation_token") or tool_args.get("client_token") or tool_args.get("edit_token") or "") or None
 
-        # Excluir credenciales del payload durable persistido
-        clean_proposed = {
-            k: v for k, v in tool_args.items()
-            if k not in (
-                "operation_token",
-                "client_token",
-                "edit_token",
-                "x_operation_token",
-                "x_edit_token",
-                "admin_token",
-                "token",
-            )
-        }
+        # Excluir credenciales del payload durable persistido recursivamente (F1)
+        clean_proposed = sanitize_credentials_deep(tool_args, include_control_keys=False)
 
         claim = register_operation_intent(
             operation_id=op_id,
@@ -802,16 +792,13 @@ def execute_tool_with_timeout(
             if existing_status == "COMMITTED":
                 if is_owner and claim.get("result_payload"):
                     return claim["result_payload"]
-                res_obj = {
+                return {
                     "operation_id": str(existing_op_id),
                     "status": "COMMITTED",
                     "target_id": None,
                     "replayed": True,
                     "mensaje": "Operación ya confirmada previamente.",
                 }
-                if claim.get("result_payload") and "approval_id" in claim["result_payload"]:
-                    res_obj["approval_id"] = claim["result_payload"]["approval_id"]
-                return res_obj
 
             elif existing_status == "PENDING":
                 poll_deadline = min(eff_deadline, time.monotonic() + timeout_sec)
@@ -821,16 +808,13 @@ def execute_tool_with_timeout(
                     if rec and rec.get("status") == "COMMITTED":
                         if is_owner and rec.get("result_payload"):
                             return rec["result_payload"]
-                        res_obj = {
+                        return {
                             "operation_id": str(existing_op_id),
                             "status": "COMMITTED",
                             "target_id": None,
                             "replayed": True,
                             "mensaje": "Operación ya confirmada previamente.",
                         }
-                        if rec.get("result_payload") and "approval_id" in rec["result_payload"]:
-                            res_obj["approval_id"] = rec["result_payload"]["approval_id"]
-                        return res_obj
                     if rec and rec.get("status") in ("ABORTED", "UNKNOWN"):
                         break
 
@@ -861,6 +845,8 @@ def execute_tool_with_timeout(
                 raise RuntimeError(f"Estado de operación no reconocido en reclamo: {existing_status}")
         else:
             op_id = uuid.UUID(str(claim["operation_id"]))
+            if "operation_token" not in tool_args and claim.get("query_token"):
+                tool_args["operation_token"] = claim["query_token"]
 
     def _worker() -> dict[str, Any]:
         worker_tid.append(threading.get_ident())
@@ -1620,11 +1606,12 @@ def run_civia_agent(
                 tname = tc["name"]
                 targs = tc.get("args") or {}
                 raw_gpart = tc.get("raw_gemini_part")
+                clean_assistant_args = sanitize_credentials_deep(targs)
                 conversation.append(
                     {
                         "role": "assistant_tool",
                         "name": tname,
-                        "args": targs,
+                        "args": clean_assistant_args,
                         "raw_gemini_part": raw_gpart,
                     }
                 )
@@ -1687,24 +1674,14 @@ def run_civia_agent(
                     pending_approval_id = t_res.get("approval_id")
                     guardrail_triggered = "HUMAN_APPROVAL_REQUIRED"
 
-                safe_targs = {
-                    k: v for k, v in targs.items()
-                    if k not in (
-                        "operation_token",
-                        "client_token",
-                        "edit_token",
-                        "x_operation_token",
-                        "x_edit_token",
-                        "admin_token",
-                        "token",
-                    )
-                }
-                executed_tools.append({"tool": tname, "args": safe_targs, "result": t_res})
+                clean_targs = sanitize_credentials_deep(targs)
+                clean_tres = sanitize_credentials_deep(t_res)
+                executed_tools.append({"tool": tname, "args": clean_targs, "result": clean_tres})
                 conversation.append(
                     {
                         "role": "tool_result",
                         "name": tname,
-                        "result": t_res,
+                        "result": clean_tres,
                         "had_gemini_part": bool(raw_gpart),
                     }
                 )

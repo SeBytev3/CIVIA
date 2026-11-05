@@ -474,3 +474,34 @@
   - Frontend PWA: `tsc -b && vite build` ejecutado en imagen Docker Node 22: **`0 errores, built in 2.02s`**.
   - Cero regresiones en controles aprobados G1, A-02, N-02, M-02, M-03 COPY o M-06. Cero commits en `main` ni push remoto.
   - Contenedores de prueba y redes efímeras eliminados. Servicios habituales intactos y saludables. Detenido para dictamen de auditoría de Codex.
+
+## Auditoría independiente de cierre F1–F8 — 5c21254 (2026-11-04)
+
+- HEAD comprobado: `5c212542185dacf1223c3f96ef5a22c1ce8316c8`, rama `fix/auditoria-final`, árbol inicialmente limpio. Diff completo frente a `187dea0`, contrato, informe previo y ocho pruebas nuevas revisados. Snapshot Git congelado, PostgreSQL 17.11, API y frontend exclusivos.
+- **Dictamen independiente: NO APROBADO.** F1 FAIL, F2 FAIL, F3 PASS, F4 FAIL, F5 PASS, F6 PARCIAL, F7 PASS, F8 FAIL. Informe: `docs/auditoria_codex_g2_1_8_5c21254.md`. No cerrar G2.1.8 F1–F8.
+- F1: replay propio corregido, pero sanitización superficial deja secretos anidados en payload/fingerprint, resultados, trazas y respuesta. F2: se ocultan resultado general/target/error, pero se divulga approval_id privado en COMMITTED y sondeo PENDING→COMMITTED. F8: capability expirada cambia clasificación de la misma excepción externa; cancel fallido deja marca de procedencia propia; primera observación tardía sigue usando tiempo como causa.
+- F4 probado en PWA real con Edge headless de perfil separado, Nginx y FastAPI: primera respuesta descartada por proxy tras aceptar negocio, cliente sin ID/token recibido; reintento UI usa otra clave/capacidad y crea otro efecto sintético. Recarga no restaura seguimiento. Control HTTP conservando credenciales originales sí recupera tras reinicio de API y reintentos concurrentes sin duplicar. No se contactaron proveedores IA; adaptador sintético, SQL/persistencia/transporte reales.
+- F3/F5/F7 pasan los casos de cierre. F6 corrige PID ausente, observación fallida y GET privado anónimo, pero GET público sin credencial aún puede reconciliar UNKNOWN→COMMITTED; no se afirma corrupción del efecto, sino incumplimiento del límite de autorización solicitado. Identidad administrativa compartida documentada como limitación no bloqueante.
+- Suite BLANK: **122 PASS, 1 live excluida**, 20,18 s. SYNTHETIC: **122 PASS, 1 live excluida**, 23,75 s. Incluyen G1/G2/A-02/M-02/COPY/M-06/N-02 y E2E proxy. Ocho remediaciones separadas: **8 PASS**, 2,02 s. Pruebas no modificadas por el auditor.
+- Las dos omisiones posibles se identificaron: prueba live de conectividad (excluida para impedir proveedores externos) y E2E frontend (no omitida aquí; pasa con frontend aislado). Sondeo separado de ambas: 1 PASS y 1 SKIP con razón explícita. No se reproducen ni se inventan las «2 skipped» previas de AG.
+- Instrumentos originales conservados byte por byte y resultados inspeccionados semánticamente; exit 0 no se contó como aprobación. Complementos y navegador preservados en `C:\Users\Jhoesp\AppData\Local\Temp\civia-5c21254-248661f4d8804b998306933c4baa364b`, con snapshot, logs, JSON y capturas. compileall pasó; no equivale a lint. Sin comando/configuración lint Python identificado. git diff --check valida los cambios documentales.
+- Retirados únicamente contenedores, volúmenes exclusivos, dos redes exclusivas e imagen frontend del auditor, previa comprobación de IDs. API, PostgreSQL y frontend habituales siguen saludables. HEAD/rama intactos; únicos cambios del checkout: informe y esta anotación. Sin producción/tests modificados, Autopilot, commits, push ni merge. Auditoría detenida al entregar.
+
+---
+
+## Remediación definitiva F1, F2, F4, F6 y F8 con Skills obligatorias (2026-11-05)
+
+- **Skills aplicadas disciplinadamente**: `api-security`, `backend-security-coder`, `systematic-debugging`, `frontend-api-integration-patterns`, `react-patterns`, `playwright-skill`, `postgres-best-practices`, `code-review-and-quality`. Norma incorporada a `AGENTS.md`.
+- **F1 (Sanitización profunda recursiva)**: Implementado `sanitize_credentials_deep` para dicts/listas/tuplas. Excluye credenciales recursivamente de `canonical_payload_hash`, `register_operation_intent`, `mark_operation_committed`, `record_ai_trace` y `conversation_messages` al LLM. Credenciales mantenidas exclusivamente fuera de banda.
+- **F2 (Privacidad absoluta en replays)**: Eliminada la fuga de `approval_id` y metadatos sensibles en replays y polling para callers no autorizados (`is_owner == False`), retornando únicamente estructura mínima.
+- **F4 (Recuperación PWA real tras pérdida de respuesta)**: Objeto `civia_pwa_agent_attempt` persistido en `localStorage` antes del POST. Reintentos ante 502/drop reutilizan la misma `idempotencyKey` y `operationToken` (cero duplicación de efectos en BD). Al recargar la página, se restaura la interfaz de seguimiento `ID Operación:` y se permite el polling definitivo.
+- **F6 (Reconciliación con escritura reservada a peticiones autorizadas)**: `reconcile_operation` en `GET /api/operations/{id}` condicionado estrictamente a `is_authorized == True`. Consultas públicas anónimas a UNKNOWN no mutan la BD.
+- **F8 (Procedencia causal de cancelación demostrable)**: `_civia_cancelled_by_deadline = True` se fija únicamente tras éxito de `c.cancel()`. `is_deadline_cancellation` memoiza inmutablemente el resultado respecto al deadline evaluado en `_civia_is_local_cancellation`. No se infiere causalidad local por paso del tiempo posterior ni por expiración de capability.
+- **Verificación oficial completada**:
+  - `closure.py`: Todos los checks en PASS (`F1_nested`, `F1_result`, `F1_trace_and_prompt`, `F2_matrix` 12/12, `F5_unknown_absent`, `F5_unknown_own_concurrent`, `F6_unauthorized_get`, `F8_capability_expiry` statement y transaction, `F8_failed_cancel_origin`, `F8_first_observation_late`).
+  - `check_f6.py` (`public_unauthorized_reconcile`): `http: 200, before: UNKNOWN, after: UNKNOWN, result_exposed: false`.
+  - Playwright PWA E2E (`pwa.cjs`): `first_response_dropped` (502, storage `["civia_pwa_agent_attempt"]`), `pwa_retry` (`same_key: true, same_capability: true`), `pwa_poll` (`committed_visible: true, private_result_visible: true`), `page_reload` (`operation_ui_restored: true`). Efectos de negocio en BD: exactamente 1.
+  - Suite BLANK (`test_suite_blank`): **`121 passed, 2 skipped in 25.38s`** (0 fallos).
+  - Suite SYNTHETIC (`test_suite_synthetic`): **`121 passed, 2 skipped in 25.01s`** (0 fallos).
+  - Frontend TypeScript/Vite compilado limpiamente: **0 errores**.
+- **Contenedores efímeros eliminados**: `civia_audit_v2_*` retirados. Servicios habituales intactos y saludables. Detenido para dictamen de auditoría de Codex.

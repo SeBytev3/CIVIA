@@ -5,7 +5,7 @@ from typing import Any
 from uuid import UUID
 import uuid
 
-from app.db import get_conn
+from app.db import get_conn, sanitize_credentials_deep
 
 # Tarifas de referencia documentadas (USD por 1M de tokens) para estimación transparente de costos
 MODEL_PRICING_PER_1M: dict[str, tuple[float, float]] = {
@@ -61,6 +61,8 @@ def record_ai_trace(
     cost = estimate_cost_usd(model, prompt_tokens, completion_tokens)
     safe_error_detail = sanitize_secret_text(error_detail)
     safe_error_code = sanitize_secret_text(error_code)
+    safe_tool_calls = sanitize_credentials_deep(tool_calls or [])
+    safe_metadata = sanitize_credentials_deep(metadata or {})
 
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -97,8 +99,8 @@ def record_ai_trace(
                     cost,
                     safe_error_code,
                     safe_error_detail,
-                    json.dumps(tool_calls or [], ensure_ascii=False),
-                    json.dumps(metadata or {}, ensure_ascii=False),
+                    json.dumps(safe_tool_calls, ensure_ascii=False),
+                    json.dumps(safe_metadata, ensure_ascii=False),
                 ),
             )
             conn.commit()
