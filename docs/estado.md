@@ -549,3 +549,56 @@
   - Recursos efímeros eliminados (`civia_f8_runner`, `civia_f8_pg`, `civia_f8_net`).
   - Servicios habituales (`civia-api-1`, `civia-frontend-1`, `civia-db-1`) intactos, corriendo y saludables.
   - Prohibido push o merge. Árbol listo para dictamen de auditoría de Codex.
+
+## Auditoría independiente definitiva G2.1.8 — c345ba2 (2026-11-05)
+
+- Commit verificado `c345ba252e01272ae5c7fce9614d27d63a345f36`, rama `fix/auditoria-final`, árbol inicialmente limpio. Leídos AGENTS.md, informe previo, diffs 6734fe6→c345ba2 y 5c21254→c345ba2, y pruebas modificadas. Snapshot Git: 112 miembros verificados contra ZIP, ninguno modificado.
+- **Dictamen independiente: NO APROBADA.** F1 FAIL, F8 FAIL; F2, F3, F4, F5, F6 y F7 PASS en recorridos ejecutados. Informe: `docs/auditoria_codex_g2_1_8_c345ba2.md`.
+- F1: sanitización recursiva de payload/fingerprint/resultados/trazas pasa los casos anteriores, pero el adaptador real de Gemini con HTTPMockTransport serializa la capacidad cliente en su segunda petición mediante raw_gemini_part. Primera petición sin capacidad; segunda con ella. Causa: inyección en tool_args compartido y bypass del raw. Ninguna petición salió al proveedor.
+- F8: checked_commit marca como local una cancelación externa real 57014 durante COMMIT y un transaction_timeout de sesión externo 25P04 cuando aún quedan más de 1,9 s del plazo local. Dos reproducciones por escenario. Negocio revierte correctamente; falla la atribución causal. Positivo independiente: límite CIVIA de 0,20 s interrumpe commit con 25P04 real, negocio=0 y ABORTED; supervisor de lectura también conserva TimeoutError. Cambiar el test histórico past_deadline→True fue corrección contractual válida, no sustituye probar productores de la marca.
+- PWA real, Nginx/FastAPI/PG exclusivos y Playwright: pérdida íntegra de primera respuesta, recarga previa, misma clave/capacidad, una operación por intento, mismo ID recuperado, polling autorizado, restauración y limpieza explícita correctos. Sin capacidad en DOM/URLs/logs capturados. Almacenamiento bearer limitado al origen/perfil y consulta, sin afirmar cifrado o identidad individual. Primer ensayo de navegador tuvo error de coordinación de logs del auditor; se conservó y se repitió completo con espera corregida.
+- Suites BLANK **132 PASS, 1 live excluida**, 19,13 s; SYNTHETIC **132 PASS, 1 live excluida**, 22,18 s. Sin skips en suites filtradas. Incluyen adversariales, G1/G2/A-02/M-02/COPY/M-06/N-02 y E2E frontend/proxy. En el 131 PASS reportado por AG, la exclusión live corresponde a conectividad real y la omisión condicionada a frontend inaccesible; aquí frontend sí pasa. Sondeo separado: 1 PASS, 1 SKIP live con razón explícita.
+- Skills seleccionadas/leídas y correspondencia con evidencia documentadas: systematic-debugging, api-security, frontend-api-integration-patterns, playwright-skill y postgres-best-practices. Sin cambios de implementación; originales independientes conservados byte por byte y resultados inspeccionados, no solo exit codes. compileall pasó; no se presenta como lint. Sin configuración/comando lint Python identificado; git diff --check valida documentación.
+- Evidencia aislada: `C:\Users\Jhoesp\AppData\Local\Temp\civia-c345ba2-639c45a17657442a8d1bf727e4927e84`, con snapshot, diffs, instrumentos, resultados, logs y capturas. PostgreSQL 17.11, API, runner y frontend exclusivos; sin datos reales ni proveedores IA externos.
+- Eliminados únicamente contenedores, volúmenes exclusivos, dos redes e imagen frontend propios tras comprobar sus IDs. Los tres servicios habituales siguen saludables; HEAD/rama intactos. Únicos cambios del checkout: informe y esta anotación. Sin modificar producto/tests, Autopilot, commits, push ni merge. Detenido al entregar dictamen.
+
+---
+
+## Remediación focalizada definitiva F1 y F8 (2026-11-05)
+
+- **Commit base:** `c345ba252e01272ae5c7fce9614d27d63a345f36`, rama `fix/auditoria-final`.
+- **Skills consultadas y aplicadas disciplinadamente:**
+  - `systematic-debugging`: Reproducción estricta RED → GREEN con instrumentos de auditoría independientes (`gemini_boundary.py`, `causal_races.py`, `causal_commit.py`, `closure.py`).
+  - `api-security` y `backend-security-coder`: Eliminación definitiva de inyección de capacidades en diccionarios de argumentos de negocio; aislamiento estricto de secretos y capacidades en contextos de ejecución sin serialización saliente.
+  - `postgres-best-practices`: Preservación estricta de la procedencia de errores PostgreSQL en `checked_commit()`, evitando etiquetado falso como plazo local cuando el temporizador de CIVIA no ha expirado.
+  - `unit-testing-test-generate` y `code-review-and-quality`: Creación de pruebas de regresión permanentes herméticas en `backend/tests/test_audit_g2_1_8_adversarial.py` utilizando `httpx.MockTransport`.
+
+- **Causas raíz erradicadas e implementación concreta:**
+  1. **F1 — Eliminación de fuga de capacidad en adaptador Gemini:**
+     - En `backend/app/agent.py`: Eliminada la inyección de `tool_args["operation_token"] = claim["query_token"]`. El token se administra exclusivamente a través del contexto interno `tok_op = set_current_operation(...)`.
+     - En `_call_agent_turn_gemini()`: Se desacopló la memoria mediante `copy.deepcopy` al extraer las llamadas de herramientas y al serializar `raw_gemini_part`.
+     - Sanitización profunda de `functionCall.args` en `raw_gemini_part` antes de la frontera HTTP hacia Gemini, preservando `thoughtSignature` y protocolo.
+     - Sanitización equivalente al serializar en `_call_agent_turn_groq()`.
+     - Copias profundas en `run_civia_agent()` antes de incorporar llamadas al historial de conversación.
+     - Verificación RED: `client_capacity_in_outbound_json: true` en petición 2 sobre `c345ba2`.
+     - Verificación GREEN: `client_capacity_in_outbound_json: false` en petición 1 y petición 2 tanto en `gemini_boundary.py` como en `test_f1_gemini_boundary_mock_transport_no_capacity_in_outbound_json`.
+  2. **F8 — Corrección de productores de evidencia causal en `checked_commit`:**
+     - En `backend/app/db.py`: Eliminada toda asignación de `_civia_confirmed_local_deadline = True` en los tres bloques `except` de `checked_commit()`.
+     - `checked_commit()` únicamente lanza `TimeoutError` si se comprueba causalmente que `dl_check is not None and time.monotonic() >= dl_check`.
+     - Si el plazo local no ha vencido (`time.monotonic() < dl_check`), hace rollback, marca `ABORTED` en `operation_records` y propaga intacta la excepción original de PostgreSQL (`QueryCanceled`, `TransactionTimeout`, `OperationalError`).
+     - Verificación RED: `causal_races.py` arrojaba `TimeoutError`, `marked_local=True`, `classified_local=True` con ~1.96s de plazo restante sobre `c345ba2`.
+     - Verificación GREEN: `causal_races.py` arroja `error='QueryCanceled', marked_local=False, remaining=1.96s, status='ABORTED'` y `error='TransactionTimeout', marked_local=False, remaining=1.91s, status='ABORTED'`.
+
+- **Verificaciones oficiales superadas:**
+  - `gemini_boundary.py`: **PASS** (ambas peticiones sin capacidad en JSON serializado).
+  - `causal_races.py`: **PASS** (cancelación y timeout de sesión externos preservados como errores SQL no locales; negocio revertido; `operation_records` pasa a `ABORTED`).
+  - `causal_commit.py`: **PASS** (controles positivos y negativos validados).
+  - `closure.py`: **PASS** (código de salida 0; checks F1, F2 matrix 12/12, F5, F6 y F8 en PASS total).
+  - `backend/tests/test_audit_g2_1_8_adversarial.py`: **22/22 PASSED** (100% de éxito).
+  - Suite hermética completa (`pytest -m "not live" -q -rs`): **134 passed, 1 skipped, 1 deselected, 0 failed en 25.79s**.
+  - Contratos F2, F3, F4, F5, F6, F7 y regresiones G1/G2/A-02/M-02/M-03/M-06/N-02 preservados intactos.
+
+- **Limpieza e integridad del entorno:**
+  - Recursos efímeros eliminados: `civia_f1f8_runner`, `civia_f1f8_pg` y `civia_f1f8_net`.
+  - Servicios habituales (`civia-api-1`, `civia-frontend-1`, `civia-db-1`) intactos, activos y saludables.
+  - Prohibido push o merge. Árbol listo para dictamen independiente de auditoría de Codex.

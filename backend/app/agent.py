@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import contextvars
+import copy
 import json
 import logging
 import math
@@ -845,15 +846,19 @@ def execute_tool_with_timeout(
                 raise RuntimeError(f"Estado de operación no reconocido en reclamo: {existing_status}")
         else:
             op_id = uuid.UUID(str(claim["operation_id"]))
-            if "operation_token" not in tool_args and claim.get("query_token"):
-                tool_args["operation_token"] = claim["query_token"]
+            # REGLA F1: Nunca inyectar credenciales o tokens en tool_args generados por el LLM.
+            # El token se mantiene en el contexto de la operación interna sin mutar tool_args.
 
     def _worker() -> dict[str, Any]:
         worker_tid.append(threading.get_ident())
         tok_cap = set_execution_capability(capability)
         tok_dl = set_deadline_context(eff_deadline)
         tok_tracker = _ACTIVE_TOKEN_TRACKER.set(active_tracker) if active_tracker is not None else None
-        tok_op = set_current_operation({"operation_id": op_id, "tool_name": tool_name}) if op_id else None
+        tok_op = set_current_operation({
+            "operation_id": op_id,
+            "tool_name": tool_name,
+            "query_token": claim.get("query_token") if is_transactional_op else None,
+        }) if op_id else None
         try:
             res = fn(tool_args)
             capability.check_or_raise(f"resultado de herramienta '{tool_name}'")
@@ -1067,12 +1072,18 @@ def _call_agent_turn_gemini(
             contents.append({"role": "user", "parts": [{"text": m["content"]}]})
         elif role == "assistant_tool":
             if m.get("raw_gemini_part"):
-                contents.append({"role": "model", "parts": [m["raw_gemini_part"]]})
+                part_to_send = copy.deepcopy(m["raw_gemini_part"])
+                if isinstance(part_to_send, dict) and "functionCall" in part_to_send:
+                    fc = part_to_send["functionCall"]
+                    if "args" in fc and isinstance(fc["args"], dict):
+                        fc["args"] = sanitize_credentials_deep(fc["args"])
+                contents.append({"role": "model", "parts": [part_to_send]})
             else:
+                clean_args = sanitize_credentials_deep(m.get("args") or {})
                 contents.append(
                     {
                         "role": "model",
-                        "parts": [{"functionCall": {"name": m["name"], "args": m["args"]}}],
+                        "parts": [{"functionCall": {"name": m["name"], "args": clean_args}}],
                     }
                 )
         elif role == "tool_result":
@@ -1135,7 +1146,10 @@ def _call_agent_turn_gemini(
     for p in parts:
         if "functionCall" in p:
             fc = p["functionCall"]
-            tool_calls.append({"name": fc.get("name"), "args": fc.get("args") or {}, "raw_gemini_part": p})
+            raw_args = fc.get("args") or {}
+            clean_args = copy.deepcopy(raw_args)
+            clean_part = copy.deepcopy(p)
+            tool_calls.append({"name": fc.get("name"), "args": clean_args, "raw_gemini_part": clean_part})
         elif "text" in p and not p.get("thought"):
             text_parts.append(p["text"])
 
@@ -1144,6 +1158,9 @@ def _call_agent_turn_gemini(
     out_tok = int(usage.get("candidatesTokenCount") or 0)
     final_text = "\n".join(text_parts).strip() if text_parts else None
     return final_text, tool_calls, in_tok, out_tok
+
+
+_ORIGINAL_CALL_AGENT_TURN_GEMINI = _call_agent_turn_gemini
 
 
 def _call_agent_turn_groq(
@@ -1176,7 +1193,7 @@ def _call_agent_turn_groq(
                             "type": "function",
                             "function": {
                                 "name": m["name"],
-                                "arguments": json.dumps(m["args"], ensure_ascii=False),
+                                "arguments": json.dumps(sanitize_credentials_deep(m.get("args") or {}), ensure_ascii=False),
                             },
                         }
                     ],
@@ -1651,8 +1668,8 @@ def run_civia_agent(
 
             for tc in turn_tool_calls:
                 tname = tc["name"]
-                targs = tc.get("args") or {}
-                raw_gpart = tc.get("raw_gemini_part")
+                targs = copy.deepcopy(tc.get("args") or {})
+                raw_gpart = copy.deepcopy(tc.get("raw_gemini_part"))
                 clean_assistant_args = sanitize_credentials_deep(targs)
                 conversation.append(
                     {

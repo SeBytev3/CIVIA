@@ -896,10 +896,11 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
                 pass
             if isinstance(exc, psycopg.errors.AdminShutdown) or getattr(exc, "sqlstate", None) == "57P01":
                 raise
-            setattr(exc, "_civia_confirmed_local_deadline", True)
             if op_id is not None:
-                mark_operation_aborted(op_id, "Operación abortada por expiración del deadline durante sincronización inicial de commit.")
-            raise TimeoutError("Operación abortada por expiración del deadline durante sincronización inicial de commit.") from exc
+                mark_operation_aborted(op_id, "Operación abortada por fallo durante sincronización inicial de commit.")
+            if dl_check is not None and time.monotonic() >= dl_check:
+                raise TimeoutError("Operación abortada por expiración del deadline durante sincronización inicial de commit.") from exc
+            raise
         except Exception:
             try:
                 rem_fallback = max(1, int((dl_check - time.monotonic()) * 1000))
@@ -946,10 +947,11 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
                 pass
             if isinstance(exc, psycopg.errors.AdminShutdown) or getattr(exc, "sqlstate", None) == "57P01":
                 raise
-            setattr(exc, "_civia_confirmed_local_deadline", True)
             if op_id is not None:
-                mark_operation_aborted(op_id, "Operación abortada por expiración del deadline durante ajuste final de commit.")
-            raise TimeoutError("Operación abortada por expiración del deadline durante ajuste final de commit.") from exc
+                mark_operation_aborted(op_id, "Operación abortada por fallo durante ajuste final de commit.")
+            if dl_check is not None and time.monotonic() >= dl_check:
+                raise TimeoutError("Operación abortada por expiración del deadline durante ajuste final de commit.") from exc
+            raise
         except Exception:
             pass
 
@@ -982,10 +984,11 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
                 pass
             if isinstance(exc, psycopg.errors.AdminShutdown) or getattr(exc, "sqlstate", None) == "57P01":
                 raise
-            setattr(exc, "_civia_confirmed_local_deadline", True)
             if op_id is not None:
-                mark_operation_aborted(op_id, "Operación abortada por expiración del deadline durante commit en base de datos.")
-            raise TimeoutError("Operación abortada por expiración del deadline durante commit en base de datos.") from exc
+                mark_operation_aborted(op_id, "Operación abortada por fallo durante commit en base de datos.")
+            if dl_check is not None and time.monotonic() >= dl_check:
+                raise TimeoutError("Operación abortada por expiración del deadline durante commit en base de datos.") from exc
+            raise
         finally:
             timer.cancel()
             unregister_in_flight_commit(tid)

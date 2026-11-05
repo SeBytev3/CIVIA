@@ -103,7 +103,7 @@ def hermetic_agent_turn_adapter_fixture(monkeypatch, request):
     Sustitución incondicional de adaptadores de turnos principales del agente
     para garantizar hermeticidad absoluta en toda la suite ordinaria de pruebas (G2.1.4).
     """
-    if "live" in request.keywords:
+    if "live" in request.keywords or "allow_mock_transport" in request.keywords:
         yield
         return
 
@@ -172,7 +172,7 @@ def guard_no_external_network_calls(monkeypatch, request):
         if host in ("generativelanguage.googleapis.com", "api.groq.com"):
             if not isinstance(getattr(self, "_transport", None), httpx.MockTransport):
                 unexpected_attempts.append({"test": request.node.name, "host": host, "url": str(req.url)})
-            raise RuntimeError(f"Intento de llamada HTTP externa no permitida hacia {host} en prueba hermética.")
+                raise RuntimeError(f"Intento de llamada HTTP externa no permitida hacia {host} en prueba hermética.")
         return orig_send(self, req, *args, **kwargs)
 
     monkeypatch.setattr(httpx.Client, "send", guarded_send)

@@ -2056,13 +2056,16 @@ def test_g2_1_6_idempotent_proposal_replay():
             "idempotency_key": "idemp-unique-key-12345",
         }
 
+        import secrets
+        owner_token = secrets.token_urlsafe(32)
+
         # 1. Primera invocación
-        res1 = execute_tool_with_timeout("proponer_actualizacion_critica", args, timeout_sec=2.0)
+        res1 = execute_tool_with_timeout("proponer_actualizacion_critica", args, timeout_sec=2.0, client_token=owner_token)
         assert res1["creado"] is True
         approval_id = res1["approval_id"]
 
         # 2. Segunda invocación con la misma clave
-        res2 = execute_tool_with_timeout("proponer_actualizacion_critica", args, timeout_sec=2.0)
+        res2 = execute_tool_with_timeout("proponer_actualizacion_critica", args, timeout_sec=2.0, client_token=owner_token)
         assert res2["approval_id"] == approval_id, "La segunda llamada debió devolver la misma aprobación idempotente"
 
         # 3. Comprobar que en la base de datos existe exactamente 1 registro en pending_approvals

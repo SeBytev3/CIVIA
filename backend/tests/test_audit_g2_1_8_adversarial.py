@@ -445,3 +445,228 @@ def test_f8_10_positive_local_deadline_classification():
     confirmed_exc = psycopg.errors.QueryCanceled("canceling statement due to user request")
     setattr(confirmed_exc, "_civia_confirmed_local_deadline", True)
     assert is_deadline_cancellation(confirmed_exc) is True
+
+
+# ==============================================================================
+# F1 Y F8 — PRUEBAS PERMANENTES DE LÍMITE (GEMINI BOUNDARY Y CONTRAEJEMPLOS COMMIT)
+# ==============================================================================
+
+@pytest.mark.allow_mock_transport
+def test_f1_gemini_boundary_mock_transport_no_capacity_in_outbound_json(clean_db, monkeypatch):
+    """
+    F1: Ejecución del adaptador real de Gemini interceptado por httpx.MockTransport.
+    Garantiza que la capacidad (client_token) jamás se inyecte en tool_args ni reaparezca
+    en raw_gemini_part en la segunda petición serializada.
+    """
+    import secrets
+    import httpx
+    from app.ai_router import reset_all_circuits
+
+    reset_all_circuits()
+    monkeypatch.setattr(a, "_call_agent_turn_gemini", a._ORIGINAL_CALL_AGENT_TURN_GEMINI)
+
+    old_pri = settings.GOOGLE_API_KEY_PRIMARY
+    old_sec = settings.GOOGLE_API_KEY_SECONDARY
+    old_groq = settings.GROQ_API_KEY
+    settings.GOOGLE_API_KEY_PRIMARY = "SYNTHETIC_NOT_REAL"
+    settings.GOOGLE_API_KEY_SECONDARY = ""
+    settings.GROQ_API_KEY = ""
+
+    cap = secrets.token_urlsafe(32)
+    seen = []
+    original_client = httpx.Client
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append({
+            "request_number": len(seen) + 1,
+            "client_capacity_in_outbound_json": cap in json.dumps(body),
+        })
+        if len(seen) == 1:
+            parts = [
+                {
+                    "functionCall": {
+                        "name": "audit_raw_gemini",
+                        "args": {"business": "SYNTHETIC", "nested": {"quantity": 7}},
+                    },
+                    "thoughtSignature": "SYNTHETIC_SIGNATURE",
+                }
+            ]
+        else:
+            parts = [{"text": "Resultado sintético verificado."}]
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [{"content": {"parts": parts}}],
+                "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 10},
+            },
+        )
+
+    def mock_client(*args, **kw):
+        return original_client(*args, transport=httpx.MockTransport(handler), **kw)
+
+    def tool(args):
+        return {
+            "operation_id": str(db.get_current_operation()["operation_id"]),
+            "business": "SYNTHETIC",
+            "quantity": args["nested"]["quantity"],
+        }
+
+    try:
+        with patch.object(a.httpx, "Client", side_effect=mock_client), patch.dict(
+            a.TOOL_DISPATCH, {"audit_raw_gemini": tool}
+        ):
+            result = a.run_civia_agent(
+                "SYNTHETIC RAW GEMINI BOUNDARY",
+                client_token=cap,
+                idempotency_key=uuid.uuid4().hex,
+                total_timeout_seconds=5,
+            )
+
+        # 1. Petición 1 sin capacidad
+        assert seen[0]["request_number"] == 1
+        assert seen[0]["client_capacity_in_outbound_json"] is False
+
+        # 2. Petición 2 con historial de tool_call sin capacidad en el JSON serializado
+        assert seen[1]["request_number"] == 2
+        assert seen[1]["client_capacity_in_outbound_json"] is False
+
+        # 3. No filtrado a las herramientas públicas ni al proposed_payload persistido
+        assert cap not in json.dumps(result.get("tools_invoked", []))
+        assert cap not in json.dumps(get_operation_record(result["operation_id"])["proposed_payload"])
+    finally:
+        settings.GOOGLE_API_KEY_PRIMARY = old_pri
+        settings.GOOGLE_API_KEY_SECONDARY = old_sec
+        settings.GROQ_API_KEY = old_groq
+
+
+def test_f8_external_cancel_during_commit_preserves_error_and_no_local_marker(clean_db):
+    """
+    F8 Contraejemplo A: pg_cancel_backend externo durante checked_commit cuando aún queda plazo de CIVIA.
+    Verifica que:
+    - No se enmascara como TimeoutError (preserva QueryCanceled).
+    - No se marca _civia_confirmed_local_deadline=True.
+    - is_deadline_cancellation retorna False.
+    - Rollback e integridad conservados; operation_records pasa a ABORTED.
+    """
+    with psycopg.connect(clean_db, autocommit=True) as admin_c:
+        admin_c.execute("CREATE TABLE IF NOT EXISTS test_f8_ext_cancel(id int PRIMARY KEY, n int);")
+        admin_c.execute("DELETE FROM test_f8_ext_cancel;")
+        admin_c.execute("INSERT INTO test_f8_ext_cancel VALUES (1, 0);")
+        admin_c.execute(
+            """
+            CREATE OR REPLACE FUNCTION test_f8_sleep_trg() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN PERFORM pg_sleep(0.3); RETURN NEW; END;
+            $$;
+            """
+        )
+        admin_c.execute("DROP TRIGGER IF EXISTS trg_test_f8_sleep ON test_f8_ext_cancel;")
+        admin_c.execute(
+            "CREATE CONSTRAINT TRIGGER trg_test_f8_sleep AFTER UPDATE ON test_f8_ext_cancel DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION test_f8_sleep_trg();"
+        )
+
+    op = uuid.uuid4()
+    register_operation_intent(op, "external_cancel_test")
+    dl = time.monotonic() + 2.0  # Plazo amplio de 2s
+    td = db.set_deadline_context(dl)
+    to = db.set_current_operation({"operation_id": op})
+    controller = None
+    caught_error = None
+
+    try:
+        with psycopg.connect(clean_db) as conn:
+            conn.execute("UPDATE test_f8_ext_cancel SET n = n + 1 WHERE id = 1;")
+            pid = conn.info.backend_pid
+
+            def interrupt():
+                end = time.monotonic() + 1.5
+                with psycopg.connect(clean_db, autocommit=True) as control:
+                    while time.monotonic() < end:
+                        seen = control.execute(
+                            "SELECT state, query, wait_event FROM pg_stat_activity WHERE pid=%s", (pid,)
+                        ).fetchone()
+                        if seen and seen[0] == "active" and seen[1] == "COMMIT" and seen[2] == "PgSleep":
+                            control.execute("SELECT pg_cancel_backend(%s)", (pid,))
+                            return
+                        time.sleep(0.002)
+
+            controller = threading.Thread(target=interrupt)
+            controller.start()
+            db.checked_commit(conn)
+    except Exception as exc:
+        caught_error = exc
+    finally:
+        if controller:
+            controller.join(2.0)
+        db.reset_current_operation(to)
+        db.reset_deadline_context(td)
+
+    assert caught_error is not None, "Debió ocurrir una excepción por pg_cancel_backend"
+    assert not isinstance(caught_error, TimeoutError), f"No debe ser TimeoutError de CIVIA, fue: {type(caught_error).__name__}"
+    assert isinstance(caught_error, psycopg.errors.QueryCanceled) or getattr(caught_error, "sqlstate", None) == "57014"
+    assert getattr(caught_error, "_civia_confirmed_local_deadline", False) is False
+    assert is_deadline_cancellation(caught_error, dl) is False
+
+    # Rollback verificado e integridad en BD
+    with psycopg.connect(clean_db, autocommit=True) as verify_c:
+        val = verify_c.execute("SELECT n FROM test_f8_ext_cancel WHERE id = 1;").fetchone()[0]
+        assert val == 0, "La transacción debió hacer rollback; n debe ser 0"
+
+    rec = get_operation_record(op)
+    assert rec["status"] == "ABORTED"
+
+
+def test_f8_external_session_transaction_timeout_during_commit_preserves_error(clean_db):
+    """
+    F8 Contraejemplo B: transaction_timeout de sesión externo corto (60ms) con plazo CIVIA amplio (2s).
+    Verifica que:
+    - No se enmascara como TimeoutError (preserva TransactionTimeout u OperationalError).
+    - No se marca _civia_confirmed_local_deadline=True.
+    - is_deadline_cancellation retorna False.
+    - Rollback e integridad conservados; operation_records pasa a ABORTED.
+    """
+    with psycopg.connect(clean_db, autocommit=True) as admin_c:
+        admin_c.execute("CREATE TABLE IF NOT EXISTS test_f8_ext_tt(id int PRIMARY KEY, n int);")
+        admin_c.execute("DELETE FROM test_f8_ext_tt;")
+        admin_c.execute("INSERT INTO test_f8_ext_tt VALUES (1, 0);")
+        admin_c.execute(
+            """
+            CREATE OR REPLACE FUNCTION test_f8_sleep_trg_b() RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN PERFORM pg_sleep(0.3); RETURN NEW; END;
+            $$;
+            """
+        )
+        admin_c.execute("DROP TRIGGER IF EXISTS trg_test_f8_sleep_b ON test_f8_ext_tt;")
+        admin_c.execute(
+            "CREATE CONSTRAINT TRIGGER trg_test_f8_sleep_b AFTER UPDATE ON test_f8_ext_tt DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION test_f8_sleep_trg_b();"
+        )
+
+    op = uuid.uuid4()
+    register_operation_intent(op, "external_tt_test")
+    dl = time.monotonic() + 2.0  # Plazo amplio de 2s
+    td = db.set_deadline_context(dl)
+    to = db.set_current_operation({"operation_id": op})
+    caught_error = None
+
+    try:
+        with psycopg.connect(clean_db, options="-c transaction_timeout=60ms") as conn:
+            conn.execute("UPDATE test_f8_ext_tt SET n = n + 1 WHERE id = 1;")
+            db.checked_commit(conn)
+    except Exception as exc:
+        caught_error = exc
+    finally:
+        db.reset_current_operation(to)
+        db.reset_deadline_context(td)
+
+    assert caught_error is not None, "Debió ocurrir una excepción por transaction_timeout externo"
+    assert not isinstance(caught_error, TimeoutError), f"No debe ser TimeoutError de CIVIA, fue: {type(caught_error).__name__}"
+    assert getattr(caught_error, "sqlstate", None) == "25P04" or isinstance(caught_error, (psycopg.errors.OperationalError, getattr(psycopg.errors, "TransactionTimeout", ())))
+    assert getattr(caught_error, "_civia_confirmed_local_deadline", False) is False
+    assert is_deadline_cancellation(caught_error, dl) is False
+
+    with psycopg.connect(clean_db, autocommit=True) as verify_c:
+        val = verify_c.execute("SELECT n FROM test_f8_ext_tt WHERE id = 1;").fetchone()[0]
+        assert val == 0, "La transacción debió hacer rollback; n debe ser 0"
+
+    rec = get_operation_record(op)
+    assert rec["status"] == "ABORTED"
