@@ -105,6 +105,8 @@ class AgentQueryRequest(BaseModel):
     max_tokens_budget: int | None = Field(default=None, ge=50, le=6000)
     tool_timeout_seconds: float | None = Field(default=None, ge=0.05, le=15.0)
     total_timeout_seconds: float | None = Field(default=None, ge=0.10, le=30.0)
+    operation_token: str | None = Field(default=None, max_length=128)
+    idempotency_key: str | None = Field(default=None, max_length=128)
 
 
 class AgentToolCallPublic(BaseModel):

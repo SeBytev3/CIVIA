@@ -523,10 +523,19 @@ def update_report_status(
     rid = UUID(str(report_id))
     with get_conn() as conn:
         with conn.cursor() as cur:
+            cur.execute("SELECT status, version FROM reports WHERE id = %s FOR UPDATE;", (rid,))
+            prev = cur.fetchone()
+            if not prev:
+                conn.rollback()
+                return None
+            prev_status = prev["status"]
+            prev_version = prev["version"]
+
             cur.execute(
                 """
                 UPDATE reports
                 SET status = %s,
+                    human_confirmed = TRUE,
                     human_override_note = COALESCE(%s, human_override_note),
                     version = COALESCE(version, 1) + 1,
                     updated_at = NOW()
@@ -540,19 +549,43 @@ def update_report_status(
                 conn.rollback()
                 return None
 
+            new_version = row["version"]
+            proposed_payload = {
+                "action": "UPDATE_REPORT_STATUS",
+                "previous_status": prev_status,
+                "new_status": status,
+                "expected_version": prev_version,
+                "note": note,
+            }
+            result_payload = {
+                "action": "UPDATE_REPORT_STATUS",
+                "previous_status": prev_status,
+                "status": status,
+                "previous_version": prev_version,
+                "version": new_version,
+                "note": note,
+            }
+
             # Auditoría administrativa síncrona obligatoria en la MISMA transacción PostgreSQL (G2.1.8)
             # Si operation_records no existe o falla el INSERT, rollback revierte el cambio del reporte
             cur.execute(
                 """
                 INSERT INTO operation_records (
                     operation_id, requester_id, operation_type, target_id, status,
+                    proposed_payload, result_payload,
                     created_at, updated_at
                 ) VALUES (
                     %s, 'admin', 'admin_update_report_status', %s, 'COMMITTED',
+                    %s::jsonb, %s::jsonb,
                     clock_timestamp(), clock_timestamp()
                 );
                 """,
-                (str(uuid.uuid4()), str(rid)),
+                (
+                    str(uuid.uuid4()),
+                    str(rid),
+                    json.dumps(proposed_payload),
+                    json.dumps(result_payload),
+                ),
             )
         conn.commit()
         return row

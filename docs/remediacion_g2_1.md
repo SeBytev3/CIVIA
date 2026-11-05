@@ -616,3 +616,92 @@ Ejecución oficial en clúster desechable PostgreSQL 17.11 (`civia_red_g218_pg`)
 - `independent.py`: **Exit code 0** (reclamo atómico, anti-enumeración 404, replays ABORTED/UNKNOWN sin workers espurios y protección trigger 006).
 - `test_e2e_frontend_proxy.py`: **Exit code 0** (verificación de proxy inverso Nginx contra frontend PWA real).
 
+---
+
+## 18. Bloque G2.1.8 — Cierre Definitivo de Hallazgos de Auditoría F1–F8
+
+- **Informe de auditoría de referencia:** `docs/auditoria_codex_g2_1_8_187dea0.md` sobre commit `187dea00e770191621f7fa4c481a41f2acbc1ab4`.
+- **Ambiente de verificación:** Clúster desechable PostgreSQL 17.11 (`civia_g218_remed_pg`) con runner Python 3.13 (`civia_g218_remed_runner`), red interna aislada `civia_g218_remed_net`, sin tocar contenedores ni datos habituales.
+- **Enfoque TDD Adversarial:** Fase 1 (RED) verificó el fallo exacto de F1–F8 sobre 187dea0 en `test_audit_g2_1_8_remediation.py`. Fase 2 (GREEN) aplicó las correcciones mínimas requeridas.
+
+### 18.1. Detalle de Correcciones por Hallazgo
+
+1. **F1 — Replay con token del propietario falla por `import hmac` ausente y secretos en `proposed_payload`:**
+   - *Diagnóstico:* `db.py` intentaba invocar `hmac.compare_digest` sin haber importado el módulo `hmac` (causando `NameError`). Adicionalmente, `proposed_payload` persistía el diccionario de argumentos sin filtrar credenciales (`operation_token`, `client_token`, `edit_token`), y el cálculo del hash canónico incluía dichos secretos.
+   - *Corrección:*
+     - `backend/app/db.py`: Añadido `import hmac`.
+     - `backend/app/db.py:register_operation_intent`: Sanitiza `proposed_payload` extrayendo credenciales y tokens antes de persistir en base de datos.
+     - `canonical_payload_hash`: Filtra claves de credenciales para que la huella canónica dependa exclusivamente de los argumentos de negocio.
+
+2. **F2 — Replays eluden la política de privacidad (divulgación de resultados, metadatos y errores):**
+   - *Diagnóstico:* En replays de operaciones `COMMITTED`, llamadas sin credencial legítima obtenían `result_payload` completo si `requester_id == citizen`. En operaciones privadas `COMMITTED`, se revelaba `target_id`. En operaciones `ABORTED`, se exponían `target_id` y el mensaje de error interno privado.
+   - *Corrección:*
+     - `backend/app/agent.py:execute_tool_with_timeout`: Replays no autorizados (`is_owner == False`) retornan un objeto resumido donde `target_id` es `None`, `result_payload` no se divulga, y para `ABORTED` se retorna un mensaje genérico estándar sin filtrar el `error_message` de BD. Se preserva únicamente el identificador público `approval_id` en propuestas humanas sin datos privados.
+
+3. **F3 — Credencial de edición del reporte (`X-Edit-Token`) autorizaba operaciones administrativas:**
+   - *Diagnóstico:* `GET /api/operations/{operation_id}` autorizaba el acceso si el llamador presentaba un `X-Edit-Token` válido para el reporte destino, incluso si la operación era administrativa (`requester_id == 'admin'`).
+   - *Corrección:*
+     - `backend/app/main.py:get_operation_status`: `x_edit_token` solo otorga autorización si la operación pertenece al ámbito ciudadano (`rec.get("requester_id") == "citizen"` y `rec.get("operation_type")` no es administrativo). Operaciones administrativas con token ciudadano responden HTTP 404 (anti-enumeración).
+
+4. **F4 — Soporte de capacidad cliente previa y recuperación tras pérdida de primera respuesta:**
+   - *Diagnóstico:* El cliente no podía pre-suministrar una capacidad criptográfica; la cabecera `X-Operation-Token` o cuerpo `operation_token` se ignoraban en `/api/agent/query`, y reintentos tras perder la primera respuesta no permitían recuperar la capacidad sin conocer la respuesta perdida.
+   - *Corrección:*
+     - `backend/app/schemas.py`: Añadidos campos opcionales `operation_token` e `idempotency_key` a `AgentQueryRequest`.
+     - `backend/app/main.py`: Extrae `x_operation_token` y `idempotency_key` de cabeceras o cuerpo y los propaga a `run_civia_agent`.
+     - `backend/app/agent.py`: `execute_tool_with_timeout` y `run_civia_agent` adoptan `client_token`. En el replay del propietario legítimo, se devuelve `query_token` para garantizar la recuperación.
+     - `frontend/src/api.ts` y `frontend/src/App.tsx`: Generan `idempotency_key` y `operation_token` criptográficos antes de enviar la petición y proveen botón de seguimiento del estado definitivo.
+
+5. **F5 — `mark_operation_committed` confirma UNKNOWN sin evidencia, y GET no reconcilia UNKNOWN:**
+   - *Diagnóstico:* El helper `mark_operation_committed` actualizaba registros con `status = 'UNKNOWN'` a `COMMITTED` sin verificar evidencia duradera propia. Adicionalmente, `GET /api/operations/{id}` no reconciliaba operaciones en estado `UNKNOWN`.
+   - *Corrección:*
+     - `backend/app/db.py:mark_operation_committed`: Cláusula estricta `WHERE operation_id = %s AND status IN ('PENDING', 'COMMITTED')`. Si el estado actual es `UNKNOWN`, eleva `RuntimeError` exigiendo evidencia duradera propia.
+     - `backend/app/main.py:get_operation_status`: Ejecuta `reconcile_operation` tanto para `PENDING` como para `UNKNOWN`.
+
+6. **F6 — PID ausente convertido en aborto, y GET reconciliaba antes de autorizar:**
+   - *Diagnóstico:* Un `backend_pid` ausente o inactivo hacía que `reconcile_operation` dedujera `ABORTED` sin prueba positiva de reversión. Además, `GET /api/operations/{id}` anónimo a una operación privada reconciliaba (mutando a `ABORTED`) antes de retornar HTTP 404.
+   - *Corrección:*
+     - `backend/app/db.py:reconcile_operation`: Si no hay evidencia positiva de commit ni de aborto, la operación se preserva en `PENDING` (o `UNKNOWN`), sin inferir `ABORTED` únicamente por ausencia de proceso activo.
+     - `backend/app/main.py:get_operation_status`: Comprueba la autorización del solicitante ANTES de invocar la reconciliación. Peticiones no autorizadas a operaciones privadas retornan HTTP 404 de inmediato sin disparar mutaciones de estado en base de datos.
+
+7. **F7 — El registro REST en `operation_records` no describía los cambios de estado ni versiones:**
+   - *Diagnóstico:* `update_report_status` insertaba en `operation_records` con `proposed_payload=null` y `result_payload=null`, sin registrar estados anterior/nuevo, notas ni versiones.
+   - *Corrección:*
+     - `backend/app/repository.py:update_report_status`: Lee el reporte bajo `SELECT status, version ... FOR UPDATE` previo, e inserta en `operation_records` el detalle estructurado completo:
+       - `proposed_payload`: `action`, `new_status`, `expected_version`, `previous_status`, `note`.
+       - `result_payload`: `action`, `status`, `version`, `previous_status`, `previous_version`, `note`.
+
+8. **F8 — Procedencia causal de cancelación sesgada por tiempo de inspección tardía:**
+   - *Diagnóstico:* `is_deadline_cancellation` evaluaba `time.monotonic() >= dl` al momento de inspeccionar la excepción, provocando que una excepción externa (ej. `statement_timeout`) retenida en memoria fuese reclasificada erróneamente como cancelación local de CIVIA solo por haber sido analizada después del deadline.
+   - *Corrección:*
+     - `backend/app/db.py`: `get_conn()` sella inmutablemente `_civia_raised_at` y `_civia_cancelled_by_deadline` en las excepciones capturadas.
+     - `is_deadline_cancellation`: Evalúa el instante original de ocurrencia (`_civia_first_seen_at` o `_civia_raised_at`), garantizando que la clasificación dependa exclusivamente de la causalidad objetiva y sea inmune al retraso de inspección.
+
+### 18.2. Matriz de Pruebas de Regresión Permanente (F1–F8)
+
+Archivo: `backend/tests/test_audit_g2_1_8_remediation.py` ejecutado en PostgreSQL 17 real:
+
+| Prueba | Hallazgo | Resultado |
+|---|---|---|
+| `test_f1_owner_token_replay_no_nameerror_and_no_secret_in_proposed_payload` | F1 | **PASSED** |
+| `test_f2_privacy_in_replays_no_result_target_or_error_leak` | F2 | **PASSED** |
+| `test_f3_report_edit_token_does_not_authorize_admin_operations` | F3 | **PASSED** |
+| `test_f4_client_capacity_recovery_and_lost_response_retry` | F4 | **PASSED** |
+| `test_f5_unknown_cannot_be_committed_without_evidence_and_get_reconciles_unknown` | F5 | **PASSED** |
+| `test_f6_absent_backend_pid_does_not_infer_aborted_and_no_unauthorized_reconcile` | F6 | **PASSED** |
+| `test_f7_rest_status_mutation_records_detailed_changes_in_ledger` | F7 | **PASSED** |
+| `test_f8_cancellation_provenance_not_skewed_by_delayed_inspection` | F8 | **PASSED** |
+
+### 18.3. Verificación de Suites Completas y Scripts Independientes
+
+- **Suites Backend CIVIA:**
+  - Modo BLANK: **`121 passed, 2 skipped, 0 failed in 27.51s`** (100% éxito).
+  - Modo SYNTHETIC: **`121 passed, 2 skipped, 0 failed in 25.08s`** (100% éxito).
+- **Scripts Independientes de Codex:**
+  - `error_provenance.py`: Verificado (`classified_local: false` para `external_25P04_margin`, `real_admin_shutdown` y `real_undefined_table`).
+  - `migration_and_unknown.py`: Verificado (`http_state: COMMITTED`, `helper_state: COMMITTED`).
+  - `final_probes.py`: Verificado (`private_message_exposed: false`, `target_exposed: null`, upgrade 005→006 preservado).
+  - `adversarial.py`: Verificado (sin fugas en replays, trigger terminal inmutable, `rest_concurrent` con detalles completos).
+  - `boundaries.py`: Verificado (rollback atómico, `external_timeout_margin_*` con `classified_local: false`, fallo 500 sin ledger).
+- **Frontend PWA:**
+  - `tsc -b && vite build` ejecutado en imagen Docker Node 22: **`0 errores, built in 2.02s`**.
+

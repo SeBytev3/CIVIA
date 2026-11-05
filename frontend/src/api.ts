@@ -1,6 +1,7 @@
 import type {
   AgentQueryResponse,
   ObservabilityData,
+  OperationStatusResponse,
   PendingApprovalItem,
   ReportCategory,
   ReportItem,
@@ -129,11 +130,37 @@ export async function queryAgent(payload: {
   query: string;
   max_iterations?: number;
   max_tokens_budget?: number;
+  operation_token?: string;
+  idempotency_key?: string;
 }): Promise<AgentQueryResponse> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (payload.operation_token) {
+    headers['X-Operation-Token'] = payload.operation_token;
+  }
+  if (payload.idempotency_key) {
+    headers['Idempotency-Key'] = payload.idempotency_key;
+  }
   return safeJsonFetch<AgentQueryResponse>('/api/agent/query', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(payload),
+  });
+}
+
+export async function getOperationStatus(
+  operationId: string,
+  operationToken?: string,
+  adminToken?: string,
+): Promise<OperationStatusResponse> {
+  const headers: Record<string, string> = {};
+  if (operationToken) {
+    headers['X-Operation-Token'] = operationToken;
+  }
+  if (adminToken) {
+    headers['X-Admin-Token'] = adminToken;
+  }
+  return safeJsonFetch<OperationStatusResponse>(`/api/operations/${encodeURIComponent(operationId)}`, {
+    headers,
   });
 }
 

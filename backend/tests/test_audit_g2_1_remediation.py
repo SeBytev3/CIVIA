@@ -2118,8 +2118,8 @@ def test_g2_1_6_reconciliation_of_disconnected_operation():
         assert record_before["status"] == "PENDING"
 
         record_after = reconcile_operation(orphan_op_id)
-        assert record_after["status"] == "ABORTED"
-        assert record_after["reconciled"] is True
+        # G2.1.8 (F6): PID ausente no debe inferir ABORTED por si solo; conserva PENDING/UNKNOWN
+        assert record_after["status"] in ("PENDING", "UNKNOWN")
     finally:
         settings.DATABASE_URL = old_db_url
 
@@ -2315,11 +2315,12 @@ def test_g2_1_7_reconcile_only_on_exact_operation_id_evidence():
             backend_pid=999999,
         )
 
-        # 3. Reconciliar op2: DEBE resolver a ABORTED, NUNCA a COMMITTED
+        # 3. Reconciliar op2: DEBE conservar PENDING, NUNCA transicionar a COMMITTED por propuesta ajena (F6)
         after_rec = db.reconcile_operation(op2)
-        assert after_rec["status"] == "ABORTED", (
+        assert after_rec["status"] != "COMMITTED", (
             f"Falso positivo en reconciliación: op2 no ejecutada se marcó '{after_rec['status']}' por propuesta ajena"
         )
+        assert after_rec["status"] in ("PENDING", "UNKNOWN")
     finally:
         settings.DATABASE_URL = old_db_url
 

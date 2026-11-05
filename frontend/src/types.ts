@@ -77,6 +77,21 @@ export interface AgentQueryResponse {
   guardrail_triggered: string | null;
   requires_human_approval: boolean;
   pending_approval_id: string | null;
+  operation_id?: string | null;
+  operation_status?: string | null;
+  query_token?: string | null;
+}
+
+export interface OperationStatusResponse {
+  operation_id: string;
+  operation_type: string;
+  status: 'PENDING' | 'COMMITTED' | 'ABORTED' | 'UNKNOWN';
+  target_id?: string | null;
+  result_payload?: Record<string, unknown> | null;
+  error_message?: string | null;
+  created_at: string;
+  updated_at?: string | null;
+  reconciled?: boolean;
 }
 
 export interface ObservabilityData {

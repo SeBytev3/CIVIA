@@ -541,7 +541,12 @@ def change_report_status(report_id: UUID, payload: ReportStatusUpdateRequest):
 
 
 @app.post("/api/agent/query", response_model=AgentQueryResponse)
-def query_civia_agent(request: Request, payload: AgentQueryRequest):
+def query_civia_agent(
+    request: Request,
+    payload: AgentQueryRequest,
+    idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
+    operation_token_header: str | None = Header(default=None, alias="X-Operation-Token"),
+):
     client_ip = get_trusted_client_ip(request)
     rate_limiter.check(f"agent:{client_ip}")
     clean_q = sanitize_text(
@@ -551,6 +556,8 @@ def query_civia_agent(request: Request, payload: AgentQueryRequest):
         max_len=1000,
         required=True,
     )
+    eff_client_token = operation_token_header or payload.operation_token
+    eff_idemp_key = idempotency_key_header or payload.idempotency_key
     try:
         res = run_civia_agent(
             clean_q,
@@ -558,6 +565,8 @@ def query_civia_agent(request: Request, payload: AgentQueryRequest):
             max_tokens_budget=payload.max_tokens_budget,
             tool_timeout_seconds=payload.tool_timeout_seconds or 4.0,
             total_timeout_seconds=payload.total_timeout_seconds,
+            client_token=eff_client_token,
+            idempotency_key=eff_idemp_key,
         )
     except IdempotencyConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
@@ -622,10 +631,8 @@ def get_operation_status(
     rec = get_operation_record(operation_id)
     if not rec:
         raise HTTPException(status_code=404, detail="Operación no encontrada.")
-    if rec.get("status") == "PENDING":
-        rec = reconcile_operation(operation_id)
 
-    # Determinar si el consultante está autorizado (admin, poseedor del token de consulta o del edit_token del reporte)
+    # 1. Determinar si el consultante está autorizado (admin, poseedor del token de consulta o del edit_token del reporte)
     is_authorized = False
     if x_admin_token:
         try:
@@ -639,7 +646,14 @@ def get_operation_status(
         if hmac.compare_digest(hashed, rec["query_token_hash"]):
             is_authorized = True
 
-    if not is_authorized and x_edit_token and rec.get("target_id"):
+    is_admin_or_private = (
+        (rec.get("requester_id") != "citizen")
+        or rec.get("operation_type", "").startswith("ADMIN_")
+        or rec.get("operation_type", "").startswith("admin_")
+    )
+
+    # X-Edit-Token solo puede autorizar operaciones ciudadanas sobre el reporte objetivo (F3)
+    if not is_authorized and not is_admin_or_private and x_edit_token and rec.get("target_id"):
         try:
             target_report = get_report_raw(UUID(str(rec["target_id"])))
             if target_report and target_report.get("edit_token_hash"):
@@ -649,15 +663,18 @@ def get_operation_status(
         except Exception:
             pass
 
-    # Operaciones privadas o administrativas: si no está autorizado, responder 404 para evitar enumeración (G2.1.8)
-    is_private_op = (rec.get("requester_id") != "citizen") or rec.get("operation_type", "").startswith("ADMIN_") or rec.get("operation_type", "").startswith("admin_")
-    if not is_authorized and is_private_op:
+    # Operaciones privadas o administrativas: si no está autorizado, responder 404 ANTES de reconciliar (F6)
+    if not is_authorized and is_admin_or_private:
         raise HTTPException(status_code=404, detail="Operación no encontrada.")
 
-    # Minimización de datos: result_payload y error solo para invocadores autorizados
+    # 2. Reconciliación: SOLO para consultas autorizadas o públicas (F5 y F6)
+    if rec.get("status") in ("PENDING", "UNKNOWN"):
+        rec = reconcile_operation(operation_id)
+
+    # 3. Minimización de datos: result_payload, target_id y error solo para invocadores autorizados (F2)
     safe_result = rec.get("result_payload") if is_authorized else None
     safe_error = rec.get("error_message") if is_authorized else None
-    safe_target = rec.get("target_id") if (is_authorized or not is_private_op) else None
+    safe_target = rec.get("target_id") if is_authorized else None
 
     return OperationStatusResponse(
         operation_id=rec["operation_id"],
@@ -668,7 +685,7 @@ def get_operation_status(
         error_message=safe_error,
         created_at=rec["created_at"],
         updated_at=rec["updated_at"],
-        reconciled=rec.get("reconciled", False),
+        reconciled=bool(rec.get("reconciled", False)),
     )
 
 

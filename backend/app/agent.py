@@ -748,6 +748,8 @@ def execute_tool_with_timeout(
     tool_args: dict[str, Any],
     timeout_sec: float,
     deadline: float | None = None,
+    client_token: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     fn = TOOL_DISPATCH.get(tool_name)
     if fn is None:
@@ -759,42 +761,57 @@ def execute_tool_with_timeout(
     worker_tid: list[int] = []
 
     # Manejo de intención durable e idempotencia atómica para operaciones transaccionales (A-02 / G2.1.7 / G2.1.8)
-    idempotency_key = tool_args.get("idempotency_key")
-    is_transactional_op = bool(idempotency_key) or (tool_name not in ("consultar_reportes", "obtener_reporte"))
+    eff_idemp_key = idempotency_key or tool_args.get("idempotency_key")
+    is_transactional_op = bool(eff_idemp_key) or (tool_name not in ("consultar_reportes", "obtener_reporte"))
 
     op_id: uuid.UUID | None = None
     claim: dict[str, Any] = {}
     if is_transactional_op:
         op_id = uuid.uuid4()
         target_id = str(tool_args.get("identificador") or tool_args.get("report_id") or "")
-        client_token = str(tool_args.get("operation_token") or tool_args.get("client_token") or tool_args.get("edit_token") or "") or None
+        eff_client_token = client_token or str(tool_args.get("operation_token") or tool_args.get("client_token") or tool_args.get("edit_token") or "") or None
+
+        # Excluir credenciales del payload durable persistido
+        clean_proposed = {
+            k: v for k, v in tool_args.items()
+            if k not in (
+                "operation_token",
+                "client_token",
+                "edit_token",
+                "x_operation_token",
+                "x_edit_token",
+                "admin_token",
+                "token",
+            )
+        }
 
         claim = register_operation_intent(
             operation_id=op_id,
             operation_type=tool_name,
             target_id=target_id or None,
-            idempotency_key=idempotency_key,
-            proposed_payload=tool_args,
-            client_token=client_token,
+            idempotency_key=eff_idemp_key,
+            proposed_payload=clean_proposed,
+            client_token=eff_client_token,
         )
 
         if not claim.get("claim_acquired", True):
             existing_op_id = claim.get("operation_id")
             existing_status = claim.get("status")
+            is_owner = bool(claim.get("is_owner", False))
 
             if existing_status == "COMMITTED":
-                # Verificación de prueba de posesión antes de divulgar resultado privado (Contrato B)
-                is_private_op = (claim.get("requester_id") != "citizen") or claim.get("operation_type", "").startswith("ADMIN_") or claim.get("operation_type", "").startswith("admin_")
-                is_owner = claim.get("is_owner", False) or (claim.get("requester_id") == "admin")
-                if (not is_private_op or is_owner) and claim.get("result_payload"):
+                if is_owner and claim.get("result_payload"):
                     return claim["result_payload"]
-                return {
+                res_obj = {
                     "operation_id": str(existing_op_id),
                     "status": "COMMITTED",
-                    "target_id": claim.get("target_id"),
+                    "target_id": None,
                     "replayed": True,
                     "mensaje": "Operación ya confirmada previamente.",
                 }
+                if claim.get("result_payload") and "approval_id" in claim["result_payload"]:
+                    res_obj["approval_id"] = claim["result_payload"]["approval_id"]
+                return res_obj
 
             elif existing_status == "PENDING":
                 poll_deadline = min(eff_deadline, time.monotonic() + timeout_sec)
@@ -802,16 +819,18 @@ def execute_tool_with_timeout(
                     time.sleep(0.04)
                     rec = get_operation_record(existing_op_id)
                     if rec and rec.get("status") == "COMMITTED":
-                        is_private_op = (rec.get("requester_id") != "citizen") or rec.get("operation_type", "").startswith("ADMIN_") or rec.get("operation_type", "").startswith("admin_")
-                        is_owner = claim.get("is_owner", False) or (claim.get("requester_id") == "admin")
-                        if (not is_private_op or is_owner) and rec.get("result_payload"):
+                        if is_owner and rec.get("result_payload"):
                             return rec["result_payload"]
-                        return {
+                        res_obj = {
                             "operation_id": str(existing_op_id),
                             "status": "COMMITTED",
-                            "target_id": rec.get("target_id"),
+                            "target_id": None,
                             "replayed": True,
+                            "mensaje": "Operación ya confirmada previamente.",
                         }
+                        if rec.get("result_payload") and "approval_id" in rec["result_payload"]:
+                            res_obj["approval_id"] = rec["result_payload"]["approval_id"]
+                        return res_obj
                     if rec and rec.get("status") in ("ABORTED", "UNKNOWN"):
                         break
 
@@ -819,16 +838,16 @@ def execute_tool_with_timeout(
                     "La operación asociada a la clave de idempotencia se encuentra pendiente de confirmación.",
                     operation_id=existing_op_id,
                     status="PENDING",
-                    query_token=claim.get("query_token"),
+                    query_token=claim.get("query_token") if is_owner else None,
                 )
 
             elif existing_status == "ABORTED":
                 return {
                     "operation_id": str(existing_op_id),
                     "status": "ABORTED",
-                    "target_id": claim.get("target_id"),
+                    "target_id": None,
                     "replayed": True,
-                    "mensaje": claim.get("error_message") or "Operación previamente abortada.",
+                    "mensaje": "Operación previamente abortada.",
                 }
 
             elif existing_status == "UNKNOWN":
@@ -836,7 +855,7 @@ def execute_tool_with_timeout(
                     "La operación asociada a la clave de idempotencia se encuentra en estado indeterminado (UNKNOWN).",
                     operation_id=existing_op_id,
                     status="UNKNOWN",
-                    query_token=claim.get("query_token"),
+                    query_token=claim.get("query_token") if is_owner else None,
                 )
             else:
                 raise RuntimeError(f"Estado de operación no reconocido en reclamo: {existing_status}")
@@ -1301,6 +1320,8 @@ def run_civia_agent(
     max_tokens_budget: int | None = None,
     tool_timeout_seconds: float = 4.0,
     total_timeout_seconds: float | None = None,
+    client_token: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """
     Ejecuta el agente CIVIA con herramientas tipadas y los 4 límites obligatorios:
@@ -1336,7 +1357,7 @@ def run_civia_agent(
     chain = get_provider_chain()
     operation_id: str | None = None
     operation_status: str | None = None
-    query_token: str | None = None
+    query_token: str | None = client_token
 
     try:
         for turn in range(1, eff_max_iter + 1):
@@ -1620,12 +1641,14 @@ def run_civia_agent(
                         targs,
                         timeout_sec=eff_tool_timeout,
                         deadline=min(deadline_monotonic, time.monotonic() + eff_tool_timeout),
+                        client_token=client_token,
+                        idempotency_key=idempotency_key,
                     )
                 except OperationPendingError as exc:
                     guardrail_triggered = "OPERATION_PENDING"
                     operation_id = str(exc.operation_id) if exc.operation_id else None
                     operation_status = exc.status
-                    query_token = getattr(exc, "query_token", None)
+                    query_token = getattr(exc, "query_token", None) or client_token
                     _safe_record_trace(
                         trace_group_id=trace_group_id,
                         operation="tool_pending",
@@ -1655,14 +1678,28 @@ def run_civia_agent(
 
                 if t_res.get("operation_id"):
                     operation_id = str(t_res.get("operation_id"))
-                    operation_status = "COMMITTED"
+                    operation_status = t_res.get("status") or "COMMITTED"
+                    if t_res.get("query_token"):
+                        query_token = t_res.get("query_token")
 
                 if t_res.get("requiere_aprobacion_humana"):
                     requires_human_approval = True
                     pending_approval_id = t_res.get("approval_id")
                     guardrail_triggered = "HUMAN_APPROVAL_REQUIRED"
 
-                executed_tools.append({"tool": tname, "args": targs, "result": t_res})
+                safe_targs = {
+                    k: v for k, v in targs.items()
+                    if k not in (
+                        "operation_token",
+                        "client_token",
+                        "edit_token",
+                        "x_operation_token",
+                        "x_edit_token",
+                        "admin_token",
+                        "token",
+                    )
+                }
+                executed_tools.append({"tool": tname, "args": safe_targs, "result": t_res})
                 conversation.append(
                     {
                         "role": "tool_result",

@@ -433,3 +433,44 @@
     - `independent.py`: Exit code 0 (aislamiento de claims, anti-enumeración 404, replays ABORTED/UNKNOWN sin workers espurios).
     - `test_e2e_frontend_proxy.py`: 1 passed (comprobación E2E contra proxy frontend PWA real).
   - Cero regresiones en controles aprobados G1, A-02, N-02, M-02, M-03 COPY o M-06. Cero commits en `main` ni push remoto.
+
+## Auditoría independiente Codex G2.1.8 — 2026-11-04
+
+- Commit verificado: `187dea00e770191621f7fa4c481a41f2acbc1ab4`, rama `fix/auditoria-final`, árbol inicialmente limpio. Diff completo desde `492b041`, migración 006, fuentes y pruebas leídos; evidencia obtenida de copia congelada Git.
+- **Dictamen independiente: NO APROBADO.** No cerrar G2.1. Informe: `docs/auditoria_codex_g2_1_8_187dea0.md`.
+- PostgreSQL 17.11, runner, API y frontend exclusivos en red interna, sin servicios/volúmenes habituales ni llamadas a proveedores IA. Frontend reconstruido desde snapshot; proveedor sustituido por adaptador sintético para seguimiento HTTP.
+- Correcciones verificadas: atomicidad REST y rollback ante fallo del INSERT/ledger ausente; inexistente sin registro falso; trigger de estados terminales y actualización legítima de metadatos; observación fallida conservadora; replays ABORTED/UNKNOWN sin workers; autorización básica GET privado; entrega real de token PENDING y polling con token recibido; migraciones limpia, upgrade con historial 005→006 y reaplicación.
+- Bloqueos reproducidos: UNKNOWN confirmado sin evidencia por helper; GET no reconcilia UNKNOWN; PID ausente interpretado como aborto y reconciliación antes de autorizar; replay divulga resultados/metadatos/errores; replay con token propio falla por import hmac ausente; capacidad de edición ciudadana accede a operación administrativa; pérdida de primera respuesta sin recuperación genérica; UI sin seguimiento; trazabilidad REST sin cambios anterior/nuevo; clasificación de error externo cambia solo por procesarse después del deadline.
+- Suites completas: claves vacías **114 PASS, 1 live excluida**, 17,47 s; sintéticas **114 PASS, 1 live excluida**, 19,75 s. Sin omitidas. Incluyen G1, G2, M-02, COPY, M-06, N-02 y nueve G2.1.8. E2E adicional con frontend recién construido: **1 PASS**, 0,21 s.
+- Se inspeccionaron resultados de los seis instrumentos G2.1.7: exit 0 no se contó como aprobación global. followup se detiene por rechazo ahora correcto de ABORTED→COMMITTED; su cola se ejecutó por separado. Intentos iniciales mal secuenciados del auditor y error de parametrización del instrumento se conservaron y repitieron correctamente; no se modificaron tests ni producción.
+- `compileall` pasó; no se presenta como lint. No se encontró comando/configuración lint Python. `git diff --check` verifica la documentación.
+- Evidencia: `C:\Users\Jhoesp\AppData\Local\Temp\civia-187dea0-a8a1bf0a03e240289e8175ad44f7113d`. Logs capturados después de las peticiones no contienen la capacidad sintética comprobada; no se conservaron tokens reales ni dumps privados. Se retiró el archivo de capacidad administrativa efímera.
+- Limpieza completada tras comprobar IDs: eliminados solo contenedores, volumen, red e imagen frontend del auditor. API, PostgreSQL y frontend habituales siguen saludables. HEAD/rama sin cambios; solo informe y esta anotación. Sin Autopilot, correcciones, commits, push o merge. Auditoría detenida tras entregar.
+
+---
+
+## Bloque G2.1.8 — Cierre de Hallazgos de Auditoría F1–F8 (`docs/auditoria_codex_g2_1_8_187dea0.md`) completado (2026-11-05)
+
+- **Documentación de diseño y remediación**: Especificada en la sección 18 de [`docs/remediacion_g2_1.md`](remediacion_g2_1.md).
+- **Cierres aplicados**:
+  1. **F1 (`import hmac` y desinfección de payload)**: Se incorporó `import hmac` en `backend/app/db.py`, se excluyeron secretos y tokens de `proposed_payload` persistido y de la huella canónica (`canonical_payload_hash`).
+  2. **F2 (Privacidad en replays agénticos)**: Replays sin demostración de posesión de token (`is_owner == False`) retornan estructura resumida donde `target_id` es `None`, `result_payload` no se expone y en `ABORTED` se retorna mensaje genérico sin filtrar el error interno de base de datos.
+  3. **F3 (Ámbito de `X-Edit-Token`)**: Restringido estrictamente a operaciones de solicitante ciudadano (`requester_id == 'citizen'`). Consultas con credencial ciudadana a operaciones administrativas responden HTTP 404.
+  4. **F4 (Capacidad cliente previa y reintentos)**: Soporte explícito en `AgentQueryRequest` para `operation_token` e `idempotency_key` en cabeceras y payload; hash persistido en `operation_records.query_token_hash`. Reintentos de peticiones cuya respuesta se perdió recuperan la credencial; frontend PWA integrado con generación criptográfica y consulta de estado definitivo.
+  5. **F5 (Inmutabilidad de UNKNOWN sin evidencia y reconciliación GET)**: `mark_operation_committed` rechaza transicionar desde `UNKNOWN` sin evidencia duradera propia (`RuntimeError`). `GET /api/operations/{id}` autorizado reconcilia operaciones `UNKNOWN`.
+  6. **F6 (No inferir ABORTED por PID ausente y autorización previa a reconciliar)**: `reconcile_operation` no deduce `ABORTED` ante backend PID inactivo o ausente (preserva `PENDING`/`UNKNOWN`). `GET /api/operations/{id}` comprueba autorización antes de reconciliar, impidiendo mutaciones de estado privadas no autorizadas (responde 404 de inmediato).
+  7. **F7 (Trazabilidad detallada en mutación REST)**: `update_report_status` lee estado y versión previos bajo `FOR UPDATE` e inserta en `operation_records` detalle completo de estados anterior/nuevo, versiones, nota y acción en `proposed_payload` y `result_payload`.
+  8. **F8 (Inmutabilidad temporal de procedencia causal)**: `is_deadline_cancellation` evalúa el tiempo original del error (`_civia_first_seen_at` o `_civia_raised_at`), evitando que excepciones externas retenidas en memoria se clasifiquen erróneamente como cancelaciones locales por inspección tardía.
+- **Verificación oficial en clúster desechable PostgreSQL 17.11 y runner aislado**:
+  - `pytest backend/tests/test_audit_g2_1_8_remediation.py`: **`8 passed in 2.36s`** (100% de éxito).
+  - Verificación suite completa modo `BLANK`: **`121 passed, 2 skipped in 27.51s`** (0 fallos).
+  - Verificación suite completa modo `SYNTHETIC`: **`121 passed, 2 skipped in 25.08s`** (0 fallos).
+  - Verificación scripts independientes de Codex:
+    - `error_provenance.py`: Verificado (`classified_local: false` para `external_25P04_margin`, `real_admin_shutdown` y `real_undefined_table`).
+    - `migration_and_unknown.py`: Verificado (`http_state: COMMITTED`, `helper_state: COMMITTED`).
+    - `final_probes.py`: Verificado (`private_message_exposed: false`, `target_exposed: null`, upgrade 005→006 preservado).
+    - `adversarial.py`: Verificado (sin fugas en replays, trigger terminal inmutable, `rest_concurrent` con detalles completos).
+    - `boundaries.py`: Verificado (rollback atómico, `external_timeout_margin_*` con `classified_local: false`, fallo 500 sin ledger).
+  - Frontend PWA: `tsc -b && vite build` ejecutado en imagen Docker Node 22: **`0 errores, built in 2.02s`**.
+  - Cero regresiones en controles aprobados G1, A-02, N-02, M-02, M-03 COPY o M-06. Cero commits en `main` ni push remoto.
+  - Contenedores de prueba y redes efímeras eliminados. Servicios habituales intactos y saludables. Detenido para dictamen de auditoría de Codex.

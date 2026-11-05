@@ -7,6 +7,7 @@ import {
   fetchReportByCode,
   fetchReports,
   fetchStats,
+  getOperationStatus,
   queryAgent,
   setAdminFaultInjection,
   submitCitizenReport,
@@ -16,6 +17,7 @@ import { CaliMap } from './components/CaliMap';
 import type {
   AgentQueryResponse,
   ObservabilityData,
+  OperationStatusResponse,
   PendingApprovalItem,
   ReportCategory,
   ReportItem,
@@ -163,6 +165,8 @@ export function App() {
   );
   const [agentBusy, setAgentBusy] = useState<boolean>(false);
   const [agentResponse, setAgentResponse] = useState<AgentQueryResponse | null>(null);
+  const [operationStatus, setOperationStatus] = useState<OperationStatusResponse | null>(null);
+  const [checkingOperation, setCheckingOperation] = useState<boolean>(false);
 
   // Zona Admin protegida (no hardcodear secretos en el bundle cliente)
   const [adminToken, setAdminToken] = useState<string>('');
@@ -451,6 +455,22 @@ export function App() {
     }
   };
 
+  const handleCheckOperationStatus = async (opId: string, qToken?: string) => {
+    setCheckingOperation(true);
+    try {
+      const res = await getOperationStatus(
+        opId,
+        qToken || undefined,
+        adminToken || undefined
+      );
+      setOperationStatus(res);
+    } catch (err) {
+      setGlobalError(err instanceof Error ? err.message : 'Error al consultar estado de la operación.');
+    } finally {
+      setCheckingOperation(false);
+    }
+  };
+
   const handleRunAgentQuery = async (e?: React.FormEvent, presetQuery?: string) => {
     if (e) e.preventDefault();
     const q = (presetQuery ?? agentInput).trim();
@@ -458,8 +478,15 @@ export function App() {
     if (presetQuery) setAgentInput(presetQuery);
     setAgentBusy(true);
     setGlobalError(null);
+    setOperationStatus(null);
     try {
-      const res = await queryAgent({ query: q });
+      const idempKey = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `idemp-${Date.now()}`;
+      const opToken = typeof crypto !== 'undefined' && crypto.randomUUID ? `opt-${crypto.randomUUID()}` : `opt-${Date.now()}`;
+      const res = await queryAgent({
+        query: q,
+        idempotency_key: idempKey,
+        operation_token: opToken,
+      });
       setAgentResponse(res);
     } catch (err) {
       setGlobalError(err instanceof Error ? err.message : 'Error al consultar el asistente.');
@@ -1377,6 +1404,48 @@ export function App() {
                     </pre>
                   ))}
                 </div>
+
+                {agentResponse.operation_id && (
+                  <div style={{ marginTop: '0.8rem', padding: '0.8rem', background: '#eef6f5', borderRadius: '8px', border: '1px solid #c8deda' }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
+                      <span style={{ fontSize: '0.85rem' }}>
+                        <strong>ID Operación:</strong> <code>{agentResponse.operation_id}</code>
+                        {agentResponse.operation_status && (
+                          <span className="civia-badge status" style={{ marginLeft: '0.5rem' }}>
+                            {agentResponse.operation_status}
+                          </span>
+                        )}
+                      </span>
+                      <button
+                        type="button"
+                        className="civia-btn secondary"
+                        style={{ padding: '0.3rem 0.7rem', fontSize: '0.8rem' }}
+                        disabled={checkingOperation}
+                        onClick={() => handleCheckOperationStatus(agentResponse.operation_id!, agentResponse.query_token ?? undefined)}
+                      >
+                        {checkingOperation ? 'Consultando...' : 'Verificar estado definitivo'}
+                      </button>
+                    </div>
+
+                    {operationStatus && (
+                      <div style={{ marginTop: '0.6rem', padding: '0.6rem', background: '#ffffff', borderRadius: '6px', fontSize: '0.82rem' }}>
+                        <div><strong>Estado persistido:</strong> {operationStatus.status}</div>
+                        {operationStatus.target_id && <div><strong>Reporte objetivo:</strong> {operationStatus.target_id}</div>}
+                        {operationStatus.operation_type && <div><strong>Tipo de operación:</strong> {operationStatus.operation_type}</div>}
+                        {operationStatus.result_payload && (
+                          <pre style={{ margin: '0.4rem 0 0', padding: '0.4rem', background: '#f5f5f5', borderRadius: '4px', maxHeight: '120px', overflow: 'auto' }}>
+                            {JSON.stringify(operationStatus.result_payload, null, 2)}
+                          </pre>
+                        )}
+                        {operationStatus.error_message && (
+                          <div style={{ color: '#d32f2f', marginTop: '0.3rem' }}>
+                            <strong>Fallo:</strong> {operationStatus.error_message}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </section>
