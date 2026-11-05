@@ -505,3 +505,47 @@
   - Suite SYNTHETIC (`test_suite_synthetic`): **`121 passed, 2 skipped in 25.01s`** (0 fallos).
   - Frontend TypeScript/Vite compilado limpiamente: **0 errores**.
 - **Contenedores efímeros eliminados**: `civia_audit_v2_*` retirados. Servicios habituales intactos y saludables. Detenido para dictamen de auditoría de Codex.
+
+---
+
+## Solución técnica definitiva F8: Clasificador causal de evidencia y desacoplamiento del supervisor (2026-11-05)
+
+- **Skills aplicadas disciplinadamente**: `systematic-debugging`, `postgres-best-practices`, `backend-security-coder`, `unit-testing-test-generate`.
+- **Causa raíz erradicada**:
+  - `is_deadline_cancellation()` atribuía errores de PostgreSQL al deadline local mediante heurísticas no causales: expiración tardía de capability, timestamps de primera inspección (`seen_at >= dl`), y marcas fijadas en llamadas de `cancel()` sin confirmar causalidad sobre la excepción.
+  - El supervisor (`execute_tool_with_timeout`) y la procedencia de errores SQL estaban acoplados de modo que una excepción externa (57014/25P04) se enmascaraba como timeout local si se inspeccionaba tarde.
+- **Implementación y contratos aplicados**:
+  1. **Separación de responsabilidades**:
+     - El supervisor de Python controla directamente su propio límite temporal (`time.monotonic() >= eff_deadline` o `FuturesTimeoutError`). Cuando el supervisor vence efectivamente, su guardrail TIMEOUT (o `OperationPendingError` si la operación transaccional está en progreso) se activa de manera autónoma.
+     - Errores de PostgreSQL (57014, 25P04, etc.) ocurridos antes de que el supervisor venza no se convierten arbitrariamente en `TimeoutError` y se propagan como errores de base de datos (`TOOL_ERROR`).
+  2. **Clasificador causal de evidencia estricto**:
+     - `is_deadline_cancellation()` devuelve `True` **exclusivamente** ante evidencia causal positiva, verificable y vinculada a la ejecución: `TimeoutError` nativo de Python generado por plazos locales o excepciones con confirmación local positiva explícita (`_civia_confirmed_local_deadline`).
+     - Devuelve `False` ante cualquier error ambiguo, administrativo (57P01), concurrente o externo de PostgreSQL.
+     - Prohibido consultar el reloj actual (`time.monotonic()`), el estado actual de la capability, o asumir que un `cancel()` exitoso o fallido es prueba suficiente de causalidad.
+     - Resultado memorizado de forma inmutable y estable respecto al objeto de excepción (`_civia_is_local_cancellation`).
+  3. **Registro granular de solicitudes de cancelación**:
+     - En `cancel_active_conns_for_thread()`, se registran hechos concretos: `_civia_cancel_requested`, `_civia_cancel_attempted`, `_civia_cancel_sent` y `_civia_cancel_failed`. No se marca `_civia_cancelled_by_deadline = True` a ciegas en la conexión.
+  4. **Captura de procedencia en `checked_commit`**:
+     - Cuando `checked_commit()` configura activamente un `transaction_timeout` anclado a `dl_check` en PostgreSQL, y la base de datos cancela la transacción durante el commit, `checked_commit` marca `_civia_confirmed_local_deadline = True` y lanza `TimeoutError(...) from exc`.
+  5. **Suite de pruebas de regresión y cobertura exhaustiva**:
+     - Actualizada `test_adversarial_external_timeout_not_local_cancellation` eliminando la aserción heredada errónea de `past_deadline -> True`.
+     - Incorporadas 10 pruebas permanentes en `backend/tests/test_audit_g2_1_8_adversarial.py` (`test_f8_1` a `test_f8_10`) cubriendo:
+       1. 57014 externo antes del deadline e inspección posterior: `False`.
+       2. 25P04 externo antes del deadline e inspección posterior: `False`.
+       3. Excepción externa inicialmente False; capability expira; misma excepción continúa `False`.
+       4. Solicitud `cancel()` fallida y posterior timeout externo: `False`.
+       5. Cancelación solicitada sin prueba concluyente: `False`.
+       6. Timeout generado por el supervisor: conserva guardrail TIMEOUT.
+       7. 57P01 administrativo: conserva clasificación de infraestructura (`False`).
+       8. 42P01 por tabla inexistente: conserva error original (`False`).
+       9. Repetición de clasificación en instantes distintos: resultado estable e inmutable.
+       10. Prueba positiva: deadline local genuino: `True`.
+- **Verificación oficial completada**:
+  - `closure.py` independiente de Codex: **100% de verificaciones superadas** (código de salida 0), incluyendo `F8_capability_expiry` (first: false, second: false, own_cancellation_marked: false), `F8_failed_cancel_origin` (cancel_success_count: 0, own_marker_on_exception: false, classified_local: false), `F8_first_observation_late` (classified_local: false, own_marker: false).
+  - `backend/tests/test_audit_g2_1_8_adversarial.py`: **19 PASSED** (100% de éxito en 2.61s).
+  - `backend/tests/test_audit_g2_1_remediation.py`: **8 PASSED** (100% de éxito en 2.34s).
+  - Suite completa hermética (`pytest -m "not live" -q -rs`): **131 passed, 1 skipped, 1 deselected, 0 failed en 24.47s**.
+- **Limpieza**:
+  - Recursos efímeros eliminados (`civia_f8_runner`, `civia_f8_pg`, `civia_f8_net`).
+  - Servicios habituales (`civia-api-1`, `civia-frontend-1`, `civia-db-1`) intactos, corriendo y saludables.
+  - Prohibido push o merge. Árbol listo para dictamen de auditoría de Codex.

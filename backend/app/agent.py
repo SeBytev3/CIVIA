@@ -927,6 +927,30 @@ def execute_tool_with_timeout(
         psycopg.errors.AdminShutdown,
         getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
     ) as exc:
+        if isinstance(exc, psycopg.errors.AdminShutdown) or getattr(exc, "sqlstate", None) == "57P01":
+            raise
+        # Requisito 1 y 5: Si el supervisor efectivamente venció su deadline, activar guardrail
+        if time.monotonic() >= eff_deadline:
+            in_flight = get_in_flight_commit_for_thread(worker_tid[0]) if worker_tid else None
+            if in_flight is not None or op_id is not None:
+                active_op = (in_flight.get("operation_id") if in_flight else None) or op_id
+                raise OperationPendingError(
+                    f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s pero la confirmación transaccional continúa en progreso.",
+                    operation_id=active_op,
+                    status="PENDING",
+                    query_token=claim.get("query_token") if is_transactional_op else None,
+                ) from exc
+            capability.revoke()
+            if worker_tid:
+                threading.Thread(
+                    target=cancel_active_conns_for_thread,
+                    args=(worker_tid[0],),
+                    daemon=True,
+                ).start()
+            if op_id:
+                mark_operation_aborted(op_id, "Cancelación por deadline en base de datos.")
+            raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s.") from exc
+
         if not is_deadline_cancellation(exc, eff_deadline):
             raise
         capability.revoke()
@@ -940,6 +964,29 @@ def execute_tool_with_timeout(
             mark_operation_aborted(op_id, "Cancelación por deadline en base de datos.")
         raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s (cancelación en BD).") from exc
     except psycopg.OperationalError as exc:
+        if isinstance(exc, psycopg.errors.AdminShutdown) or getattr(exc, "sqlstate", None) == "57P01":
+            raise
+        if time.monotonic() >= eff_deadline:
+            in_flight = get_in_flight_commit_for_thread(worker_tid[0]) if worker_tid else None
+            if in_flight is not None or op_id is not None:
+                active_op = (in_flight.get("operation_id") if in_flight else None) or op_id
+                raise OperationPendingError(
+                    f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s pero la confirmación transaccional continúa en progreso.",
+                    operation_id=active_op,
+                    status="PENDING",
+                    query_token=claim.get("query_token") if is_transactional_op else None,
+                ) from exc
+            capability.revoke()
+            if worker_tid:
+                threading.Thread(
+                    target=cancel_active_conns_for_thread,
+                    args=(worker_tid[0],),
+                    daemon=True,
+                ).start()
+            if op_id:
+                mark_operation_aborted(op_id, "Timeout operacional en base de datos.")
+            raise TimeoutError(f"La herramienta '{tool_name}' superó el límite de {timeout_sec}s.") from exc
+
         if not is_deadline_cancellation(exc, eff_deadline):
             raise
         capability.revoke()

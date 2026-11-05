@@ -127,65 +127,45 @@ def get_current_operation() -> dict[str, Any] | None:
 
 def is_deadline_cancellation(exc: BaseException, deadline: float | None = None) -> bool:
     """
-    Determina si una excepción de base de datos fue causada inequívocamente por
-    la expiración de un plazo/deadline local, y NO por un fallo de infraestructura,
-    terminación administrativa ajena (57P01 AdminShutdown), o un timer de sesión ajeno (G2.1.7).
-    El resultado se memoriza de forma inmutable respecto al deadline evaluado.
+    Clasificador de evidencia causal:
+    Devuelve True exclusivamente cuando exista evidencia causal positiva y verificable
+    de que el error fue generado por un deadline local de CIVIA.
+    Devuelve False ante errores externos, administrativos o cuando el origen sea ambiguo
+    (incluyendo 57014/25P04 sin confirmación inequívoca de procedencia local).
+    No consulta el reloj actual, no consulta el estado actual de la capability,
+    y no asume que un cancel() exitoso sea prueba suficiente de causalidad.
+    El resultado es estable e inmutable ante múltiples evaluaciones.
     """
-    if hasattr(exc, "_civia_cached_deadline") and getattr(exc, "_civia_cached_deadline") == deadline:
-        cached = getattr(exc, "_civia_is_local_cancellation", None)
-        if cached is not None:
-            return bool(cached)
+    if hasattr(exc, "_civia_is_local_cancellation"):
+        return bool(getattr(exc, "_civia_is_local_cancellation"))
 
     res = _evaluate_is_deadline_cancellation(exc, deadline)
     try:
         setattr(exc, "_civia_is_local_cancellation", res)
-        setattr(exc, "_civia_cached_deadline", deadline)
     except Exception:
         pass
     return res
 
 
 def _evaluate_is_deadline_cancellation(exc: BaseException, deadline: float | None = None) -> bool:
-    # 1. Terminación administrativa ajena nunca es deadline propio
-    if isinstance(exc, psycopg.errors.AdminShutdown):
-        return False
-    sqlstate = getattr(exc, "sqlstate", None)
-    if sqlstate == "57P01":
-        return False
-
-    # Evidencia directa de cancelación activa iniciada con éxito por CIVIA
-    if getattr(exc, "_civia_cancelled_by_deadline", False):
+    # 1. Errores locales puros de Python por deadline (no de psycopg/PostgreSQL)
+    if isinstance(exc, TimeoutError) and not isinstance(exc, psycopg.Error):
         return True
 
-    seen_at = getattr(exc, "_civia_raised_at", getattr(exc, "_civia_first_seen_at", None))
-    if seen_at is None:
-        seen_at = time.monotonic()
-        try:
-            setattr(exc, "_civia_first_seen_at", seen_at)
-        except Exception:
-            pass
+    # 2. Confirmación causal positiva explícita vinculada a esa ejecución
+    if getattr(exc, "_civia_confirmed_local_deadline", False) is True:
+        return True
 
-    dl = deadline if deadline is not None else get_deadline_context()
-    time_expired = (dl is not None and seen_at >= dl)
-
-    # 2. TransactionTimeout de PostgreSQL (25P04)
-    timeout_set = getattr(exc, "_civia_transaction_timeout_set", False)
-    if sqlstate == "25P04" or isinstance(exc, getattr(psycopg.errors, "TransactionTimeout", ())):
-        return (timeout_set and time_expired) or getattr(exc, "_civia_cancelled_by_deadline", False)
-
-    # 3. QueryCanceled (57014) o timeout operacional
-    if isinstance(exc, psycopg.errors.QueryCanceled) or sqlstate == "57014":
-        return getattr(exc, "_civia_cancelled_by_deadline", False) or time_expired
-
-    if isinstance(exc, psycopg.OperationalError):
-        msg = str(exc).lower()
-        if "canceling statement due to statement timeout" in msg or "canceling statement due to user request" in msg:
-            return getattr(exc, "_civia_cancelled_by_deadline", False) or time_expired
-        if "transaction timeout" in msg:
-            return (timeout_set and time_expired) or getattr(exc, "_civia_cancelled_by_deadline", False)
+    # 3. Excepciones administrativas de PostgreSQL (57P01 AdminShutdown): nunca son deadline propio
+    if isinstance(exc, psycopg.errors.AdminShutdown):
+        return False
+    if getattr(exc, "sqlstate", None) == "57P01":
         return False
 
+    # 4. Cualquier error de PostgreSQL (57014 QueryCanceled, 25P04 TransactionTimeout,
+    # 42P01 UndefinedTable, OperationalError, etc.):
+    # Al no poder demostrarse origen causal positivo local exclusivo, devolver False
+    # (fail-safe de evidencia causal). Prohibido inferir causalidad mediante reloj o expiración tardía.
     return False
 
 
@@ -762,12 +742,16 @@ def cancel_active_conns_for_thread(tid: int) -> int:
         conns = list(_ACTIVE_CONNS_BY_THREAD.get(tid, set()))
     canceled_count = 0
     for c in conns:
+        setattr(c, "_civia_cancel_requested", True)
+        setattr(c, "_civia_cancel_attempted", True)
         try:
             c.cancel()
-            setattr(c, "_civia_cancelled_by_deadline", True)
+            setattr(c, "_civia_cancel_sent", True)
+            setattr(c, "_civia_cancel_failed", False)
             canceled_count += 1
         except Exception:
-            pass
+            setattr(c, "_civia_cancel_sent", False)
+            setattr(c, "_civia_cancel_failed", True)
     return canceled_count
 
 
@@ -906,18 +890,13 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
             psycopg.errors.AdminShutdown,
             getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
         ) as exc:
-            if not hasattr(exc, "_civia_raised_at"):
-                setattr(exc, "_civia_raised_at", time.monotonic())
-            if getattr(conn, "_civia_cancelled_by_deadline", False):
-                setattr(exc, "_civia_cancelled_by_deadline", True)
-            if getattr(conn, "_civia_transaction_timeout_set", False):
-                setattr(exc, "_civia_transaction_timeout_set", True)
             try:
                 conn.rollback()
             except Exception:
                 pass
-            if not is_deadline_cancellation(exc, dl_check):
+            if isinstance(exc, psycopg.errors.AdminShutdown) or getattr(exc, "sqlstate", None) == "57P01":
                 raise
+            setattr(exc, "_civia_confirmed_local_deadline", True)
             if op_id is not None:
                 mark_operation_aborted(op_id, "Operación abortada por expiración del deadline durante sincronización inicial de commit.")
             raise TimeoutError("Operación abortada por expiración del deadline durante sincronización inicial de commit.") from exc
@@ -961,18 +940,13 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
             psycopg.errors.AdminShutdown,
             getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
         ) as exc:
-            if not hasattr(exc, "_civia_raised_at"):
-                setattr(exc, "_civia_raised_at", time.monotonic())
-            if getattr(conn, "_civia_cancelled_by_deadline", False):
-                setattr(exc, "_civia_cancelled_by_deadline", True)
-            if getattr(conn, "_civia_transaction_timeout_set", False):
-                setattr(exc, "_civia_transaction_timeout_set", True)
             try:
                 conn.rollback()
             except Exception:
                 pass
-            if not is_deadline_cancellation(exc, dl_check):
+            if isinstance(exc, psycopg.errors.AdminShutdown) or getattr(exc, "sqlstate", None) == "57P01":
                 raise
+            setattr(exc, "_civia_confirmed_local_deadline", True)
             if op_id is not None:
                 mark_operation_aborted(op_id, "Operación abortada por expiración del deadline durante ajuste final de commit.")
             raise TimeoutError("Operación abortada por expiración del deadline durante ajuste final de commit.") from exc
@@ -1002,18 +976,13 @@ def checked_commit(conn: psycopg.Connection[Any]) -> None:
             psycopg.OperationalError,
             getattr(psycopg.errors, "TransactionTimeout", psycopg.OperationalError),
         ) as exc:
-            if not hasattr(exc, "_civia_raised_at"):
-                setattr(exc, "_civia_raised_at", time.monotonic())
-            if getattr(conn, "_civia_cancelled_by_deadline", False):
-                setattr(exc, "_civia_cancelled_by_deadline", True)
-            if getattr(conn, "_civia_transaction_timeout_set", False):
-                setattr(exc, "_civia_transaction_timeout_set", True)
             try:
                 conn.rollback()
             except Exception:
                 pass
-            if not is_deadline_cancellation(exc, dl_check):
+            if isinstance(exc, psycopg.errors.AdminShutdown) or getattr(exc, "sqlstate", None) == "57P01":
                 raise
+            setattr(exc, "_civia_confirmed_local_deadline", True)
             if op_id is not None:
                 mark_operation_aborted(op_id, "Operación abortada por expiración del deadline durante commit en base de datos.")
             raise TimeoutError("Operación abortada por expiración del deadline durante commit en base de datos.") from exc

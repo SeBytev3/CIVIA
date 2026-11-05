@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import threading
 import time
 from unittest.mock import patch
 import uuid
@@ -219,8 +220,8 @@ def test_adversarial_replay_terminal_aborted_unknown_no_worker(clean_db):
 
 def test_adversarial_external_timeout_not_local_cancellation():
     """
-    Contrato A: Cancelación externa por statement_timeout de 20ms con plazo local a 60ms
-    no se clasifica falsamente como cancelación local de CIVIA (margen de 50ms eliminado).
+    Contrato A / F8: Cancelación externa por statement_timeout de 20ms con plazo local a 60ms
+    no se clasifica como cancelación local de CIVIA, ni inmediata ni tras vencer el plazo.
     """
     exc = psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
     setattr(exc, "sqlstate", "57014")
@@ -229,7 +230,7 @@ def test_adversarial_external_timeout_not_local_cancellation():
     assert is_deadline_cancellation(exc, future_deadline) is False
 
     past_deadline = time.monotonic() - 0.001
-    assert is_deadline_cancellation(exc, past_deadline) is True
+    assert is_deadline_cancellation(exc, past_deadline) is False
 
 
 def test_adversarial_private_operation_unauthorized_404(clean_db):
@@ -295,3 +296,152 @@ def test_adversarial_operation_pending_delivers_token():
         data = r.json()
         assert data["guardrail_triggered"] == "OPERATION_PENDING"
         assert data["query_token"] == "test_token_123"
+
+
+# ==============================================================================
+# F8 — SUITE OBLIGATORIA: CLASIFICACIÓN DE EVIDENCIA CAUSAL Y TIMEOUTS
+# ==============================================================================
+
+def test_f8_1_statement_timeout_57014_late_inspection():
+    """
+    1. 57014 externo antes del deadline e inspección posterior: False.
+    """
+    exc = psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+    setattr(exc, "sqlstate", "57014")
+
+    # Deadline configurado en el pasado o presente
+    dl = time.monotonic() - 0.05
+    assert is_deadline_cancellation(exc, dl) is False
+    # Con deadline en el futuro
+    assert is_deadline_cancellation(exc, time.monotonic() + 10.0) is False
+
+
+def test_f8_2_transaction_timeout_25p04_late_inspection():
+    """
+    2. 25P04 externo antes del deadline e inspección posterior: False.
+    """
+    exc = psycopg.OperationalError("canceling transaction due to transaction timeout")
+    setattr(exc, "sqlstate", "25P04")
+
+    dl = time.monotonic() - 0.05
+    assert is_deadline_cancellation(exc, dl) is False
+    assert is_deadline_cancellation(exc, time.monotonic() + 5.0) is False
+
+
+def test_f8_3_external_exception_stable_after_capability_expiry():
+    """
+    3. Excepción externa inicialmente False; capability expira; misma excepción continúa False.
+    """
+    dl = time.monotonic() + 0.05
+    cap = db.ExecutionCapability(deadline=dl)
+    tok = db.set_execution_capability(cap)
+    try:
+        exc = psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+        setattr(exc, "sqlstate", "57014")
+
+        # Primera evaluación antes de vencer
+        first = is_deadline_cancellation(exc, dl)
+        assert first is False
+
+        # Esperar a que la capability expire
+        time.sleep(0.06)
+        assert not cap.is_valid()
+
+        # Segunda evaluación tras expiración
+        second = is_deadline_cancellation(exc, dl)
+        assert second is False
+    finally:
+        db.reset_execution_capability(tok)
+
+
+def test_f8_4_failed_cancel_request_not_local(clean_db):
+    """
+    4. Solicitud cancel() fallida y posterior timeout externo: False.
+    """
+    with db.get_conn() as conn:
+        def failed_cancel():
+            raise RuntimeError("SYNTHETIC CANCEL TRANSPORT FAILURE")
+
+        conn.cancel = failed_cancel
+        count = db.cancel_active_conns_for_thread(threading.get_ident())
+        assert count == 0
+        assert getattr(conn, "_civia_cancel_failed", False) is True
+
+        exc = psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+        setattr(exc, "sqlstate", "57014")
+        assert is_deadline_cancellation(exc, time.monotonic() + 2.0) is False
+
+
+def test_f8_5_cancel_requested_no_conclusive_proof_remains_false():
+    """
+    5. Cancelación solicitada sin prueba concluyente de causalidad: no atribuirla automáticamente a CIVIA (False).
+    """
+    exc = psycopg.errors.QueryCanceled("canceling statement due to user request")
+    setattr(exc, "sqlstate", "57014")
+    # Incluso si una rutina ajena marcó intento de cancelación, sin confirmación positiva local concluyente es False
+    assert is_deadline_cancellation(exc, time.monotonic() + 1.0) is False
+
+
+def test_f8_6_supervisor_timeout_preserves_guardrail():
+    """
+    6. Timeout generado directamente por el supervisor: conservar guardrail TIMEOUT.
+    """
+    def slow_worker(args):
+        time.sleep(0.2)
+        return {"done": True}
+
+    with patch.dict(a.TOOL_DISPATCH, {"slow_tool": slow_worker}):
+        with pytest.raises(TimeoutError) as exc_info:
+            a.execute_tool_with_timeout("slow_tool", {}, timeout_sec=0.05)
+        assert "superó el límite de" in str(exc_info.value)
+
+
+def test_f8_7_admin_shutdown_57p01_infrastructure():
+    """
+    7. 57P01 administrativo: conservar clasificación de infraestructura (False).
+    """
+    exc = psycopg.errors.AdminShutdown("terminating connection due to administrator command")
+    setattr(exc, "sqlstate", "57P01")
+    assert is_deadline_cancellation(exc, time.monotonic() + 5.0) is False
+    assert is_deadline_cancellation(exc, time.monotonic() - 1.0) is False
+
+
+def test_f8_8_undefined_table_42p01_preserves_original_error():
+    """
+    8. 42P01 por tabla inexistente: conservar error original (False).
+    """
+    exc = psycopg.errors.UndefinedTable('relation "nonexistent" does not exist')
+    setattr(exc, "sqlstate", "42P01")
+    assert is_deadline_cancellation(exc, time.monotonic() + 5.0) is False
+
+
+def test_f8_9_repeated_classification_stable_immutable():
+    """
+    9. Repetir la clasificación de la misma excepción en distintos instantes: resultado estable.
+    """
+    exc = psycopg.errors.QueryCanceled("canceling statement due to statement timeout")
+    setattr(exc, "sqlstate", "57014")
+
+    res1 = is_deadline_cancellation(exc, time.monotonic() + 1.0)
+    time.sleep(0.02)
+    res2 = is_deadline_cancellation(exc, time.monotonic() - 5.0)
+    time.sleep(0.02)
+    res3 = is_deadline_cancellation(exc, None)
+
+    assert res1 is False
+    assert res2 is False
+    assert res3 is False
+
+
+def test_f8_10_positive_local_deadline_classification():
+    """
+    10. Prueba positiva: error de deadline local genuino: True.
+    """
+    # Caso A: TimeoutError nativo de Python generado por deadline local de CIVIA
+    local_timeout = TimeoutError("Deadline de ejecución expirado: sentencia SQL rechazada.")
+    assert is_deadline_cancellation(local_timeout) is True
+
+    # Caso B: Excepción explícitamente confirmada como deadline causal local
+    confirmed_exc = psycopg.errors.QueryCanceled("canceling statement due to user request")
+    setattr(confirmed_exc, "_civia_confirmed_local_deadline", True)
+    assert is_deadline_cancellation(confirmed_exc) is True
