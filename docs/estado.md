@@ -614,3 +614,59 @@
 - PWA real perdió íntegramente la primera respuesta; recarga y replay reutilizan clave/capacidad, recuperan mismo ID y un solo efecto; polling/restauración/limpieza pasan. Sin capacidad en DOM/URLs/logs capturados. ACK perdido y reinicio recuperan COMMITTED. No se reabrieron contratos ajenos a estas regresiones.
 - Skills aplicadas y verificaciones documentadas: systematic-debugging, backend-security-coder, code-review-and-quality; Playwright y patrones de integración frontend para fase 2. compileall pasó; no equivale a lint. Sin configuración/comando lint Python identificado; git diff --check verifica documentación. No se corrigió código ni pruebas.
 - Evidencia fuera del checkout: `C:\Users\Jhoesp\AppData\Local\Temp\civia-cf48e71-e052c8633d5f4de383d66e78e35b5c1c`. PostgreSQL 17.11/API/runner/frontend propios, datos sintéticos y proveedores interceptados o simulados. Recursos exclusivos retirados tras comprobar IDs; tres servicios habituales saludables. HEAD/rama intactos; solo informe y esta anotación. Sin Autopilot, commits, push ni merge. Detenido al entregar.
+
+---
+
+## Corrección de Navegación UI y Modernización de Evidencias Sintéticas — feat/ui-navigation-demo-evidence (2026-11-05)
+
+- **Rama de trabajo:** `feat/ui-navigation-demo-evidence`, creada a partir de la versión documental publicada `d14f64e31b3c8ab361682a0d023faf8ba53ae048` (con base funcional auditada y aprobada `cf48e710a4d321455864d2b59a4257cdca9938aa`).
+- **Invariantes preservados:** Rama auditada `fix/auditoria-final` y commit `cf48e71` intactos como referencia histórica inmutable. Contratos de seguridad e integridad F1–F8 preservados al 100%. Servicios habituales en Docker (`civia-api-1`, `civia-frontend-1`, `civia-db-1`) intactos y saludables.
+
+### 1. Fase 1 — Causa Raíz y Corrección de Navegación entre Pestañas
+- **Causa raíz:** En `frontend/src/App.tsx`, el panel de inspección `{selectedReport && renderInspectionPanel(selectedReport)}` se renderizaba fuera del bloque condicional de pestañas en `<main className="civia-container">`. Además, `handleSearchTrackingCode` invocaba `openReportInspection(rep)`, fijando `selectedReport` globalmente. Al cambiar a *Asistente Agéntico* o *Observabilidad Admin*, el detalle permanecía anclado en la parte superior, obstruyendo la interfaz.
+- **Corrección aplicada:**
+  - El renderizado de inspección se aisló estrictamente dentro de sus vistas correspondientes:
+    - En `explorar` (Mapa y Reportes): `{selectedReport && renderInspectionPanel(selectedReport, () => setSelectedReport(null))}`.
+    - En `seguimiento` (Seguimiento Radicado): `{trackedReport && renderInspectionPanel(trackedReport, () => setTrackedReport(null))}`.
+    - En `asistente` y `admin`: NINGÚN panel de reporte ajeno se renderiza; el asistente opera de forma autónoma con su chat, 4 límites y modal de recuperación F4 sin interferencias.
+  - `handleSearchTrackingCode` y `handleSubmitNewReport` actualizan `trackedReport` y preparan los campos de clasificación sin contaminar `selectedReport`.
+  - El botón "Cerrar detalle" acepta un callback `onClose` desacoplado que limpia el estado de la vista activa sin afectar a las demás.
+- **Verificación TDD Adversarial con Playwright (`frontend/e2e/test_navigation.cjs`):**
+  - Fase RED ejecutada sobre el frontend no parcheado (`http://localhost:5173`): Defecto confirmado con visibilidad espuria de `CIV-2026-DEMO0001` en *Asistente* y *Admin*.
+  - Fase GREEN ejecutada sobre la compilación actualizada (`http://localhost:4173`):
+    - Desktop (1280x800): Detalle visible en seguimiento -> Desaparece al ir a Asistente (asistente 100% operativo) -> Admin libre de detalles -> Retorno a Mapa sin detalles residuales -> Ciclo de pestañas repetido OK -> 0 errores de React en consola.
+    - Móvil (375x667): Mismo flujo validado sin errores responsivos ni de layout.
+
+### 2. Fases 2 y 3 — Fotografías Sintéticas Fotorrealistas y Procedencia Ética
+- **Generación de 10 fotografías realistas de alta resolución (1200x896 px, JPEG):**
+  - Cada una de las 10 escenas del catálogo `SYNTHETIC_REPORTS` cuenta con una fotografía fotorrealista dedicada contextualizada en comunas y vías de Santiago de Cali (Santa Mónica, Mariano Ramos, Pance, Cerro de las Tres Cruces, San Fernando, Alfonso López, Ciudad Córdoba, Capri, Chiminangos, San Pascual).
+  - Escenas naturales con iluminación diurna creíble, pavimento, vegetación y entorno colombiano, sin rostros identificables ni placas vehiculares legibles.
+- **Procedencia y salvaguardas éticas:**
+  - Se mantiene `is_synthetic = TRUE` en base de datos.
+  - Cada fotografía incluye una franja inferior indeleble: `CIVIA · SIMULACIÓN IA · EVIDENCIA SINTÉTICA DEMO · NO PRIVADO · RADICADO: CIV-2026-DEMOXXXX`.
+  - En la interfaz ciudadana de inspección se despliega el distintivo visible: `ℹ Imagen generada con IA · Simulación`.
+  - Sin falsificación de metadatos EXIF de GPS, fecha o dispositivo de captura.
+- **Empaquetado local:**
+  - Los 10 activos se empaquetan en `backend/app/demo_assets/` (tamaños optimizados entre 315 KB y 509 KB; ~4 MB totales).
+  - Las 5 muestras representativas por categoría (`sample_hueco.jpg`, `sample_basuras.jpg`, `sample_tala.jpg`, `sample_quema.jpg`, `sample_otro.jpg`) se empaquetan en `frontend/public/demo_evidence/` para sustituir el canvas geométrico por muestras fotográficas reales.
+
+### 3. Fase 4 — Actualización Idempotente y Pruebas en Entorno Desechable
+- **Mecanismo idempotente en `backend/app/seed.py`:**
+  - `get_synthetic_evidence_bytes(code, kind)`: Carga el activo empaquetado y entrega dimensiones (1200x896), mime (`image/jpeg`) y hash SHA-256.
+  - `update_synthetic_catalog_photos()`: Actualiza exclusivamente los 10 reportes de catálogo sintético (`is_synthetic = TRUE AND tracking_code LIKE 'CIV-2026-DEMO%'`).
+  - **Invariantes comprobados:**
+    - Los reportes reales o creados por ciudadanos (`is_synthetic = FALSE`) quedan 100% intactos.
+    - No se alteran títulos, coordenadas, estados ni aprobaciones humanas.
+    - Ejecución repetida produce `updated = 0, unchanged = 10` (idempotencia matemática estricta).
+- **Pruebas en PostgreSQL 17 desechable (`backend/tests/test_demo_evidence_and_navigation.py`):**
+  - Ejecutado en contenedor independiente `civia_demo_runner` sobre base `civia_demo_pg` (`postgres:17-alpine`).
+  - 5/5 pruebas pasadas: integridad de activos, consistencia en frontend, sembrado, actualización idempotente y endpoint `/api/reports/{id}/photo`.
+
+### 4. Resumen de Pruebas y Resultados
+- **TypeScript & Vite build (`npm --prefix frontend run build`):** Exitoso en 1.57s sin errores ni advertencias (`dist/`).
+- **Playwright E2E (`frontend/e2e/test_navigation.cjs`):** 100% PASS en escritorio y móvil, 0 errores de consola.
+- **Suite hermética completa de backend (`pytest -m "not live"`):** **139 passed, 1 skipped (frontend proxy condicionado), 1 deselected, 0 failed en 27.13s**.
+- **Regresión F1–F8 (`test_audit_g2_1_8_remediation.py`):** **8/8 PASSED**.
+- **Servicios habituales:** `civia-api-1`, `civia-frontend-1`, `civia-db-1` limpios, saludables e inalterados.
+- **Sin push ni merge hacia ramas remotas o protegidas.**
+

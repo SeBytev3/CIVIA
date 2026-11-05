@@ -44,66 +44,36 @@ const CALI_PRESETS = [
   { label: 'Cerro de las Tres Cruces (Comuna 2)', lat: 3.4752, lon: -76.5468, comuna: 'Comuna 2', neighborhood: 'Tres Cruces' },
 ];
 
-function createCanvasDemoPhoto(category: ReportCategory): Promise<File> {
+async function createCanvasDemoPhoto(category: ReportCategory): Promise<File> {
+  const catLower = category.toLowerCase();
+  const sampleUrl = `/demo_evidence/sample_${catLower}.jpg`;
+  try {
+    const res = await fetch(sampleUrl);
+    if (res.ok) {
+      const blob = await res.blob();
+      return new File([blob], `evidencia_sintetica_${catLower}.jpg`, { type: 'image/jpeg' });
+    }
+  } catch {
+    // Continuar a fallback dinámico si el recurso estático no responde
+  }
+
   return new Promise((resolve) => {
     const canvas = document.createElement('canvas');
-    canvas.width = 320;
-    canvas.height = 220;
+    canvas.width = 1024;
+    canvas.height = 768;
     const ctx = canvas.getContext('2d')!;
 
-    ctx.fillStyle = '#e9f0ef';
-    ctx.fillRect(0, 0, 320, 220);
+    ctx.fillStyle = '#1e293b';
+    ctx.fillRect(0, 0, 1024, 768);
 
-    if (category === 'HUECO') {
-      ctx.fillStyle = '#4f545c';
-      ctx.fillRect(0, 40, 320, 150);
-      ctx.fillStyle = '#f5d042';
-      ctx.fillRect(20, 110, 60, 8);
-      ctx.fillRect(240, 110, 60, 8);
-      ctx.fillStyle = '#1b1d21';
-      ctx.beginPath();
-      ctx.ellipse(160, 118, 65, 38, 0, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (category === 'BASURAS') {
-      ctx.fillStyle = '#9aa5a8';
-      ctx.fillRect(0, 120, 320, 70);
-      ctx.fillStyle = '#242b2e';
-      ctx.beginPath();
-      ctx.arc(120, 130, 36, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = '#2d6a4f';
-      ctx.beginPath();
-      ctx.arc(175, 125, 40, 0, Math.PI * 2);
-      ctx.fill();
-    } else if (category === 'TALA') {
-      ctx.fillStyle = '#74c69d';
-      ctx.fillRect(0, 100, 320, 90);
-      ctx.fillStyle = '#6c4628';
-      ctx.fillRect(80, 95, 45, 65);
-      ctx.fillRect(140, 130, 120, 28);
-    } else {
-      ctx.fillStyle = '#6b5e53';
-      ctx.fillRect(0, 120, 320, 70);
-      ctx.fillStyle = '#e63946';
-      ctx.beginPath();
-      ctx.moveTo(110, 150);
-      ctx.lineTo(155, 55);
-      ctx.lineTo(205, 150);
-      ctx.closePath();
-      ctx.fill();
-    }
-
-    ctx.fillStyle = '#0f4c5c';
-    ctx.fillRect(0, 0, 320, 32);
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 13px sans-serif';
-    ctx.fillText(`EVIDENCIA SINTETICA DEMO: ${category}`, 12, 21);
+    ctx.fillStyle = '#0f172a';
+    ctx.fillRect(0, 768 - 48, 1024, 48);
+    ctx.fillStyle = '#f8fafc';
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillText(`CIVIA · SIMULACIÓN IA · EVIDENCIA SINTÉTICA DEMO · CATEGORÍA: ${category}`, 24, 768 - 18);
 
     canvas.toBlob((blob) => {
-      const file = new File([blob!], `evidencia_sintetica_${category.toLowerCase()}.png`, {
-        type: 'image/png',
-      });
-      resolve(file);
+      resolve(new File([blob!], `evidencia_sintetica_${catLower}.png`, { type: 'image/png' }));
     }, 'image/png');
   });
 }
@@ -399,9 +369,13 @@ export function App() {
           // Ignorar si sessionStorage no está disponible
         }
       }
-      openReportInspection(created);
       setTrackedReport(created);
       setTrackingInput(created.tracking_code);
+      setConfirmCat((created.final_category || created.ai_category || 'HUECO') as ReportCategory);
+      setConfirmSev((created.final_severity || created.ai_severity || 'MEDIA') as ReportSeverity);
+      setConfirmNote(created.human_override_note || '');
+      setSelectedReport(null);
+      setActiveTab('seguimiento');
       setGlobalSuccess(
         `Reporte registrado con código ${created.tracking_code}. ${created.status_message}`
       );
@@ -457,10 +431,15 @@ export function App() {
     setGlobalError(null);
     try {
       const updated = await triggerReportAnalysis(rep.id);
-      openReportInspection(updated);
+      if (selectedReport?.id === updated.id) {
+        setSelectedReport(updated);
+      }
       if (trackedReport?.id === updated.id) {
         setTrackedReport(updated);
       }
+      setConfirmCat((updated.final_category || updated.ai_category || 'HUECO') as ReportCategory);
+      setConfirmSev((updated.final_severity || updated.ai_severity || 'MEDIA') as ReportSeverity);
+      setConfirmNote(updated.human_override_note || '');
       setGlobalSuccess(`Estado actualizado para ${updated.tracking_code}: ${updated.status_message}`);
       await loadStatsAndReports();
     } catch (err) {
@@ -479,7 +458,9 @@ export function App() {
     try {
       const rep = await fetchReportByCode(code);
       setTrackedReport(rep);
-      openReportInspection(rep);
+      setConfirmCat((rep.final_category || rep.ai_category || 'HUECO') as ReportCategory);
+      setConfirmSev((rep.final_severity || rep.ai_severity || 'MEDIA') as ReportSeverity);
+      setConfirmNote(rep.human_override_note || '');
     } catch (err) {
       setTrackedReport(null);
       setGlobalError(err instanceof Error ? err.message : 'No se encontró el radicado.');
@@ -669,7 +650,7 @@ export function App() {
     );
   };
 
-  const renderInspectionPanel = (rep: ReportItem) => (
+  const renderInspectionPanel = (rep: ReportItem, onClose: () => void) => (
     <div className="civia-panel" style={{ borderLeft: '5px solid var(--civia-teal)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
         <div>
@@ -685,7 +666,7 @@ export function App() {
         <button
           type="button"
           className="civia-btn secondary"
-          onClick={() => setSelectedReport(null)}
+          onClick={onClose}
         >
           Cerrar detalle
         </button>
@@ -704,6 +685,21 @@ export function App() {
             alt={`Evidencia fotográfica del reporte ${rep.tracking_code}`}
             style={{ width: '100%', maxHeight: '280px', objectFit: 'cover', borderRadius: '10px' }}
           />
+          {rep.is_synthetic && (
+            <div style={{
+              background: '#e8f4f8',
+              color: '#0f4c5c',
+              fontSize: '0.8rem',
+              fontWeight: 600,
+              padding: '0.3rem 0.6rem',
+              borderRadius: '6px',
+              marginTop: '0.4rem',
+              display: 'inline-block',
+              border: '1px solid #b6d4db'
+            }}>
+              ℹ Imagen generada con IA · Simulación
+            </div>
+          )}
           <p style={{ marginTop: '0.65rem' }}>{rep.description}</p>
           <p style={{ fontSize: '0.85rem', color: 'var(--civia-muted)' }}>
             <strong>Coordenadas GPS:</strong> ({rep.latitude}, {rep.longitude}) ·{' '}
@@ -928,11 +924,10 @@ export function App() {
           </section>
         )}
 
-        {selectedReport && renderInspectionPanel(selectedReport)}
-
         {/* PESTAÑA 1: EXPLORAR MAPA Y REPORTES */}
         {activeTab === 'explorar' && (
           <>
+            {selectedReport && renderInspectionPanel(selectedReport, () => setSelectedReport(null))}
             <section className="civia-panel">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
                 <h2>Mapa Interactivo de Santiago de Cali ({totalReports} reportes encontrados)</h2>
@@ -1396,7 +1391,7 @@ export function App() {
               )}
             </div>
 
-            {trackedReport && !selectedReport && renderInspectionPanel(trackedReport)}
+            {trackedReport && renderInspectionPanel(trackedReport, () => setTrackedReport(null))}
           </section>
         )}
 

@@ -11,6 +11,7 @@ __pycache__/
 coverage/
 dist/
 build/
+*.tsbuildinfo
 orchestrator/simulation_state.json
 orchestrator/reports/simulation_*
 orchestrator/*.corrupt.*.json

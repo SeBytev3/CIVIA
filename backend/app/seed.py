@@ -11,6 +11,26 @@ from app.config import settings
 from app.db import assert_disposable_test_db, get_conn
 
 
+DEMO_ASSETS_DIR = Path(__file__).parent / "demo_assets"
+
+
+def get_synthetic_evidence_bytes(code: str, kind: str) -> tuple[bytes, str, str, int, int]:
+    """
+    Obtiene los bytes de la evidencia fotográfica sintética fotorrealista empaquetada.
+    Retorna: (file_bytes, filename, mime_type, width, height)
+    """
+    code_lower = code.lower()
+    asset_file = DEMO_ASSETS_DIR / f"{code_lower}.jpg"
+    if asset_file.exists():
+        data = asset_file.read_bytes()
+        filename = f"synthetic_{code_lower}.jpg"
+        return data, filename, "image/jpeg", 1200, 896
+
+    # Fallback seguro en memoria si no estuviera el archivo en disco
+    fallback_data = generate_synthetic_evidence_png(kind, code, 1024, 768)
+    return fallback_data, f"synthetic_{code_lower}.png", "image/png", 1024, 768
+
+
 def generate_synthetic_evidence_png(kind: str, code: str, width: int = 240, height: int = 160) -> bytes:
     """Genera una imagen PNG sintética identificada (>=240x160 px) para pruebas y demo."""
     img = Image.new("RGB", (width, height), color=(235, 238, 242))
@@ -288,10 +308,11 @@ def seed_synthetic_reports(force_reset: bool = False) -> dict[str, int]:
                     skipped += 1
                     continue
 
-                png_bytes = generate_synthetic_evidence_png(item["ai_category"], item["tracking_code"])
-                photo_name = f"synthetic_{item['tracking_code'].lower()}.png"
-                (upload_dir / photo_name).write_bytes(png_bytes)
-                sha256_hex = hashlib.sha256(png_bytes).hexdigest()
+                bytes_data, photo_name, photo_mime, width, height = get_synthetic_evidence_bytes(
+                    item["tracking_code"], item["ai_category"]
+                )
+                (upload_dir / photo_name).write_bytes(bytes_data)
+                sha256_hex = hashlib.sha256(bytes_data).hexdigest()
 
                 cur.execute(
                     """
@@ -310,8 +331,8 @@ def seed_synthetic_reports(force_reset: bool = False) -> dict[str, int]:
                         %s, %s, %s, %s,
                         %s, %s, TRUE,
                         %s, %s, %s,
-                        %s, 'image/png', %s,
-                        240, 160, %s,
+                        %s, %s, %s,
+                        %s, %s, %s,
                         %s, %s, %s,
                         %s, %s::jsonb,
                         %s, %s,
@@ -329,7 +350,10 @@ def seed_synthetic_reports(force_reset: bool = False) -> dict[str, int]:
                         item["neighborhood"],
                         item["address_hint"],
                         photo_name,
-                        len(png_bytes),
+                        photo_mime,
+                        len(bytes_data),
+                        width,
+                        height,
                         sha256_hex,
                         item["ai_category"],
                         item["ai_severity"],
@@ -345,3 +369,90 @@ def seed_synthetic_reports(force_reset: bool = False) -> dict[str, int]:
                 inserted += 1
             conn.commit()
     return {"inserted": inserted, "skipped": skipped, "total_synthetic_catalog": len(SYNTHETIC_REPORTS)}
+
+
+def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict[str, int]:
+    """
+    Actualiza exclusivamente los metadatos fotográficos y archivos de los 10 reportes del catálogo
+    sintético (is_synthetic = TRUE AND tracking_code LIKE 'CIV-2026-DEMO%').
+
+    Invariantes estrictos:
+    - NO modifica reportes reales o creados por usuarios (is_synthetic = FALSE o tracking_code diferente).
+    - NO altera títulos, descripciones, coordenadas, comunas, estados ni aprobaciones humanas.
+    - NO borra archivos existentes hasta que el nuevo archivo haya sido escrito y validado en disco.
+    - Idempotente: si los hashes y metadatos ya coinciden, no reescribe ni genera cambios espurios.
+    """
+    target_upload_dir = upload_dir_path or settings.UPLOAD_DIR
+    target_upload_dir.mkdir(parents=True, exist_ok=True)
+
+    updated_count = 0
+    unchanged_count = 0
+    missing_count = 0
+
+    catalog_codes = [item["tracking_code"] for item in SYNTHETIC_REPORTS]
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            for item in SYNTHETIC_REPORTS:
+                code = item["tracking_code"]
+                cur.execute(
+                    """
+                    SELECT id, photo_path, photo_sha256, is_synthetic
+                    FROM reports
+                    WHERE tracking_code = %s AND is_synthetic = TRUE;
+                    """,
+                    (code,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    missing_count += 1
+                    continue
+
+                rid = row["id"]
+                current_sha = row["photo_sha256"]
+
+                bytes_data, photo_name, photo_mime, width, height = get_synthetic_evidence_bytes(
+                    code, item["ai_category"]
+                )
+                new_sha256 = hashlib.sha256(bytes_data).hexdigest()
+
+                dest_file = target_upload_dir / photo_name
+                if not dest_file.exists() or dest_file.stat().st_size != len(bytes_data):
+                    dest_file.write_bytes(bytes_data)
+
+                if current_sha == new_sha256 and row["photo_path"] == photo_name:
+                    unchanged_count += 1
+                    continue
+
+                cur.execute(
+                    """
+                    UPDATE reports
+                    SET photo_path = %s,
+                        photo_mime = %s,
+                        photo_size_bytes = %s,
+                        photo_width = %s,
+                        photo_height = %s,
+                        photo_sha256 = %s,
+                        updated_at = NOW()
+                    WHERE id = %s AND is_synthetic = TRUE AND tracking_code = %s;
+                    """,
+                    (
+                        photo_name,
+                        photo_mime,
+                        len(bytes_data),
+                        width,
+                        height,
+                        new_sha256,
+                        rid,
+                        code,
+                    ),
+                )
+                updated_count += 1
+            conn.commit()
+
+    return {
+        "updated": updated_count,
+        "unchanged": unchanged_count,
+        "missing_in_db": missing_count,
+        "catalog_total": len(catalog_codes),
+    }
