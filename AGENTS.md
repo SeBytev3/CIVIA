@@ -31,6 +31,6 @@ Equipo: Stefania Córdoba y Sebastian Espinosa. Proyecto de Ingeniería de Aplic
   1. La rama oficial es `main`.
   2. Ejecutar `.\scripts\run.ps1` (PowerShell) o `./scripts/run.sh` (Bash).
   3. Comprobar salud en `http://localhost:8000/health` y acceso a frontend en `http://localhost:5173`.
-  4. La suite hermética se valida mediante: `docker run --rm -v "${PWD}\backend:/app" -v "${PWD}\frontend:/frontend" -v "${PWD}\eval:/app/eval" --network civia_civia_net -e DATABASE_URL=postgresql://civia:local_dev_change_me@civia-db-1:5432/civia civia-api pytest -m "not live"`.
+  4. La suite hermética se valida mediante el comando canónico sin secretos incrustados: `docker compose exec -T api pytest -m "not live" -v`.
   5. El estado oficial de nube es "DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA", asegurando reproducibilidad completa en máquina local o VM sin costos no presupuestados.
   6. La especificación técnica completa de la API REST y Swagger UI (`http://localhost:8000/docs`) está documentada canónicamente en `docs/API.md` (23 endpoints en 8 categorías temáticas).

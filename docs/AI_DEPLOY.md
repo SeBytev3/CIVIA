@@ -1,5 +1,9 @@
 # CIVIA — Protocolo de Despliegue y Verificación Asistido por IA
 
+**Proyecto Académico de Ingeniería de Aplicaciones con IA — Universidad Cooperativa de Colombia**  
+**Equipo:** Stefania Córdoba y Sebastian Espinosa (Momento Evaluativo 2)  
+**Entorno Oficial:** Local Docker Orquestado (`main`) · **API REST:** FastAPI 0.115+ / Python 3.13 / PostgreSQL 17
+
 Este documento describe el procedimiento operativo estándar para agentes de inteligencia artificial y evaluadores automáticos (**Claude Code, Gemini CLI, Antigravity, ChatGPT, Codex**) que requieran clonar, desplegar y auditar la plataforma CIVIA sin intervención humana.
 
 ---
@@ -72,10 +76,9 @@ Para verificar los contratos de seguridad F1–F8, el almacenamiento inmutable d
 docker compose exec -T api pytest -m "not live" -v
 ```
 
-*(O de forma aislada sin contenedores activos):*
-```powershell
-docker run --rm -v "${PWD}\backend:/app" -v "${PWD}\frontend:/frontend" -v "${PWD}\eval:/app/eval" --network civia_civia_net -e DATABASE_URL=postgresql://civia:local_dev_change_me@civia-db-1:5432/civia civia-api pytest -m "not live"
-```
+*(En Linux / macOS / Bash: `docker compose exec -T api pytest -m "not live" -v`)*
+
+Este procedimiento canónico utiliza la red interna y las credenciales seguras generadas localmente en `.env`, sin exponer contraseñas predecibles ni depender de nombres de red manuales.
 
 **Resultado esperado:**
 `155 passed, 1 deselected, 0 failed`.

@@ -1,5 +1,9 @@
 # CIVIA — Arquitectura de Despliegue y Análisis de Opciones Cloud
 
+**Proyecto Académico de Ingeniería de Aplicaciones con IA — Universidad Cooperativa de Colombia**  
+**Equipo:** Stefania Córdoba y Sebastian Espinosa (Momento Evaluativo 2)  
+**Entorno Oficial:** Local Docker Orquestado (`main`)
+
 Este documento analiza la topología de despliegue de CIVIA tanto en entornos locales controlados como en infraestructuras de computación en la nube.
 
 ---
@@ -26,10 +30,13 @@ flowchart TD
 ```
 
 ### Características de Seguridad y Resiliencia
-- **Aislamiento de red:** La base de datos PostgreSQL no expone puertos al exterior en producción; solo es accesible por el contenedor API.
-- **Fail-closed en arranque:** La API valida el `ADMIN_TOKEN` con CSPRNG; si es débil o predeterminado, aborta el inicio.
-- **Staging atómico de archivos:** La escritura de evidencias utiliza archivos temporales `.tmp_{uuid}` y renombre atómico `os.replace` únicamente tras la confirmación exitosa de la transacción en PostgreSQL (`conn.commit()`).
-- **Versionado y caché inmutable:** Las URLs de fotos incorporan hash `?v={sha[:16]}` con `Cache-Control: public, max-age=31536000, immutable`, impidiendo que el cliente consuma imágenes rancios tras una actualización.
+- **Aislamiento de red:** La base de datos PostgreSQL no expone puertos al exterior en producción; solo es accesible por el contenedor API dentro de la red puente interna `civia_net`.
+- **Fail-closed en arranque:** La API valida el `ADMIN_TOKEN` con CSPRNG; si es débil, predecible o ausente, aborta el inicio inmediatamente impidiendo accesos no autorizados.
+- **Almacenamiento inmutable Content-Addressed Storage (CAS):**
+  - **Catálogo sintético oficial:** Las evidencias fotográficas se direccionan de forma determinista e inmutable mediante el patrón `synthetic_{code}_{sha[:16]}.jpg`. Esto provee idempotencia absoluta durante el sembrado (`seed`), previniendo archivos huérfanos o duplicados.
+  - **Evidencias ciudadanas:** Toda fotografía se valida por *magic bytes* reales, se re-serializa con Pillow eliminando metadatos EXIF/GPS para proteger la privacidad ciudadana y se persiste de forma inmutable con su hash SHA-256 verificado.
+- **Versionado y caché HTTP estricto:** Las URLs de fotografías incorporan el hash del archivo `?v={sha[:16]}` con cabeceras `Cache-Control: public, max-age=31536000, immutable`, ETag estricto y validación condicional `HTTP 304 Not Modified`.
+- **Aislamiento anti-XSS:** El endpoint de entrega de imágenes emite cabeceras de seguridad estrictas: `Content-Security-Policy: default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'` y `X-Content-Type-Options: nosniff`.
 
 ---
 
