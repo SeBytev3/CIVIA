@@ -452,6 +452,49 @@ def test_protected_observability_endpoint():
             assert secret_val not in raw_json
 
 
+def test_institutional_truth_in_agent_answers():
+    """Verifica que las respuestas del agente mantengan veracidad institucional estricta (Fase 1)."""
+    # 1. Significado de reporte pendiente de revisión
+    answer = agent_module._deterministic_sql_fallback_answer(
+        "¿Qué significa que mi reporte esté pendiente de revisión?",
+        tool_history=[],
+    )
+    assert "pendiente de revisión interna" in answer
+    assert "no envía notificaciones automáticas por correo a entidades externas" in answer
+    assert "Alcaldía" not in answer
+    assert "supervisores de la Alcaldía" not in answer
+
+    # 2. Detalle de reporte sin asignación externa
+    tool_hist = [{
+        "tool": "obtener_reporte",
+        "args": {"tracking_code": "CIV-2026-TEST01"},
+        "result": {
+            "encontrado": True,
+            "reporte": {
+                "tracking_code": "CIV-2026-TEST01",
+                "title": "Bache en calzada",
+                "effective_category": "HUECO",
+                "effective_severity": "MEDIA",
+                "status": "PENDING_ANALYSIS",
+                "comuna": "Comuna 19",
+                "neighborhood": "San Fernando",
+                "assigned_to": None,
+            },
+        },
+    }]
+    rep_answer = agent_module._deterministic_sql_fallback_answer(
+        "consultar reporte CIV-2026-TEST01",
+        tool_history=tool_hist,
+    )
+    assert "sin asignación a dependencia externa registrada" in rep_answer
+    assert "notificaciones externas por correo están deshabilitadas" in rep_answer
+    assert "Alcaldía" not in rep_answer
+
+    # 3. Regla en AGENT_SYSTEM_PROMPT
+    assert "VERACIDAD INSTITUCIONAL" in agent_module.AGENT_SYSTEM_PROMPT
+    assert "No afirmes que funcionarios, supervisores o dependencias de la Alcaldía de Cali están revisando" in agent_module.AGENT_SYSTEM_PROMPT
+
+
 def test_hermetic_guard_fails_immediately_on_unexpected_external_http():
     """Verifica que cualquier intento de conexión HTTP externa en pruebas herméticas falle de inmediato (G2.1.2)."""
     import httpx

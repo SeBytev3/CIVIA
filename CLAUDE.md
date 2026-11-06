@@ -56,7 +56,7 @@ curl -I -s http://localhost:5173
 ---
 
 ## 4. Ejecución Hermética de Pruebas
-Para correr la suite completa de 154 pruebas backend:
+Para correr la suite completa de 155 pruebas backend:
 
 ```powershell
 docker compose exec -T api pytest -m "not live" -v
@@ -67,7 +67,7 @@ docker compose exec -T api pytest -m "not live" -v
 docker run --rm -v "${PWD}\backend:/app" -v "${PWD}\frontend:/frontend" -v "${PWD}\eval:/app/eval" --network civia_civia_net -e DATABASE_URL=postgresql://civia:local_dev_change_me@civia-db-1:5432/civia civia-api pytest -m "not live"
 ```
 **Resultado esperado:**
-`154 passed, 1 deselected, 0 failed`.
+`155 passed, 1 deselected, 0 failed`.
 
 ---
 

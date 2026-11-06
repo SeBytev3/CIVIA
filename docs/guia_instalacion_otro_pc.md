@@ -101,7 +101,7 @@ git status
    python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); p.write_text(re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', p.read_text()))"
    ```
 3. **Claves de Inteligencia Artificial (OPCIONALES — Solo requeridas para inferencia multimodal en vivo):**
-   - **NO son necesarias para evaluar el sistema:** La captura con cámara, la subida de fotos, la georreferenciación, la radicación, la persistencia en PostgreSQL 17, el seguimiento, la consulta en mapa y la suite hermética de 154 pruebas automáticas operan al 100% de forma determinista y local sin ninguna clave externa.
+   - **NO son necesarias para evaluar el sistema:** La captura con cámara, la subida de fotos, la georreferenciación, la radicación, la persistencia en PostgreSQL 17, el seguimiento, la consulta en mapa y la suite hermética de 155 pruebas automáticas operan al 100% de forma determinista y local sin ninguna clave externa.
    - Si el profesor desea probar el análisis multimodal de imágenes en vivo conectando con Google Gemini o Groq, puede añadir sus claves opcionales en `.env`:
      ```ini
      GOOGLE_API_KEY_PRIMARY=AIzaSy...
@@ -138,17 +138,7 @@ Invoke-RestMethod -Uri "http://localhost:8000/health" | ConvertTo-Json
 
 **Respuesta esperada:**
 ```json
-{
-  "status": "healthy",
-  "connected": true,
-  "schema_ready": true,
-  "database": "civia",
-  "models_available": [
-    "gemini-3.8-flash",
-    "qwen/qwen3.8-27b",
-    "gemini-3.6-flash"
-  ]
-}
+{"status":"ok","phase":"mvp","db":{"connected":true,"schema_ready":true}}
 ```
 
 ---

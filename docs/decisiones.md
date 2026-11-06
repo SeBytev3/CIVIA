@@ -1,7 +1,7 @@
 # CIVIA — Decisiones de Ingeniería y Mediciones Reales (Momento Evaluativo 2)
 
 **Equipo:** Stefania Córdoba y Sebastian Espinosa  
-**Última actualización con mediciones reales:** `2026-11-01T23:49:34Z` (ver reporte reproducible en [`eval/resultados/reporte_evaluacion.json`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/eval/resultados/reporte_evaluacion.json) y [`eval/resultados/reporte_evaluacion.md`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/eval/resultados/reporte_evaluacion.md)).
+**Última actualización con mediciones reales:** `2026-11-01T23:49:34Z` (ver reporte reproducible en [`eval/resultados/reporte_evaluacion.json`](eval/resultados/reporte_evaluacion.json) y [`eval/resultados/reporte_evaluacion.md`](eval/resultados/reporte_evaluacion.md)).
 
 ---
 
@@ -57,7 +57,7 @@
   - Autenticación administrativa en tiempo constante (`hmac.compare_digest`) mediante cabecera `X-Admin-Token`, sin exponer el token por defecto en el bundle del frontend.
   - *Rate limiting* por IP en memoria para creación de reportes (`20 req / 60s`), reanálisis (`25 req / 60s`) y consultas al agente (`30 req / 60s`).
 - **Evaluación de usabilidad con usuario externo (`eval/plantilla_usabilidad.md`)**:
-  - **Estado actual (No disponible / Pendiente de ejecución presencial)**: Siguiendo la regla estricta de integridad de `AGENTS.md` (*«No inventar resultados de pruebas con personas reales. Preparar la plantilla y dejarla pendiente hasta que se ejecute»*), la plantilla formal de 3 tareas sin instrucciones verbales está lista en [`eval/plantilla_usabilidad.md`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/eval/plantilla_usabilidad.md) con tabla de tiempos, dudas y mejoras de UI para diligenciar con un integrante de otro equipo antes de la sustentación.
+  - **Estado actual (No disponible / Pendiente de ejecución presencial)**: Siguiendo la regla estricta de integridad de `AGENTS.md` (*«No inventar resultados de pruebas con personas reales. Preparar la plantilla y dejarla pendiente hasta que se ejecute»*), la plantilla formal de 3 tareas sin instrucciones verbales está lista en [`eval/plantilla_usabilidad.md`](eval/plantilla_usabilidad.md) con tabla de tiempos, dudas y mejoras de UI para diligenciar con un integrante de otro equipo antes de la sustentación.
 
 ---
 
@@ -73,7 +73,7 @@ Se definieron **6 preguntas doradas (`GD-01` a `GD-06`)** verificadas directamen
 - `GD-06`: **Pregunta sin respuesta posible con los datos disponibles** (radiación nuclear / índice satelital NDVI en tiempo real en la inexistente `Comuna 99` → `0` registros).
 
 ### 4.2 Métricas reales de la suite de 15 consultas representativas (`eval/evaluar.py`)
-Ejecución registrada el **`2026-11-01T23:49:34Z`** (detalle completo en [`eval/resultados/reporte_evaluacion.json`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/eval/resultados/reporte_evaluacion.json) y [`eval/resultados/reporte_evaluacion.md`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/eval/resultados/reporte_evaluacion.md)):
+Ejecución registrada el **`2026-11-01T23:49:34Z`** (detalle completo en [`eval/resultados/reporte_evaluacion.json`](eval/resultados/reporte_evaluacion.json) y [`eval/resultados/reporte_evaluacion.md`](eval/resultados/reporte_evaluacion.md)):
 
 | Métrica | Valor medido | Clasificación del dato |
 |---|---|---|
@@ -97,10 +97,10 @@ Ejecución registrada el **`2026-11-01T23:49:34Z`** (detalle completo en [`eval/
 Durante las corridas iterativas de `eval/evaluar.py` detectamos y corregimos tres defectos reales:
 1. **Omisión del signo negativo en longitud occidental por el modelo (`Q05`)**:
    - *Hallazgo en trazas (`ai_traces.tool_calls`)*: al procesar la consulta espacial `Q05` (`latitud 3.3385 y longitud -76.5410 en Pance`), el modelo `qwen/qwen3.8-27b` invocó `consultar_reportes` con `{"lat": 3.3385, "lon": 76.541, "radius_km": 1.5}` omitiendo el signo `-`, lo que buscaba en el hemisferio oriental (`+76.541° E`) y devolvía `0` reportes. Asimismo, cuando el modelo enviaba `comuna="Pance"`, la comparación exacta `UPPER(neighborhood) = UPPER('Pance')` no coincidía con `'Pance (Ecoparque)'`.
-   - *Corrección aplicada*: en [`backend/app/agent.py`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/backend/app/agent.py) (`tool_consultar_reportes`) normalizamos `lon = -abs(lon)` cuando `70.0 <= lon <= 80.0` (rango longitudinal de Colombia en el hemisferio occidental), y en [`backend/app/repository.py`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/backend/app/repository.py) (`list_reports`) cambiamos el filtro de barrio a búsqueda parcial `ILIKE`. Con ello `Q05` pasó de `FAIL` a `PASS` (`3967 ms`).
+   - *Corrección aplicada*: en [`backend/app/agent.py`](backend/app/agent.py) (`tool_consultar_reportes`) normalizamos `lon = -abs(lon)` cuando `70.0 <= lon <= 80.0` (rango longitudinal de Colombia en el hemisferio occidental), y en [`backend/app/repository.py`](backend/app/repository.py) (`list_reports`) cambiamos el filtro de barrio a búsqueda parcial `ILIKE`. Con ello `Q05` pasó de `FAIL` a `PASS` (`3967 ms`).
 2. **Bloqueo simultáneo de los 3 *circuit breakers* ante ráfagas `HTTP 429` en capa gratuita**:
    - *Hallazgo*: en la primera corrida, `classify_evidence_with_router` reintentaba `HTTP_429` 3 veces seguidas sobre el mismo proveedor en `150 ms` y abría los circuitos por `45 s` al primer fallo (`failure_threshold = 1`), dejando los tres niveles en `CIRCUIT_OPEN` simultáneamente entre `Q06` y `Q14`.
-   - *Corrección aplicada*: en [`backend/app/ai_router.py`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/backend/app/ai_router.py) configuramos conmutación inmediata al siguiente proveedor cuando aparece `HTTP_429`, redujimos `cooldown_seconds` a `10.0s`, añadimos `ensure_at_least_one_circuit_openable` para habilitar en `HALF_OPEN` el circuito más antiguo si los tres están abiertos y separamos los modelos de respaldo en catálogo para evitar colisión de cuota RPD. Esto elevó la exactitud de `60.0%` (`9/15`) a **`93.33%` (`14/15`)** y redujo la latencia **P50 de `7128 ms` a `3549 ms`** y **P90 de `16155 ms` a `4815 ms`**.
+   - *Corrección aplicada*: en [`backend/app/ai_router.py`](backend/app/ai_router.py) configuramos conmutación inmediata al siguiente proveedor cuando aparece `HTTP_429`, redujimos `cooldown_seconds` a `10.0s`, añadimos `ensure_at_least_one_circuit_openable` para habilitar en `HALF_OPEN` el circuito más antiguo si los tres están abiertos y separamos los modelos de respaldo en catálogo para evitar colisión de cuota RPD. Esto elevó la exactitud de `60.0%` (`9/15`) a **`93.33%` (`14/15`)** y redujo la latencia **P50 de `7128 ms` a `3549 ms`** y **P90 de `16155 ms` a `4815 ms`**.
 3. **Normalización de severidad y preservación de `thoughtSignature` en llamadas multi-turno**:
    - *Hallazgo*: `gemini-3.6-flash` devolvía en ocasiones adjetivos masculinos (`"ALTO"`, `"CRÍTICO"`) y Gemini 3 requería conservar el bloque `raw_gemini_part` en el historial de `functionCall`.
    - *Corrección aplicada*: mapeo determinista de sinónimos en `parse_and_validate_analysis_json` y preservación de `raw_gemini_part` en `_call_agent_turn_gemini`.
@@ -109,8 +109,8 @@ Durante las corridas iterativas de `eval/evaluar.py` detectamos y corregimos tre
 
 ## 5. Sustentación (10 puntos)
 
-- El guion estructurado minuto a minuto (6 minutos de demostración en vivo sobre `http://localhost:5173` sin diapositivas teóricas + 3 minutos de preguntas y respuestas) se encuentra documentado en [`docs/guion_sustentacion.md`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/docs/guion_sustentacion.md).
-- El mapeo completo contra los 5 criterios de evaluación del Momento 2 se encuentra en [`docs/checklist_rubrica.md`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/docs/checklist_rubrica.md).
+- El guion estructurado minuto a minuto (6 minutos de demostración en vivo sobre `http://localhost:5173` sin diapositivas teóricas + 3 minutos de preguntas y respuestas) se encuentra documentado en [`docs/guion_sustentacion.md`](docs/guion_sustentacion.md).
+- El mapeo completo contra los 5 criterios de evaluación del Momento 2 se encuentra en [`docs/checklist_rubrica.md`](docs/checklist_rubrica.md).
 
 ---
 

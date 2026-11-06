@@ -343,7 +343,7 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
 
 #### Remediación técnica implementada
 1. **Re-verificación estricta del deadline monotónico inmediatamente antes de COMMIT (Requisito 3):**
-   - En [`backend/app/db.py`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/backend/app/db.py): Tanto en `checked_commit(conn)` como en `_wrapped_commit()`, tras aplicar la configuración inicial de GUC, se evalúa nuevamente el saldo disponible contra el deadline monotónico:
+   - En [`backend/app/db.py`](backend/app/db.py): Tanto en `checked_commit(conn)` como en `_wrapped_commit()`, tras aplicar la configuración inicial de GUC, se evalúa nuevamente el saldo disponible contra el deadline monotónico:
      `rem_sec_commit = dl_check - time.monotonic()`.
    - Si el saldo expiró (`rem_sec_commit <= 0`), la transacción ejecuta `conn.rollback()` de inmediato y levanta `TimeoutError`, impidiendo que `COMMIT` sea siquiera transmitido al motor de base de datos.
 2. **Ajuste dinámico server-side de `transaction_timeout` en PostgreSQL (Requisitos 1 y 4):**
@@ -368,8 +368,8 @@ Ejecución oficial dentro del contenedor `api` (`civia-api-1`, `Python 3.13.18`,
 
 #### Remediación técnica implementada
 1. **Simulación incondicional de adaptadores de turnos principales (Requisito 1):**
-   - En [`backend/tests/conftest.py`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/backend/tests/conftest.py): Se implementó la fixture `hermetic_agent_turn_adapter_fixture` (`autouse=True`) que sustituye `_call_agent_turn_gemini` y `_call_agent_turn_groq` por un emulador determinista que atiende las consultas sobre reportes reales y reportes inexistentes sin generar tráfico de red.
-   - En [`backend/tests/test_ai_and_agent.py`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/backend/tests/test_ai_and_agent.py): Se integró la simulación de turnos en `hermetic_multimodal_adapter_fixture`.
+   - En [`backend/tests/conftest.py`](backend/tests/conftest.py): Se implementó la fixture `hermetic_agent_turn_adapter_fixture` (`autouse=True`) que sustituye `_call_agent_turn_gemini` y `_call_agent_turn_groq` por un emulador determinista que atiende las consultas sobre reportes reales y reportes inexistentes sin generar tráfico de red.
+   - En [`backend/tests/test_ai_and_agent.py`](backend/tests/test_ai_and_agent.py): Se integró la simulación de turnos en `hermetic_multimodal_adapter_fixture`.
 2. **Contador independiente y fallo no neutralizable en teardown (Requisitos 3 y 4):**
    - En `backend/tests/conftest.py`: La fixture `guard_no_external_network_calls` acumula cada intento saliente hacia dominios externos en una lista independiente `unexpected_attempts`.
    - Tras el `yield` de la prueba (fase de teardown de pytest, fuera del alcance de los manejadores `try/except` de la aplicación), si `unexpected_attempts` contiene registros, invoca `pytest.fail()`, convirtiendo cualquier intento de red en un fallo inapelable.

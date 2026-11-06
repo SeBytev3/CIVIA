@@ -24,7 +24,7 @@
 |---|---|---|---|
 | **Estrategia de datos coherente y justificación de NO RAG** | `backend/app/repository.py`, `backend/migrations/001_initial_schema.sql`, `docs/decisiones.md` | `backend/tests/test_reports_crud.py` | Consultas SQL parametrizadas directas e índices B-Tree + fórmula espacial Haversine; justificación técnica en `docs/decisiones.md`. |
 | **Manejo honesto de ausencia de datos (cero alucinación)** | `backend/app/agent.py` (`tool_consultar_reportes`, `AGENT_SYSTEM_PROMPT`), `eval/casos_dorados.json` (`GD-06`) | `backend/tests/test_ai_and_agent.py::test_agent_tools_and_unanswerable_query` y `eval/evaluar.py` (`Q14`) | Ante consultas sobre Comuna 99, radiación nuclear o NDVI satelital, responde explícitamente que no existe evidencia registrada (`0 encontrados`). |
-| **Distinción explícita de datos sintéticos frente a reales** | `backend/app/seed.py` (`SYNTHETIC_REPORTS`, `generate_synthetic_evidence_png`), columna `is_synthetic` en `reports` | `backend/tests/test_reports_crud.py::test_synthetic_fixtures_loaded_and_identifiable` | Los 10 registros de demostración tienen `is_synthetic = true`, etiqueta UI `DEMO SINTÉTICO` y franja en imagen `SINTETICO DEMO CIVIA (NO PRIVADO)`. |
+| **Distinción explícita de datos sintéticos frente a reales** | `backend/app/seed.py` (`SYNTHETIC_REPORTS`, `DEMO_ASSETS_DIR / Content-Addressed Storage`), columna `is_synthetic` en `reports` | `backend/tests/test_reports_crud.py::test_synthetic_fixtures_loaded_and_identifiable` | Los 10 registros de demostración tienen `is_synthetic = true`, etiqueta UI `DEMO SINTÉTICO` y franja en imagen `SINTETICO DEMO CIVIA (NO PRIVADO)`. |
 
 ---
 

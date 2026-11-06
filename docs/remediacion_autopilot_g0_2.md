@@ -96,7 +96,7 @@ Para resolver esto, se rediseñaron integralmente las fronteras de seguridad en 
 
 ## 3. Matriz de Pruebas Adversariales Independientes
 
-Archivo: [`orchestrator/tests/test_orchestrator_scenarios.py`](file:///c:/Users/Jhoesp/Desarrollo/CIVIA/orchestrator/tests/test_orchestrator_scenarios.py)
+Archivo: [`orchestrator/tests/test_orchestrator_scenarios.py`](orchestrator/tests/test_orchestrator_scenarios.py)
 
 | # | Escenario Adversarial (Contraejemplos Codex) | Mecanismo de Defensa Validado | Resultado |
 |---|---|---|:---:|

@@ -46,8 +46,8 @@ Los tres contenedores orquestados se levantarán:
 ---
 
 ## 5. Suite Hermética de Pruebas
-Para validar los 154 contratos herméticos:
+Para validar los 155 contratos herméticos:
 ```powershell
 docker compose exec -T api pytest -m "not live" -v
 ```
-**Resultado:** `154 passed, 1 deselected, 0 failed`.
+**Resultado:** `155 passed, 1 deselected, 0 failed`.

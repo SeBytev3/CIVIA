@@ -78,7 +78,7 @@ docker run --rm -v "${PWD}\backend:/app" -v "${PWD}\frontend:/frontend" -v "${PW
 ```
 
 **Resultado esperado:**
-`154 passed, 1 deselected, 0 failed`.
+`155 passed, 1 deselected, 0 failed`.
 
 ---
 
