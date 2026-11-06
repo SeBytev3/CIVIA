@@ -81,7 +81,7 @@ def row_to_public_dict(row: dict[str, Any]) -> dict[str, Any]:
         "comuna": row.get("comuna"),
         "neighborhood": row.get("neighborhood"),
         "address_hint": row.get("address_hint"),
-        "photo_url": f"/api/reports/{report_id}/photo",
+        "photo_url": f"/api/reports/{report_id}/photo?v={str(row.get('photo_sha256') or '')[:16]}" if row.get("photo_sha256") else f"/api/reports/{report_id}/photo",
         "photo_mime": row["photo_mime"],
         "photo_width": int(row["photo_width"]),
         "photo_height": int(row["photo_height"]),

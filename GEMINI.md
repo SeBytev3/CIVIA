@@ -1,0 +1,43 @@
+# CIVIA — Guía de Operación y Evaluación con Google Gemini / Antigravity
+
+Guía de referencia para evaluar y ejecutar CIVIA utilizando modelos y agentes de la familia Gemini.
+
+---
+
+## 1. Misión y Alcance
+CIVIA es una plataforma para la gestión inteligente de reportes ciudadanos en Santiago de Cali, integrando visión computacional y modelos multimodales con bases de datos relacionales PostgreSQL bajo estrictos principios de seguridad, robustez e interpretabilidad ética.
+
+---
+
+## 2. Instrucción Rápida de Despliegue
+Ejecute en la raíz del repositorio:
+
+```powershell
+# En Windows 11 PowerShell:
+.\scripts\run.ps1
+```
+
+```bash
+# En Linux / macOS / Bash:
+./scripts/run.sh
+```
+
+Los tres contenedores orquestados se levantarán:
+- `civia-db-1`: PostgreSQL 17 con esquema y 10 reportes sintéticos de prueba sembrados.
+- `civia-api-1`: FastAPI en Python 3.13 con validación Pydantic v2 y enrutador multimodal (`Gemini` → `Groq` → `Gemini`).
+- `civia-frontend-1`: Aplicación Web Progresiva (PWA) construida con React 19 y servida por Nginx 1.27 en el puerto `5173`.
+
+---
+
+## 3. Endpoints de Verificación
+- **Frontend PWA:** `http://localhost:5173`
+- **Health Check API:** `http://localhost:8000/health` (debe devolver `status: ok` y `db: {connected: true, schema_ready: true}`)
+- **Swagger UI:** `http://localhost:8000/docs`
+
+---
+
+## 4. Invariantes de Seguridad y Ética
+1. **Procedencia ética forzada:** Toda fotografía cuyo hash SHA-256 coincida con el catálogo sintético de prueba es clasificada incondicionalmente en el backend como `is_synthetic = True`, impidiendo que datos simulados pasen como evidencia ciudadana real.
+2. **Visualización íntegra:** Las imágenes en la interfaz utilizan `objectFit: contain` sobre fondo neutro, impidiendo el recorte de las franjas de simulación ética.
+3. **Control de acceso:** Endpoints de observabilidad y mutación de estado operativo exigen `ADMIN_TOKEN` seguro generado mediante CSPRNG.
+4. **Agente genuino:** Las herramientas del agente (`consultar_reportes`, `obtener_reporte`, etc.) ejecutan SQL directo tipado y tienen prohibida la escritura directa en base de datos; cualquier mutación crítica requiere propuesta y aprobación humana por parte de un operador calificado.

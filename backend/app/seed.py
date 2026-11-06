@@ -14,6 +14,18 @@ from app.db import assert_disposable_test_db, get_conn
 DEMO_ASSETS_DIR = Path(__file__).parent / "demo_assets"
 
 
+def get_known_synthetic_sha256_set() -> set[str]:
+    """Retorna el conjunto de hashes SHA-256 de todos los activos sintéticos de demostración."""
+    hashes: set[str] = set()
+    if DEMO_ASSETS_DIR.exists():
+        for asset_path in DEMO_ASSETS_DIR.glob("*.jpg"):
+            try:
+                hashes.add(hashlib.sha256(asset_path.read_bytes()).hexdigest())
+            except Exception:
+                pass
+    return hashes
+
+
 def get_synthetic_evidence_bytes(code: str, kind: str) -> tuple[bytes, str, str, int, int]:
     """
     Obtiene los bytes de la evidencia fotográfica sintética fotorrealista empaquetada.
@@ -376,12 +388,17 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
     Actualiza exclusivamente los metadatos fotográficos y archivos de los 10 reportes del catálogo
     sintético (is_synthetic = TRUE AND tracking_code LIKE 'CIV-2026-DEMO%').
 
-    Invariantes estrictos:
-    - NO modifica reportes reales o creados por usuarios (is_synthetic = FALSE o tracking_code diferente).
-    - NO altera títulos, descripciones, coordenadas, comunas, estados ni aprobaciones humanas.
-    - NO borra archivos existentes hasta que el nuevo archivo haya sido escrito y validado en disco.
-    - Idempotente: si los hashes y metadatos ya coinciden, no reescribe ni genera cambios espurios.
+    Garantías de integridad y resiliencia:
+    - Validación de SHA-256 de los bytes reales en disco y decodificación PIL.
+    - Detección y reparación de archivos corruptos aunque tengan la misma longitud.
+    - Cero orfandad ante rollback SQL: staging en temporales y publicación atómica con os.replace
+      únicamente tras la confirmación exitosa de la transacción en PostgreSQL.
+    - Idempotencia estricta: si disco y BD ya coinciden con el activo de referencia, unchanged=10.
     """
+    import os
+    import io
+    from uuid import uuid4
+
     target_upload_dir = upload_dir_path or settings.UPLOAD_DIR
     target_upload_dir.mkdir(parents=True, exist_ok=True)
 
@@ -390,65 +407,105 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
     missing_count = 0
 
     catalog_codes = [item["tracking_code"] for item in SYNTHETIC_REPORTS]
+    staged_transfers: list[tuple[Path, Path]] = []
 
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            for item in SYNTHETIC_REPORTS:
-                code = item["tracking_code"]
-                cur.execute(
-                    """
-                    SELECT id, photo_path, photo_sha256, is_synthetic
-                    FROM reports
-                    WHERE tracking_code = %s AND is_synthetic = TRUE;
-                    """,
-                    (code,),
-                )
-                row = cur.fetchone()
-                if not row:
-                    missing_count += 1
-                    continue
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                for item in SYNTHETIC_REPORTS:
+                    code = item["tracking_code"]
+                    cur.execute(
+                        """
+                        SELECT id, photo_path, photo_sha256, is_synthetic
+                        FROM reports
+                        WHERE tracking_code = %s AND is_synthetic = TRUE;
+                        """,
+                        (code,),
+                    )
+                    row = cur.fetchone()
+                    if not row:
+                        missing_count += 1
+                        continue
 
-                rid = row["id"]
-                current_sha = row["photo_sha256"]
+                    rid = row["id"]
+                    current_sha = row["photo_sha256"]
 
-                bytes_data, photo_name, photo_mime, width, height = get_synthetic_evidence_bytes(
-                    code, item["ai_category"]
-                )
-                new_sha256 = hashlib.sha256(bytes_data).hexdigest()
+                    bytes_data, photo_name, photo_mime, width, height = get_synthetic_evidence_bytes(
+                        code, item["ai_category"]
+                    )
+                    expected_sha256 = hashlib.sha256(bytes_data).hexdigest()
 
-                dest_file = target_upload_dir / photo_name
-                if not dest_file.exists() or dest_file.stat().st_size != len(bytes_data):
-                    dest_file.write_bytes(bytes_data)
+                    dest_file = target_upload_dir / photo_name
 
-                if current_sha == new_sha256 and row["photo_path"] == photo_name:
-                    unchanged_count += 1
-                    continue
+                    # 1. Comprobación de integridad física del archivo en disco
+                    disk_valid = False
+                    if dest_file.exists() and dest_file.is_file():
+                        try:
+                            disk_bytes = dest_file.read_bytes()
+                            if hashlib.sha256(disk_bytes).hexdigest() == expected_sha256:
+                                with Image.open(io.BytesIO(disk_bytes)) as test_img:
+                                    test_img.verify()
+                                disk_valid = True
+                        except Exception:
+                            disk_valid = False
 
-                cur.execute(
-                    """
-                    UPDATE reports
-                    SET photo_path = %s,
-                        photo_mime = %s,
-                        photo_size_bytes = %s,
-                        photo_width = %s,
-                        photo_height = %s,
-                        photo_sha256 = %s,
-                        updated_at = NOW()
-                    WHERE id = %s AND is_synthetic = TRUE AND tracking_code = %s;
-                    """,
-                    (
-                        photo_name,
-                        photo_mime,
-                        len(bytes_data),
-                        width,
-                        height,
-                        new_sha256,
-                        rid,
-                        code,
-                    ),
-                )
-                updated_count += 1
-            conn.commit()
+                    # 2. Si tanto la fila SQL como los bytes en disco están íntegros, es unchanged
+                    if disk_valid and current_sha == expected_sha256 and row["photo_path"] == photo_name:
+                        unchanged_count += 1
+                        continue
+
+                    # 3. Si requiere actualización o reparación de disco, preparar archivo temporal de staging
+                    staged_tmp = target_upload_dir / f"{photo_name}.tmp_{uuid4().hex}"
+                    staged_tmp.write_bytes(bytes_data)
+                    staged_transfers.append((staged_tmp, dest_file))
+
+                    # 4. Actualizar metadatos en PostgreSQL
+                    cur.execute(
+                        """
+                        UPDATE reports
+                        SET photo_path = %s,
+                            photo_mime = %s,
+                            photo_size_bytes = %s,
+                            photo_width = %s,
+                            photo_height = %s,
+                            photo_sha256 = %s,
+                            updated_at = NOW()
+                        WHERE id = %s AND is_synthetic = TRUE AND tracking_code = %s;
+                        """,
+                        (
+                            photo_name,
+                            photo_mime,
+                            len(bytes_data),
+                            width,
+                            height,
+                            expected_sha256,
+                            rid,
+                            code,
+                        ),
+                    )
+                    updated_count += 1
+
+                # Confirmar la transacción SQL antes de publicar en disco
+                conn.commit()
+
+        # Si el commit SQL fue exitoso, publicar atómicamente todos los archivos preparados
+        for staged_tmp, dest_file in staged_transfers:
+            try:
+                os.replace(staged_tmp, dest_file)
+            except Exception:
+                # Fallback de copia/unlink si os.replace fallara entre sistemas de archivos
+                dest_file.write_bytes(staged_tmp.read_bytes())
+                staged_tmp.unlink(missing_ok=True)
+
+    except Exception:
+        # En caso de error o rollback SQL, limpiar TODOS los archivos temporales de staging
+        for staged_tmp, _ in staged_transfers:
+            try:
+                if staged_tmp.exists():
+                    staged_tmp.unlink()
+            except Exception:
+                pass
+        raise
 
     return {
         "updated": updated_count,

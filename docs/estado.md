@@ -4,6 +4,31 @@
 
 ---
 
+## Fase Final — Remediación Completa, Despliegue Autónomo y Release MAIN (2026-11-05)
+
+### 1. Remediación de Auditoría Codex (100% CERRADA)
+- **Detección de corrupción de igual longitud:** seed.py valida SHA-256 de bytes en disco y decodificación PIL (Image.verify()); repara automáticamente archivos alterados sin confiar en st_size.
+- **Cero archivos huérfanos ante rollback SQL:** Staging atómico en temporales .tmp_{uuid} y publicación mediante os.replace únicamente tras confirmación conn.commit(); limpieza garantizada en bloque except.
+- **Caché versionada inmutable:** photo_url incluye versión ?v={photo_sha256[:16]}; soporte ETag/304 e inmutabilidad (Cache-Control: public, max-age=31536000, immutable), con revalidación forzada (max-age=0, must-revalidate) en la URL canónica.
+- **Procedencia ética forzada en servidor:** En main.py, si el SHA-256 de una foto coincide con cualquier activo o muestra sintética, se impone incondicionalmente is_synthetic = True en el servidor y PostgreSQL. En frontend, la imagen se presenta con objectFit: contain sobre fondo oscuro, preservando visible la franja de simulación de 48px sin recortes y con distintivo HTML visible.
+- **Muestra OTRO independiente:** Generada escena fotográfica fotorrealista propia (cali_utility_pole_cables_otro...) con poste y cableado en Cali, sustituyendo el duplicado de socavón de DEMO0009.
+
+### 2. Captura y Subida en Navegador
+- Implementada interfaz de captura directa con cámara web de dispositivo mediante getUserMedia(), visor video, botón de captura a canvas, reintento y apagado garantizado de pistas (track.stop()) al cerrar, desmontar o cambiar de pestaña.
+- Soporte para subida de archivos locales y drag & drop (JPEG, PNG, WEBP, máx. 5 MB).
+- Muestras sintéticas de prueba demo accesibles con un clic para evaluación académica.
+
+### 3. Resultados de Pruebas
+- **Suite Hermética Backend:** 145 PASSED, 1 deselected, 0 failed en 24.34s.
+- **Prueba E2E Playwright:** Flujo completo validado en Chromium / Edge con emulación de medios: cámara web -> captura -> muestra sintética -> inserción PostgreSQL -> radicado -> persistencia tras recarga. PASS.
+
+### 4. Publicación en MAIN
+- Autorizada la integración y publicación en la rama main de GitHub.
+- Documentación integral para agentes (CLAUDE.md, GEMINI.md, AGENTS.md, docs/AI_DEPLOY.md, docs/DEPLOYMENT.md, docs/entrega_final.md).
+- Estado cloud: 'DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA'.
+
+---
+
 ## Fase A — Preflight completado (2026-11-01)
 - **Git & Docker Compose**: `docker compose config --quiet` (exit code `0`), `docker compose up --build -d` exitoso (`civia-db-1` healthy en `postgres:17-alpine`, `civia-api-1` up y respondiendo en `http://localhost:8000/health`).
 - **Tests de scaffold**: añadido `backend/tests/test_health.py` ejecutado dentro del contenedor con `pytest -v`.
@@ -670,3 +695,12 @@
 - **Servicios habituales:** `civia-api-1`, `civia-frontend-1`, `civia-db-1` limpios, saludables e inalterados.
 - **Sin push ni merge hacia ramas remotas o protegidas.**
 
+
+## 2026-11-05 — Auditoría independiente de navegación y evidencia sintética
+
+**NO APROBADA para publicación** en el commit `48c872817ecd88353b25883fd25878126031358a` de `feat/ui-navigation-demo-evidence`. [Informe independiente](auditoria_codex_ui_demo_48c8728.md).
+
+- La navegación pasó dos ciclos en escritorio y dos en móvil. Se reprodujo la fuga de detalle en la base `d14f64e` y desapareció en el objetivo. Instalación nueva, carga ciudadana, autorización y F4 pasaron en PostgreSQL 17 desechable con Nginx y FastAPI aislados. La prueba de F4 verificó replay tras pérdida de respuesta y un único efecto persistido.
+- La actualización acepta un JPEG corrupto que conserva su tamaño, deja archivos huérfanos ante rollback y reutiliza una URL cuya caché retuvo el PNG anterior después de la actualización.
+- Una muestra fotorrealista pudo quedar como evidencia ordinaria al enviar con descripción ya escrita. La calidad visual quedó parcial por la muestra OTRO de categoría HUECO y el distintivo recortado en el detalle.
+- Build TypeScript/Vite, suite hermética con 140 pruebas pasadas y repetición focalizada con 36 pasadas. Una prueba live excluida de la suite completa. Los tres servicios habituales conservaron ID, hora de inicio y estado saludable tras retirar los recursos del auditor.

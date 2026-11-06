@@ -182,6 +182,202 @@ def test_update_synthetic_catalog_photos_idempotent_and_safe():
     assert res2["catalog_total"] == 10
 
 
+def test_update_synthetic_catalog_photos_detects_same_length_corruption():
+    """
+    Verifica que update_synthetic_catalog_photos() detecte corrupción de igual longitud
+    y no se confíe únicamente en st_size.
+    Si el archivo en disco tiene un byte alterado pero conserva el tamaño exacto,
+    debe identificar el desajuste de SHA-256/PIL y restaurar el archivo sano.
+    """
+    seed_synthetic_reports(force_reset=True)
+
+    demo1_path = settings.UPLOAD_DIR / "synthetic_civ-2026-demo0001.jpg"
+    assert demo1_path.exists()
+    original_bytes = demo1_path.read_bytes()
+    original_size = len(original_bytes)
+    original_sha = hashlib.sha256(original_bytes).hexdigest()
+
+    # Corromper el primer byte pero preservando exactamente el tamaño
+    corrupt_bytes = b"X" + original_bytes[1:]
+    assert len(corrupt_bytes) == original_size
+    demo1_path.write_bytes(corrupt_bytes)
+
+    # Ejecutar actualizador
+    res = update_synthetic_catalog_photos()
+    # Debe detectar la corrupción y reparar exactamente 1 archivo
+    assert res["updated"] == 1
+    assert res["unchanged"] == 9
+
+    # Verificar que el archivo en disco quedó restaurado e íntegro
+    restored_bytes = demo1_path.read_bytes()
+    assert hashlib.sha256(restored_bytes).hexdigest() == original_sha
+    im = Image.open(io.BytesIO(restored_bytes))
+    im.verify()
+
+
+def test_update_synthetic_catalog_photos_zero_orphans_on_rollback():
+    """
+    Verifica que ante un fallo o rollback en la transacción SQL de actualización,
+    no queden archivos huérfanos ni archivos temporales (.tmp_*) en UPLOAD_DIR.
+    """
+    seed_synthetic_reports(force_reset=True)
+
+    # Contar archivos antes
+    initial_files = set(settings.UPLOAD_DIR.iterdir())
+
+    # 1. Modificar metadatos en BD para forzar actualización de DEMO0002
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE reports SET photo_sha256 = '0000000000000000000000000000000000000000000000000000000000000000' WHERE tracking_code = 'CIV-2026-DEMO0002';"
+            )
+            conn.commit()
+
+    # 2. Instalar trigger que aborte cuando update_synthetic_catalog_photos intente actualizar DEMO0002
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                CREATE OR REPLACE FUNCTION raise_test_abort()
+                RETURNS trigger AS $$
+                BEGIN
+                    IF NEW.tracking_code = 'CIV-2026-DEMO0002' THEN
+                        RAISE EXCEPTION 'TEST_INJECTED_ABORT_FOR_ROLLBACK';
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+
+                DROP TRIGGER IF EXISTS trg_test_abort_demo ON reports;
+                CREATE TRIGGER trg_test_abort_demo
+                BEFORE UPDATE ON reports
+                FOR EACH ROW EXECUTE FUNCTION raise_test_abort();
+                """
+            )
+            conn.commit()
+
+    try:
+        # Al ejecutar la actualización, el trigger abortará la transacción
+        with pytest.raises(Exception) as exc_info:
+            update_synthetic_catalog_photos()
+        assert "TEST_INJECTED_ABORT_FOR_ROLLBACK" in str(exc_info.value)
+
+        # Verificar que NO hay archivos temporales .tmp_*
+        tmp_files = list(settings.UPLOAD_DIR.glob("*.tmp_*"))
+        assert len(tmp_files) == 0, f"Quedaron archivos temporales huérfanos: {tmp_files}"
+
+    finally:
+        # Limpiar trigger de prueba
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DROP TRIGGER IF EXISTS trg_test_abort_demo ON reports;")
+                cur.execute("DROP FUNCTION IF EXISTS raise_test_abort();")
+                conn.commit()
+
+
+def test_photo_endpoint_versioning_etag_and_caching():
+    """
+    Verifica:
+    1. photo_url incluye parámetro ?v={sha[:16]}
+    2. Endpoint /photo sirve con Cache-Control immutable para URL versionada
+    3. Soporta ETag y responde HTTP 304 Not Modified con If-None-Match
+    4. URL canónica (sin versión) responde con must-revalidate
+    """
+    seed_synthetic_reports(force_reset=True)
+    client = TestClient(app)
+
+    rep_res = client.get("/api/reports/by-code/CIV-2026-DEMO0001")
+    assert rep_res.status_code == 200
+    rep_data = rep_res.json()
+    photo_url = rep_data["photo_url"]
+    rep_id = rep_data["id"]
+
+    assert "?v=" in photo_url, f"photo_url debe estar versionada: {photo_url}"
+    version_param = photo_url.split("?v=")[1]
+    assert len(version_param) == 16
+
+    # 1. Solicitud a URL versionada
+    v_res = client.get(photo_url)
+    assert v_res.status_code == 200
+    assert "public, max-age=31536000, immutable" in v_res.headers.get("cache-control", "")
+    etag = v_res.headers.get("etag")
+    assert etag is not None
+
+    # 2. Solicitud condicional con If-None-Match
+    not_mod_res = client.get(photo_url, headers={"If-None-Match": etag})
+    assert not_mod_res.status_code == 304
+
+    # 3. Solicitud a URL canónica (sin ?v)
+    canon_res = client.get(f"/api/reports/{rep_id}/photo")
+    assert canon_res.status_code == 200
+    assert "must-revalidate" in canon_res.headers.get("cache-control", "")
+
+
+def test_synthetic_photo_ethical_provenance_enforced_on_server():
+    """
+    Verifica que si un usuario sube una fotografía cuyo SHA-256 coincide
+    con una muestra del catálogo sintético, el backend fuerce is_synthetic = TRUE
+    en el servidor, impidiendo que una muestra sintética pase como reporte real.
+    """
+    seed_synthetic_reports(force_reset=True)
+    client = TestClient(app)
+
+    # Tomar la muestra de HUECO
+    sample_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "public" / "demo_evidence" / "sample_hueco.jpg"
+    assert sample_path.exists()
+    sample_bytes = sample_path.read_bytes()
+
+    # Enviar reporte simulando ser ordinario (is_synthetic no enviado o enviado como False)
+    payload = {
+        "description": "Reporte ciudadano común con fotografía de prueba enviada sin marca",
+        "latitude": 3.4516,
+        "longitude": -76.5320,
+        "is_synthetic": "false",
+    }
+    files = {
+        "photo": ("evidencia.jpg", io.BytesIO(sample_bytes), "image/jpeg"),
+    }
+
+    create_res = client.post("/api/reports", data=payload, files=files)
+    assert create_res.status_code == 201
+    created = create_res.json()
+    created_id = created["id"]
+    register_test_report_id(created_id)
+
+    # El servidor DEBE haber impuesto is_synthetic = True por coincidencia de hash ético
+    assert created["is_synthetic"] is True
+
+    # Verificar en PostgreSQL
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT is_synthetic FROM reports WHERE id = %s;", (created_id,))
+            row = cur.fetchone()
+            assert row["is_synthetic"] is True
+
+
+def test_sample_otro_is_independent_and_distinct():
+    """
+    Verifica que sample_otro.jpg sea una escena independiente y NO una copia
+    del socavón de DEMO0009 / sample_hueco.
+    """
+    frontend_demo_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "public" / "demo_evidence"
+    otro_path = frontend_demo_dir / "sample_otro.jpg"
+    hueco_path = frontend_demo_dir / "sample_hueco.jpg"
+    demo9_path = settings.UPLOAD_DIR / "synthetic_civ-2026-demo0009.jpg"
+
+    assert otro_path.exists()
+    assert hueco_path.exists()
+
+    otro_sha = hashlib.sha256(otro_path.read_bytes()).hexdigest()
+    hueco_sha = hashlib.sha256(hueco_path.read_bytes()).hexdigest()
+
+    assert otro_sha != hueco_sha, "sample_otro.jpg no debe tener el mismo hash que sample_hueco.jpg"
+
+    if demo9_path.exists():
+        demo9_sha = hashlib.sha256(demo9_path.read_bytes()).hexdigest()
+        assert otro_sha != demo9_sha, "sample_otro.jpg no debe ser una copia de civ-2026-demo0009.jpg"
+
+
 def test_photo_endpoint_serves_new_asset():
     """Verifica que /api/reports/{id}/photo sirva la nueva imagen fotorrealista con sus encabezados de seguridad."""
     seed_synthetic_reports(force_reset=True)

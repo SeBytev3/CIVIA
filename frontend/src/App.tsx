@@ -124,9 +124,18 @@ export function App() {
   const [formAddress, setFormAddress] = useState<string>('');
   const [formPhoto, setFormPhoto] = useState<File | null>(null);
   const [formPhotoPreview, setFormPhotoPreview] = useState<string | null>(null);
+  const [formIsSynthetic, setFormIsSynthetic] = useState<boolean>(false);
   const [formAudio, setFormAudio] = useState<File | null>(null);
   const [submittingReport, setSubmittingReport] = useState<boolean>(false);
   const [submitLifecycleStep, setSubmitLifecycleStep] = useState<string | null>(null);
+
+  // Cámara web y captura de fotografía
+  const [isCameraActive, setIsCameraActive] = useState<boolean>(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [isDragOver, setIsDragOver] = useState<boolean>(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const cameraStreamRef = useRef<MediaStream | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // Grabación opcional de audio (<= 60s)
   const [isRecordingAudio, setIsRecordingAudio] = useState<boolean>(false);
@@ -249,35 +258,164 @@ export function App() {
     );
   };
 
-  const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0] || null;
-    if (!f) return;
-    if (f.size > 5 * 1024 * 1024) {
+  const stopCamera = useCallback(() => {
+    if (cameraStreamRef.current) {
+      cameraStreamRef.current.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          // Ignorar fallo al detener pista
+        }
+      });
+      cameraStreamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setIsCameraActive(false);
+    setCameraError(null);
+  }, []);
+
+  // Detener cámara al cambiar de pestaña
+  useEffect(() => {
+    if (activeTab !== 'reportar') {
+      stopCamera();
+    }
+  }, [activeTab, stopCamera]);
+
+  // Limpieza al desmontar componente
+  useEffect(() => {
+    return () => {
+      stopCamera();
+      if (recordingTimerRef.current) {
+        clearInterval(recordingTimerRef.current);
+      }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
+    };
+  }, [stopCamera]);
+
+  const startCamera = async () => {
+    stopCamera();
+    setCameraError(null);
+    setGlobalError(null);
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setCameraError(
+        'Este navegador o dispositivo no permite acceso directo a la cámara. Utilice la opción de subir fotografía.'
+      );
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: 'environment' },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      });
+      cameraStreamRef.current = stream;
+      setIsCameraActive(true);
+    } catch {
+      setCameraError(
+        'No se concedió acceso a la cámara o el dispositivo está ocupado. Puede subir una fotografía desde sus archivos.'
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (isCameraActive && videoRef.current && cameraStreamRef.current) {
+      videoRef.current.srcObject = cameraStreamRef.current;
+      videoRef.current.play().catch(() => {});
+    }
+  }, [isCameraActive]);
+
+  const captureCameraFrame = () => {
+    if (!videoRef.current) return;
+    const v = videoRef.current;
+    const canvas = document.createElement('canvas');
+    canvas.width = v.videoWidth || 1024;
+    canvas.height = v.videoHeight || 768;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(v, 0, 0, canvas.width, canvas.height);
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) return;
+        const file = new File([blob], `captura_camara_${Date.now()}.jpg`, { type: 'image/jpeg' });
+        handleAssignPhoto(file, false);
+      },
+      'image/jpeg',
+      0.92
+    );
+  };
+
+  const handleAssignPhoto = (file: File, isSynthetic: boolean) => {
+    if (file.size > 5 * 1024 * 1024) {
       setGlobalError('La fotografía seleccionada supera el límite máximo de 5 MB.');
       return;
     }
-    setFormPhoto(f);
-    setFormPhotoPreview(URL.createObjectURL(f));
-  };
-
-  const handleGenerateSyntheticPhoto = async () => {
-    const file = await createCanvasDemoPhoto(formCategoryHint);
+    const allowed = ['image/jpeg', 'image/png', 'image/webp'];
+    if (!allowed.includes(file.type)) {
+      setGlobalError('Formato de imagen no admitido. Utilice archivos JPEG, PNG o WEBP.');
+      return;
+    }
+    stopCamera();
     setFormPhoto(file);
     setFormPhotoPreview(URL.createObjectURL(file));
-    if (!formDescription.trim()) {
-      const sampleText: Record<ReportCategory, string> = {
-        HUECO:
-          'DATO SINTÉTICO DEMO: Se reporta hueco profundo en el carril vehicular que dificulta el paso seguro de motocicletas y buses.',
-        BASURAS:
-          'DATO SINTÉTICO DEMO: Acumulación crítica de bolsas de basura y residuos sólidos sobre el andén peatonal.',
-        TALA:
-          'DATO SINTÉTICO DEMO: Corte no autorizado de árbol urbano con ramas derribadas en espacio público.',
-        QUEMA:
-          'DATO SINTÉTICO DEMO: Foco activo de quema de vegetación seca con emisión de humo sobre la ladera.',
-        OTRO:
-          'DATO SINTÉTICO DEMO: Novedad en infraestructura urbana para verificación técnica municipal.',
-      };
-      setFormDescription(sampleText[formCategoryHint]);
+    setFormIsSynthetic(isSynthetic);
+    setGlobalError(null);
+  };
+
+  const handlePhotoChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (f) {
+      handleAssignPhoto(f, false);
+    }
+  };
+
+  const handleDropPhoto = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const f = e.dataTransfer.files?.[0];
+    if (f) {
+      handleAssignPhoto(f, false);
+    }
+  };
+
+  const handleSelectSyntheticSample = async (category: ReportCategory) => {
+    try {
+      const file = await createCanvasDemoPhoto(category);
+      handleAssignPhoto(file, true);
+      setFormCategoryHint(category);
+      if (!formDescription.trim()) {
+        const sampleText: Record<ReportCategory, string> = {
+          HUECO:
+            'DATO SINTÉTICO DEMO: Se reporta bache profundo en carril vehicular que deteriora la calzada y pone en riesgo a motocicletas.',
+          BASURAS:
+            'DATO SINTÉTICO DEMO: Acumulación crítica de residuos sólidos y bolsas rotas sobre el andén peatonal.',
+          TALA:
+            'DATO SINTÉTICO DEMO: Afectación de arbolado urbano con ramas desgajadas bloqueando el paso.',
+          QUEMA:
+            'DATO SINTÉTICO DEMO: Quema de vegetación y pastizales en lote baldío con emisión de humo.',
+          OTRO:
+            'DATO SINTÉTICO DEMO: Poste de servicios ladeado con cableado descolgado sobre espacio público.',
+        };
+        setFormDescription(sampleText[category]);
+      }
+    } catch {
+      setGlobalError('No fue posible cargar la muestra sintética de prueba.');
+    }
+  };
+
+  const handleDiscardPhoto = () => {
+    stopCamera();
+    setFormPhoto(null);
+    setFormPhotoPreview(null);
+    setFormIsSynthetic(false);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
     }
   };
 
@@ -359,6 +497,7 @@ export function App() {
       if (formAddress.trim()) fd.append('address_hint', formAddress.trim());
       fd.append('auto_analyze', 'true');
       fd.append('photo', formPhoto);
+      fd.append('is_synthetic', formIsSynthetic ? 'true' : 'false');
       if (formAudio) fd.append('audio', formAudio);
 
       const created = await submitCitizenReport(fd);
@@ -680,23 +819,43 @@ export function App() {
 
       <div className="civia-two-col" style={{ marginTop: '1rem' }}>
         <div>
-          <img
-            src={rep.photo_url}
-            alt={`Evidencia fotográfica del reporte ${rep.tracking_code}`}
-            style={{ width: '100%', maxHeight: '280px', objectFit: 'cover', borderRadius: '10px' }}
-          />
+          <div
+            style={{
+              backgroundColor: '#0f172a',
+              borderRadius: '10px',
+              overflow: 'hidden',
+              display: 'flex',
+              justifyContent: 'center',
+              alignItems: 'center',
+              minHeight: '220px',
+              maxHeight: '340px',
+            }}
+          >
+            <img
+              src={rep.photo_url}
+              alt={`Evidencia fotográfica del reporte ${rep.tracking_code}`}
+              style={{
+                width: '100%',
+                maxHeight: '340px',
+                objectFit: 'contain',
+                display: 'block',
+              }}
+            />
+          </div>
           {rep.is_synthetic && (
-            <div style={{
-              background: '#e8f4f8',
-              color: '#0f4c5c',
-              fontSize: '0.8rem',
-              fontWeight: 600,
-              padding: '0.3rem 0.6rem',
-              borderRadius: '6px',
-              marginTop: '0.4rem',
-              display: 'inline-block',
-              border: '1px solid #b6d4db'
-            }}>
+            <div
+              style={{
+                background: '#e8f4f8',
+                color: '#0f4c5c',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                padding: '0.35rem 0.65rem',
+                borderRadius: '6px',
+                marginTop: '0.45rem',
+                display: 'inline-block',
+                border: '1px solid #b6d4db',
+              }}
+            >
               ℹ Imagen generada con IA · Simulación
             </div>
           )}
@@ -1182,34 +1341,274 @@ export function App() {
                     </div>
                   </div>
 
-                  {/* Fotografía obligatoria */}
-                  <div style={{ background: '#f5f9f8', padding: '0.9rem', borderRadius: '10px', border: '1px solid var(--civia-border)' }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.5rem' }}>
-                      <label htmlFor="rep-photo" style={{ fontWeight: 700, fontSize: '0.9rem' }}>
+                  {/* Evidencia fotográfica: Cámara, Subida o Muestras sintéticas */}
+                  <div
+                    style={{
+                      background: '#f5f9f8',
+                      padding: '1rem',
+                      borderRadius: '10px',
+                      border: '1px solid var(--civia-border)',
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        flexWrap: 'wrap',
+                        gap: '0.5rem',
+                        marginBottom: '0.65rem',
+                      }}
+                    >
+                      <label
+                        htmlFor="rep-photo"
+                        style={{ fontWeight: 700, fontSize: '0.92rem', color: 'var(--civia-teal-dark)' }}
+                      >
                         Fotografía de evidencia * (JPEG, PNG o WEBP, máx. 5 MB)
                       </label>
-                      <button
-                        type="button"
-                        className="civia-btn secondary"
-                        onClick={() => void handleGenerateSyntheticPhoto()}
-                      >
-                        Generar foto sintética de prueba ({formCategoryHint})
-                      </button>
+                      {formPhoto && (
+                        <button
+                          type="button"
+                          className="civia-btn secondary"
+                          style={{ fontSize: '0.78rem', padding: '0.3rem 0.6rem' }}
+                          onClick={handleDiscardPhoto}
+                        >
+                          ✕ Cambiar fotografía
+                        </button>
+                      )}
                     </div>
-                    <input
-                      id="rep-photo"
-                      type="file"
-                      accept="image/jpeg,image/png,image/webp"
-                      onChange={handlePhotoChange}
-                    />
-                    {formPhotoPreview && (
-                      <div style={{ marginTop: '0.65rem' }}>
-                        <img
-                          src={formPhotoPreview}
-                          alt="Vista previa de evidencia"
-                          style={{ maxHeight: '150px', borderRadius: '8px', border: '1px solid #ccc' }}
-                        />
+
+                    {cameraError && (
+                      <div
+                        className="civia-alert error"
+                        style={{ marginBottom: '0.75rem', fontSize: '0.84rem' }}
+                      >
+                        {cameraError}
                       </div>
+                    )}
+
+                    {/* Visor de cámara en vivo */}
+                    {isCameraActive && (
+                      <div
+                        style={{
+                          background: '#0f172a',
+                          padding: '0.75rem',
+                          borderRadius: '10px',
+                          textAlign: 'center',
+                          marginBottom: '0.85rem',
+                        }}
+                      >
+                        <video
+                          ref={videoRef}
+                          autoPlay
+                          playsInline
+                          muted
+                          style={{
+                            width: '100%',
+                            maxHeight: '300px',
+                            objectFit: 'cover',
+                            borderRadius: '8px',
+                            backgroundColor: '#000',
+                          }}
+                        />
+                        <div
+                          style={{
+                            marginTop: '0.65rem',
+                            display: 'flex',
+                            gap: '0.6rem',
+                            justifyContent: 'center',
+                          }}
+                        >
+                          <button
+                            type="button"
+                            className="civia-btn accent"
+                            onClick={captureCameraFrame}
+                          >
+                            📸 Capturar fotografía ahora
+                          </button>
+                          <button
+                            type="button"
+                            className="civia-btn secondary"
+                            onClick={stopCamera}
+                          >
+                            Cancelar cámara
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Vista previa si ya hay foto seleccionada/capturada */}
+                    {formPhotoPreview && !isCameraActive && (
+                      <div style={{ marginBottom: '0.85rem' }}>
+                        <div
+                          style={{
+                            background: '#0f172a',
+                            borderRadius: '8px',
+                            overflow: 'hidden',
+                            display: 'flex',
+                            justifyContent: 'center',
+                            alignItems: 'center',
+                            minHeight: '160px',
+                            maxHeight: '260px',
+                          }}
+                        >
+                          <img
+                            src={formPhotoPreview}
+                            alt="Vista previa de evidencia"
+                            style={{
+                              maxWidth: '100%',
+                              maxHeight: '260px',
+                              objectFit: 'contain',
+                              display: 'block',
+                            }}
+                          />
+                        </div>
+                        <div
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            flexWrap: 'wrap',
+                            gap: '0.5rem',
+                            marginTop: '0.45rem',
+                          }}
+                        >
+                          <div style={{ fontSize: '0.82rem', color: 'var(--civia-muted)' }}>
+                            Archivo listo: <strong>{formPhoto?.name}</strong> (
+                            {Math.round((formPhoto?.size || 0) / 1024)} KB)
+                          </div>
+                          {formIsSynthetic && (
+                            <div
+                              style={{
+                                background: '#e8f4f8',
+                                color: '#0f4c5c',
+                                fontSize: '0.8rem',
+                                fontWeight: 600,
+                                padding: '0.25rem 0.55rem',
+                                borderRadius: '6px',
+                                border: '1px solid #b6d4db',
+                              }}
+                            >
+                              ℹ Imagen generada con IA · Simulación
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Opciones de captura o subida cuando no hay foto activa */}
+                    {!formPhoto && !isCameraActive && (
+                      <>
+                        <div
+                          onDragOver={(e) => {
+                            e.preventDefault();
+                            setIsDragOver(true);
+                          }}
+                          onDragLeave={() => setIsDragOver(false)}
+                          onDrop={handleDropPhoto}
+                          style={{
+                            border: `2px dashed ${isDragOver ? 'var(--civia-teal)' : '#b4c9c6'}`,
+                            background: isDragOver ? '#eef7f6' : '#ffffff',
+                            borderRadius: '8px',
+                            padding: '1.1rem 0.9rem',
+                            textAlign: 'center',
+                            transition: 'all 0.2s ease',
+                            marginBottom: '0.85rem',
+                          }}
+                        >
+                          <p style={{ margin: '0 0 0.65rem 0', fontWeight: 600, fontSize: '0.9rem' }}>
+                            Tome una foto en el lugar o seleccione una imagen de su dispositivo
+                          </p>
+                          <div
+                            style={{
+                              display: 'flex',
+                              gap: '0.6rem',
+                              justifyContent: 'center',
+                              flexWrap: 'wrap',
+                            }}
+                          >
+                            <button
+                              type="button"
+                              className="civia-btn accent"
+                              onClick={() => void startCamera()}
+                            >
+                              📷 Tomar fotografía
+                            </button>
+                            <button
+                              type="button"
+                              className="civia-btn secondary"
+                              onClick={() => fileInputRef.current?.click()}
+                            >
+                              📁 Subir fotografía
+                            </button>
+                          </div>
+                          <p
+                            style={{
+                              margin: '0.55rem 0 0 0',
+                              fontSize: '0.78rem',
+                              color: 'var(--civia-muted)',
+                            }}
+                          >
+                            O arrastre y suelte aquí su fotografía (JPEG, PNG o WEBP)
+                          </p>
+                          <input
+                            ref={fileInputRef}
+                            id="rep-photo"
+                            type="file"
+                            accept="image/jpeg,image/png,image/webp"
+                            onChange={handlePhotoChange}
+                            style={{ display: 'none' }}
+                          />
+                        </div>
+
+                        {/* Muestras sintéticas para prueba académica */}
+                        <div
+                          style={{
+                            background: '#ffffff',
+                            border: '1px solid #dce4e2',
+                            borderRadius: '8px',
+                            padding: '0.75rem',
+                          }}
+                        >
+                          <div
+                            style={{
+                              fontSize: '0.82rem',
+                              fontWeight: 700,
+                              color: 'var(--civia-teal-dark)',
+                              marginBottom: '0.45rem',
+                            }}
+                          >
+                            🔬 O seleccionar muestra sintética de prueba para demostración (Cali):
+                          </div>
+                          <div
+                            style={{
+                              display: 'flex',
+                              flexWrap: 'wrap',
+                              gap: '0.4rem',
+                            }}
+                          >
+                            {(
+                              [
+                                ['HUECO', '🕳️ Hueco vial'],
+                                ['BASURAS', '🗑️ Basuras'],
+                                ['TALA', '🌳 Tala / Ramas'],
+                                ['QUEMA', '🔥 Quema'],
+                                ['OTRO', '⚡ Poste / Cables'],
+                              ] as const
+                            ).map(([cat, label]) => (
+                              <button
+                                key={cat}
+                                type="button"
+                                className="civia-btn secondary"
+                                style={{ fontSize: '0.78rem', padding: '0.35rem 0.6rem' }}
+                                onClick={() => void handleSelectSyntheticSample(cat)}
+                              >
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </>
                     )}
                   </div>
 

@@ -11,7 +11,7 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 from app.agent import (
@@ -50,6 +50,7 @@ from app.repository import (
     update_report_ai_analysis,
     update_report_status,
 )
+from app.seed import get_known_synthetic_sha256_set
 from app.schemas import (
     AgentQueryRequest,
     AgentQueryResponse,
@@ -182,6 +183,7 @@ async def create_citizen_report(
     neighborhood: str | None = Form(default=None),
     address_hint: str | None = Form(default=None),
     auto_analyze: bool = Form(default=True),
+    is_synthetic: bool = Form(default=False),
     photo: UploadFile = File(...),
     audio: UploadFile | None = File(default=None),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
@@ -272,6 +274,13 @@ async def create_citizen_report(
                 except Exception as exc:
                     logger.warning("Fallo no bloqueante en transcripción opcional: %s", type(exc).__name__)
 
+        known_synthetic = get_known_synthetic_sha256_set()
+        eff_is_synthetic = bool(
+            is_synthetic
+            or (raw_photo_sha in known_synthetic)
+            or (photo_meta["photo_sha256"] in known_synthetic)
+        )
+
         create_kwargs: dict[str, Any] = {
             "title": clean_title,
             "description": clean_desc,
@@ -284,6 +293,7 @@ async def create_citizen_report(
             "photo_meta": photo_meta,
             "audio_meta": audio_meta,
             "audio_transcript": audio_transcript,
+            "is_synthetic": eff_is_synthetic,
             "idempotency_key": eff_idem_key,
             "request_fingerprint": req_fingerprint,
         }
@@ -440,7 +450,7 @@ def get_citizen_report(report_id: UUID):
 
 
 @app.get("/api/reports/{report_id}/photo")
-def get_citizen_report_photo(report_id: UUID):
+def get_citizen_report_photo(report_id: UUID, request: Request, v: str | None = None):
     row = get_report_raw(report_id)
     if not row:
         raise CitizenValidationError(
@@ -456,13 +466,31 @@ def get_citizen_report_photo(report_id: UUID):
             status_code=404,
             code="PHOTO_FILE_MISSING",
         )
+
+    sha = row.get("photo_sha256") or ""
+    etag = f'"{sha[:32]}"' if sha else f'"{safe_name}"'
+
+    # Verificar If-None-Match para 304 Not Modified
+    if_none_match = request.headers.get("if-none-match")
+    if if_none_match and (if_none_match == etag or if_none_match == "*"):
+        return Response(status_code=304, headers={"ETag": etag})
+
+    # Cache policy: Si v coincide con el hash del archivo, es inmutable; si no, revalidar
+    is_version_match = bool(v and sha and v == sha[:16])
+    cache_control = (
+        "public, max-age=31536000, immutable"
+        if is_version_match
+        else "public, max-age=0, must-revalidate"
+    )
+
     return FileResponse(
         path=file_path,
         media_type=row["photo_mime"],
         headers={
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'",
-            "Cache-Control": "public, max-age=3600",
+            "Cache-Control": cache_control,
+            "ETag": etag,
         },
     )
 

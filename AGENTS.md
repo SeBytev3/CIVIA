@@ -25,3 +25,11 @@ Equipo: Stefania Córdoba y Sebastian Espinosa. Proyecto de Ingeniería de Aplic
 - Extraer instrucciones concretas y aplicables para el problema en curso; evitar parches reactivos o atajos heurísticos.
 - Documentar explícitamente en cada ciclo la matriz de correspondencia: hallazgo/tarea -> skill utilizada -> instrucción aplicada -> verificación adversarial realizada.
 - Verificar invariantes mediante TDD adversarial: reproducir y confirmar el fallo exacto (RED) antes de implementar (GREEN) y proteger regresiones con suites herméticas.
+
+## Protocolo de Evaluación Autónoma para Agentes
+- Para cualquier agente evaluador (Claude, Gemini, ChatGPT):
+  1. La rama oficial es `main`.
+  2. Ejecutar `.\scripts\run.ps1` (PowerShell) o `./scripts/run.sh` (Bash).
+  3. Comprobar salud en `http://localhost:8000/health` y acceso a frontend en `http://localhost:5173`.
+  4. La suite hermética se valida mediante: `docker run --rm -v "${PWD}\backend:/app" -v "${PWD}\frontend:/frontend" -v "${PWD}\eval:/app/eval" --network civia_civia_net -e DATABASE_URL=postgresql://civia:local_dev_change_me@civia-db-1:5432/civia civia-api pytest -m "not live"`.
+  5. El estado oficial de nube es "DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA", asegurando reproducibilidad completa en máquina local o VM sin costos no presupuestados.

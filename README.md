@@ -6,11 +6,33 @@ CIVIA es una aplicación web progresiva (PWA) conectada a una API FastAPI, Postg
 
 ---
 
+## 🚀 Despliegue Rápido y Autónomo para Evaluadores y Agentes de IA
+
+Si eres un profesor evaluador o estás utilizando un agente autónomo de IA (**Claude Code, Gemini, ChatGPT, Codex**), copia y pega el siguiente prompt:
+
+> **Prompt de evaluación para agentes:**
+> *"Clona el repositorio oficial `https://github.com/SeBytev3/CIVIA.git` en la rama predeterminada `main`. Ejecuta `.\scripts\run.ps1` (en Windows 11 PowerShell) o `./scripts/run.sh` (en Linux/macOS). Verifica que `http://localhost:5173` responda con código 200 y que `http://localhost:8000/health` reporte status 'ok' con PostgreSQL conectado. Luego, accede a la aplicación web, toma una fotografía con la cámara o selecciona una muestra de prueba, ingresa una descripción y coordenadas en Cali, y verifica la persistencia y consulta del radicado en PostgreSQL tras recargar."*
+
+### Despliegue en un solo comando:
+
+```powershell
+# 1. Clonar el repositorio oficial (rama predeterminada: main)
+git clone https://github.com/SeBytev3/CIVIA.git
+cd CIVIA
+
+# 2. Iniciar todos los servicios (genera automáticamente ADMIN_TOKEN seguro si no existe)
+.\scripts\run.ps1
+```
+
+*(En Linux / macOS / WSL: `chmod +x ./scripts/run.sh && ./scripts/run.sh`)*
+
+---
+
 ## Requisitos del sistema
-- **Sistema Operativo:** Windows 11 (64-bit) con soporte para virtualización habilitado en BIOS/UEFI.
+- **Sistema Operativo:** Windows 11 (64-bit) con soporte para virtualización habilitado en BIOS/UEFI (o Linux x86_64).
 - **Herramientas base del host:**
-  - **Git para Windows** (v2.40+).
-  - **Docker Desktop** (v4.30+) con el backend **WSL2** activo (`wsl --status` en ejecución).
+  - **Git** (v2.40+).
+  - **Docker Desktop** (v4.30+) con el backend **WSL2** activo en Windows.
 - **Recursos mínimos recomendados:**
   - 4 GB de memoria RAM libre asignada a Docker/WSL2.
   - 10 GB de espacio libre en disco para imágenes, volúmenes de PostgreSQL y almacenamiento local de fotos.
@@ -25,7 +47,7 @@ CIVIA es una aplicación web progresiva (PWA) conectada a una API FastAPI, Postg
 ## Arranque desde un clon limpio en un comando
 
 > [!IMPORTANT]
-> **Rama de entrega aprobada:** La versión auditada y aprobada por Codex (G2.1.8, contratos F1–F8) se encuentra en la rama **`fix/auditoria-final`** (commit `cf48e71` y su cierre documental). Hasta que se efectúe la fusión formal en `main`, asegúrate de hacer checkout a esta rama tras clonar.
+> **Rama oficial de entrega:** La versión final, remediada y auditada se encuentra publicada en la rama principal y predeterminada **`main`**.
 
 Abre PowerShell en Windows 11 y ejecuta:
 
@@ -34,11 +56,7 @@ Abre PowerShell en Windows 11 y ejecuta:
 git clone https://github.com/SeBytev3/CIVIA.git
 cd CIVIA
 
-# 2. Situarse en la rama aprobada por auditoria
-git checkout fix/auditoria-final
-
-# 3. Preparar el entorno e iniciar los servicios
-# (El script genera automaticamente un ADMIN_TOKEN unico y robusto con CSPRNG si no existe)
+# 2. Iniciar los servicios
 .\scripts\run.ps1
 ```
 
@@ -312,9 +330,21 @@ Para una guía paso a paso completa con capturas conceptuales, checklist de sust
    - Cuatro límites: (1) máximo de iteraciones, (2) presupuesto de tokens, (3) *timeout* por herramienta y global, y (4) confirmación humana obligatoria en `pending_approvals` para cualquier escritura crítica (la IA jamás modifica la tabla `reports` directamente).
 
 ### Documentación de referencia
+- [`CLAUDE.md`](CLAUDE.md): Guía de ejecución autónoma para Claude Code y agentes de IA.
+- [`GEMINI.md`](GEMINI.md): Guía de ejecución para modelos y agentes Gemini.
+- [`docs/AI_DEPLOY.md`](docs/AI_DEPLOY.md): Protocolo de despliegue y auditoría asistido por IA.
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md): Arquitectura de despliegue local y análisis de opciones cloud.
+- [`docs/guia_instalacion_otro_pc.md`](docs/guia_instalacion_otro_pc.md): Guía de instalación y sustentación para el profesor en otra máquina Windows 11.
 - [`docs/arquitectura.md`](docs/arquitectura.md): Arquitectura C4, flujo vertical y esquema de datos.
 - [`docs/decisiones.md`](docs/decisiones.md): Justificación de SQL vs. NO RAG, diseño del agente y métricas reales (`P50`, `P90`, tokens, costos y precisión).
 - [`docs/checklist_rubrica.md`](docs/checklist_rubrica.md): Mapeo verificable contra los 5 criterios de evaluación del Momento 2.
 - [`docs/guion_sustentacion.md`](docs/guion_sustentacion.md): Guion de sustentación en vivo (6 minutos de demo + 3 minutos de preguntas).
 - [`eval/plantilla_usabilidad.md`](eval/plantilla_usabilidad.md): Protocolo de evaluación de usabilidad con usuario externo (3 tareas).
 - [`docs/estado.md`](docs/estado.md): Registro de avance y pruebas por fase.
+- [`docs/entrega_final.md`](docs/entrega_final.md): Informe oficial de entrega académica final.
+
+---
+
+## Estado Oficial de Despliegue en la Nube
+> **DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA**  
+> Ver análisis detallado en [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). La aplicación es 100% reproducible en local o VM mediante un solo comando, garantizando la persistencia íntegra de PostgreSQL 17 y la privacidad de las evidencias sin incurrir en costos privados ni depender de capas gratuitas efímeras.
