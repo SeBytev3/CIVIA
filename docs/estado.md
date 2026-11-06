@@ -4,6 +4,37 @@
 
 ---
 
+## Release Final Definitivo — Cierre de Integridad Inmutable, Bootstrap Autónomo y Validación de Clon Limpio (2026-11-05)
+
+### 1. Almacenamiento Inmutable Content-Addressed y Cierre de Integridad Fotográfica
+- **Content-Addressed Storage:** Nombres de archivo versionados criptográficamente por contenido (`synthetic_{code_lower}_{sha[:16]}.jpg`). Idempotencia absoluta en disco y base de datos.
+- **Eliminación de borrado indiscriminado de backups:** Se removió todo uso de glob global destructivo sobre `*.tmp_*` y `*.bak_*`. Los archivos temporales se aíslan por PID y UUID (`.staging_{pid}_{code}_{uuid}.tmp`).
+- **Invariantes adversariales A-L completamente superados:**
+  - Caso A: Interrupción tras staging -> archivo previo intacto, temporal no bloquea.
+  - Casos B/C: Interrupción tras publicación previo a commit SQL -> base de datos conserva referencia anterior que sigue existiendo físicamente en disco.
+  - Casos D/E: Fallo de `os.replace` -> rollback sin mutación de BD ni pérdida de archivo previo.
+  - Caso F: Fallo en commit SQL -> rollback preserva archivo anterior intacto.
+  - Caso G: Actualizadores concurrentes -> serialización segura sin pérdida de datos.
+  - Caso H: Detección de corrupción de igual longitud vía SHA-256 y reparación con PIL.
+  - Caso I: Ejecución repetida idempotente (zero writes innecesarios).
+  - Caso J: Migración transparente de PNG legado a JPEG fotorrealista.
+  - Caso K: Activo faltante en catálogo manejado con fallback seguro sin caída.
+  - Caso L: Reportes ciudadanos reales preservados 100% intactos sin interferencia del seeder.
+
+### 2. Bootstrap Autónomo para Agentes y Evaluadores (`run.ps1` y `run.sh`)
+- Comprobación preventiva de Docker Engine y Docker Compose.
+- Generación CSPRNG de contraseñas de BD y `ADMIN_TOKEN` seguro sin exponer secretos ni sobrescribir archivos `.env` existentes.
+- Parametrización configurable de puertos y subredes para evitar colisiones en entornos de evaluación.
+
+### 3. Resultados de Pruebas y Validación Exhaustiva
+- **Suite Hermética Backend:** **154 PASSED**, 1 deselected, 0 failed en 27.15s (100% GREEN).
+- **Prueba Dual E2E Playwright:** 2 passed (100%).
+- **Frontend Build:** `npm run build` completado limpiamente (`tsc -b && vite build`).
+- **Prueba de Clon Limpio Aislado:** Ejecutada en entorno temporal (`%TEMP%\civia_clean_...`) con git clone limpio, puertos aislados, catálogo verificado, creación de reporte ciudadano con foto, persistencia en PostgreSQL 17 tras reinicio (`docker compose restart`), y destrucción limpia (`down -v`) en **29.1 segundos (100% PASS)**.
+- **Veredicto Oficial:** `ENTREGA ACADÉMICA LISTA — MAIN PUBLICADA Y CLON LIMPIO VALIDADO`.
+
+---
+
 ## Fase Final — Portabilidad, Publicación Segura de Catálogo y Release MAIN (2026-11-05)
 
 ### 1. Remediación de Auditoría Codex y Portabilidad Completa (100% CERRADA)

@@ -10,7 +10,7 @@ CIVIA es una plataforma para la gestión inteligente de reportes ciudadanos en S
 ---
 
 ## 2. Instrucción Rápida de Despliegue
-Ejecute en la raíz del repositorio:
+Ejecute en la raíz del repositorio en la rama `main`:
 
 ```powershell
 # En Windows 11 PowerShell:
@@ -19,11 +19,11 @@ Ejecute en la raíz del repositorio:
 
 ```bash
 # En Linux / macOS / Bash:
-./scripts/run.sh
+chmod +x ./scripts/run.sh && ./scripts/run.sh
 ```
 
 Los tres contenedores orquestados se levantarán:
-- `civia-db-1`: PostgreSQL 17 con esquema y 10 reportes sintéticos de prueba sembrados.
+- `civia-db-1`: PostgreSQL 17 con esquema y 10 reportes sintéticos de prueba sembrados de forma inmutable.
 - `civia-api-1`: FastAPI en Python 3.13 con validación Pydantic v2 y enrutador multimodal (`Gemini` → `Groq` → `Gemini`).
 - `civia-frontend-1`: Aplicación Web Progresiva (PWA) construida con React 19 y servida por Nginx 1.27 en el puerto `5173`.
 
@@ -41,3 +41,13 @@ Los tres contenedores orquestados se levantarán:
 2. **Visualización íntegra:** Las imágenes en la interfaz utilizan `objectFit: contain` sobre fondo neutro, impidiendo el recorte de las franjas de simulación ética.
 3. **Control de acceso:** Endpoints de observabilidad y mutación de estado operativo exigen `ADMIN_TOKEN` seguro generado mediante CSPRNG.
 4. **Agente genuino:** Las herramientas del agente (`consultar_reportes`, `obtener_reporte`, etc.) ejecutan SQL directo tipado y tienen prohibida la escritura directa en base de datos; cualquier mutación crítica requiere propuesta y aprobación humana por parte de un operador calificado.
+5. **Almacenamiento inmutable Content-Addressed:** Las fotografías de catálogo sintético emplean direccionamiento por contenido (`synthetic_{code}_{sha[:16]}.jpg`), garantizando idempotencia, atomicidad y cero orfandad.
+
+---
+
+## 5. Suite Hermética de Pruebas
+Para validar los 154 contratos herméticos:
+```powershell
+docker compose exec -T api pytest -m "not live" -v
+```
+**Resultado:** `154 passed, 1 deselected, 0 failed`.

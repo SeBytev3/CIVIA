@@ -1,17 +1,19 @@
-# CIVIA — Plataforma de Reportes Ciudadanos Asistidos por IA (Cali y Valle del Cauca)
+# CIVIA — Despliegue para Profesores y Agentes de IA
 
 Equipo: **Stefania Córdoba y Sebastian Espinosa** · Universidad Cooperativa de Colombia · Ingeniería de Aplicaciones con IA (Momento 2).
 
-CIVIA es una aplicación web progresiva (PWA) conectada a una API FastAPI, PostgreSQL 17 y un sistema agéntico resiliente multimodal (`Gemini` → `Groq` → `Gemini`) para registrar, analizar, confirmar y gestionar reportes ciudadanos viales y ambientales (**Huecos**, **Basuras**, **Tala arbórea** y **Quemas**).
+CIVIA (Ciudad Inteligente y Vigilancia Ambiental) es una plataforma integral para la captura, georreferenciación, diagnóstico asistido por IA, confirmación humana y seguimiento de incidentes urbanos y ambientales en Santiago de Cali y el Valle del Cauca (**Huecos**, **Basuras**, **Tala arbórea** y **Quemas**).
+
+La arquitectura combina una Aplicación Web Progresiva (PWA) moderna en React 19, una API REST FastAPI en Python 3.13 con validación estricta, persistencia transaccional en PostgreSQL 17 y un enrutador multimodal resiliente de tres niveles (`Gemini` → `Groq` → `Gemini`).
 
 ---
 
 ## 🚀 Despliegue Rápido y Autónomo para Evaluadores y Agentes de IA
 
-Si eres un profesor evaluador o estás utilizando un agente autónomo de IA (**Claude Code, Gemini, ChatGPT, Codex**), copia y pega el siguiente prompt:
+Si eres un profesor evaluador o estás utilizando un agente autónomo de IA (**Claude Code, Gemini CLI, Antigravity, ChatGPT, Codex**), copia y pega el siguiente prompt:
 
-> **Prompt de evaluación para agentes:**
-> *"Clona el repositorio oficial `https://github.com/SeBytev3/CIVIA.git` en la rama predeterminada `main`. Ejecuta `.\scripts\run.ps1` (en Windows 11 PowerShell) o `./scripts/run.sh` (en Linux/macOS). Verifica que `http://localhost:5173` responda con código 200 y que `http://localhost:8000/health` reporte status 'ok' con PostgreSQL conectado. Luego, accede a la aplicación web, toma una fotografía con la cámara o selecciona una muestra de prueba, ingresa una descripción y coordenadas en Cali, y verifica la persistencia y consulta del radicado en PostgreSQL tras recargar."*
+> **Prompt de evaluación para agentes autónomos:**  
+> *"Clona el repositorio oficial `https://github.com/SeBytev3/CIVIA.git` en la rama predeterminada `main`. Ejecuta `.\scripts\run.ps1` (en Windows 11 PowerShell) o `./scripts/run.sh` (en Linux/macOS). Verifica que `http://localhost:5173` responda con código 200 y que `http://localhost:8000/health` reporte status 'ok' con PostgreSQL conectado y esquema listo. Luego, accede a la aplicación web, toma una fotografía con la cámara o selecciona una muestra de prueba, ingresa una descripción y coordenadas en Cali, y verifica la persistencia y consulta del radicado en PostgreSQL tras recargar."*
 
 ### Despliegue en un solo comando:
 
@@ -20,7 +22,7 @@ Si eres un profesor evaluador o estás utilizando un agente autónomo de IA (**C
 git clone https://github.com/SeBytev3/CIVIA.git
 cd CIVIA
 
-# 2. Iniciar todos los servicios (genera automáticamente ADMIN_TOKEN seguro si no existe)
+# 2. Iniciar todos los servicios (genera automáticamente credenciales seguras si no existen)
 .\scripts\run.ps1
 ```
 
@@ -29,18 +31,19 @@ cd CIVIA
 ---
 
 ## Requisitos del sistema
-- **Sistema Operativo:** Windows 11 (64-bit) con soporte para virtualización habilitado en BIOS/UEFI (o Linux x86_64).
+
+- **Sistema Operativo:** Windows 11 (64-bit) con soporte para virtualización habilitado en BIOS/UEFI (o Linux x86_64 / macOS).
 - **Herramientas base del host:**
   - **Git** (v2.40+).
-  - **Docker Desktop** (v4.30+) con el backend **WSL2** activo en Windows.
+  - **Docker Desktop** (v4.30+) con el backend **WSL2** activo en Windows (o Docker Engine 24+ con Docker Compose v2 en Linux).
 - **Recursos mínimos recomendados:**
   - 4 GB de memoria RAM libre asignada a Docker/WSL2.
   - 10 GB de espacio libre en disco para imágenes, volúmenes de PostgreSQL y almacenamiento local de fotos.
+  - Puertos de red libres en el host: `8000` (API Backend) y `5173` (Frontend PWA).
 - **Aislamiento absoluto:** **No se requiere** instalar Node.js, npm ni Python globalmente en el computador evaluador. Toda la compilación, dependencias y ejecución ocurren estrictamente dentro de los contenedores Docker oficiales (`node:22-alpine`, `python:3.13-slim`, `postgres:17-alpine`, `nginx:1.27-alpine`).
-- **Claves API de Inteligencia Artificial (opcionales para el arranque y pruebas sintéticas, requeridas para análisis multimodal en vivo):**
-  - `GOOGLE_API_KEY_PRIMARY` (Google AI Studio - Gemini).
-  - `GOOGLE_API_KEY_SECONDARY` (Google AI Studio - segundo modelo Gemini de respaldo).
-  - `GROQ_API_KEY` (Groq Cloud - proveedor independiente Qwen / Whisper).
+- **Claves API de Inteligencia Artificial (OPCIONALES):**
+  - **El sistema funciona 100% en modo local (MVP) sin requerir ninguna clave de API externa.** La captura de cámara, subida de fotos, georreferenciación en Cali, radicación, persistencia en PostgreSQL 17, catálogo de evidencias fotorrealistas y la suite completa de 154 pruebas herméticas no requieren conexión externa.
+  - Si se proporcionan claves en `.env` (`GOOGLE_API_KEY_PRIMARY`, `GOOGLE_API_KEY_SECONDARY`, `GROQ_API_KEY`), el agente multimodal y el análisis automático en vivo se activan automáticamente.
 
 ---
 
@@ -60,7 +63,7 @@ cd CIVIA
 .\scripts\run.ps1
 ```
 
-*(En entornos basados en Unix / macOS / WSL2 directo, el equivalente es `./run.sh`).*
+*(En entornos basados en Unix / macOS / WSL2 directo: `./scripts/run.sh`).*
 
 ### Procedimiento manual equivalente (paso a paso)
 
@@ -87,10 +90,31 @@ Si prefieres no usar los scripts automáticos:
 
 | Servicio | URL | Descripción |
 |---|---|---|
-| **PWA Ciudadana** | http://localhost:5173 | Interfaz React 19 + TypeScript + Vite + Leaflet (mapa interactivo de Cali) servida por Nginx |
-| **API Backend** | http://localhost:8000 | FastAPI REST API con validación estricta y seguridad por capas |
-| **Salud del Backend** | http://localhost:8000/health | Verificación JSON de conectividad a PostgreSQL, migraciones listas y catálogo de modelos |
-| **Documentación OpenAPI** | http://localhost:8000/docs | Documentación Swagger interactiva de todos los endpoints REST públicos y administrativos |
+| **PWA Ciudadana** | `http://localhost:5173` | Interfaz React 19 + TypeScript + Vite + Leaflet (mapa interactivo de Cali) servida por Nginx |
+| **API Backend** | `http://localhost:8000` | FastAPI REST API con validación estricta y seguridad por capas |
+| **Salud del Backend** | `http://localhost:8000/health` | Verificación JSON de conectividad a PostgreSQL, migraciones listas y catálogo de modelos |
+| **Documentación OpenAPI** | `http://localhost:8000/docs` | Documentación Swagger interactiva de todos los endpoints REST públicos y administrativos |
+
+---
+
+## Procedimiento de Prueba Interactiva para el Evaluador
+
+1. **Acceder a la aplicación:** Abre tu navegador web en `http://localhost:5173`.
+2. **Crear un nuevo reporte:**
+   - Navega a la pestaña **"+ Nuevo Reporte"**.
+   - **Fotografía:** Puedes activar la cámara web con un clic y capturar una foto real, subir una imagen JPEG/PNG/WEBP desde tu explorador de archivos, o seleccionar una de las muestras sintéticas fotorrealistas de demostración.
+   - **Ubicación:** Haz clic en el mapa de Santiago de Cali para posicionar el incidente, o usa el botón *"Usar mi ubicación actual"*.
+   - **Descripción y título:** Ingresa el detalle del problema vial o ambiental.
+   - Pulsa **"Enviar Reporte Ciudadano"**.
+3. **Verificación de radicado:**
+   - La plataforma confirmará el reporte y asignará un código único de radicado (ej. `CIV-2026-XXXX`).
+   - Se abrirá la vista de detalle con la foto servida de forma inmutable, escalada en `objectFit: contain` sin recortes.
+4. **Consultar y verificar persistencia:**
+   - Ve a la pestaña **"Seguimiento Radicado"** e ingresa el código generado.
+   - Recarga el navegador (`Ctrl + F5`) para comprobar que los datos y la evidencia fotográfica persisten íntegramente en PostgreSQL 17.
+5. **Explorar el catálogo sintético inicial:**
+   - En la pestaña **"Mapa y Reportes"**, examina los 10 reportes precargados (`CIV-2026-DEMO0001` a `CIV-2026-DEMO0010`).
+   - Cada reporte de prueba cuenta con su distintivo visible de procedencia ética: *"ℹ Imagen generada con IA · Simulación"* y almacenamiento inmutable versionado por contenido.
 
 ---
 
@@ -102,15 +126,15 @@ Todas las variables se configuran en el archivo `.env` en la raíz del proyecto.
 |---|---|---|
 | `POSTGRES_DB` | Nombre de la base de datos PostgreSQL | `civia` |
 | `POSTGRES_USER` | Usuario administrador de la base de datos | `civia` |
-| `POSTGRES_PASSWORD` | Contraseña local de la base de datos | `local_dev_change_me` *(debe coincidir con DATABASE_URL)* |
-| `DATABASE_URL` | Cadena de conexión SQL directa para el backend | `postgresql://civia:local_dev_change_me@db:5432/civia` |
-| `ADMIN_TOKEN` | Token secreto obligatorio para observabilidad y endpoints `/api/admin/*` | Generado con CSPRNG (`secrets.token_urlsafe(32)`) por `.\scripts\run.ps1` |
-| `GOOGLE_API_KEY_PRIMARY` | Clave Google AI Studio para modelo primario | Requerida para análisis multimodal real (Gemini) |
-| `GOOGLE_API_KEY_SECONDARY` | Clave Google AI Studio para modelo terciario | Opcional (respaldo independiente de Gemini) |
-| `GROQ_API_KEY` | Clave Groq Cloud para modelo de respaldo independiente | Requerida para fallback real (Qwen 2.5 27B / Whisper) |
+| `POSTGRES_PASSWORD` | Contraseña local de la base de datos | Generada aleatoriamente por `run.ps1` / `run.sh` |
+| `DATABASE_URL` | Cadena de conexión SQL directa para el backend | `postgresql://civia:<password>@db:5432/civia` |
+| `ADMIN_TOKEN` | Token secreto obligatorio para observabilidad y endpoints `/api/admin/*` | Generado con CSPRNG (`secrets.token_urlsafe(32)`) |
+| `GOOGLE_API_KEY_PRIMARY` | Clave Google AI Studio para modelo primario | Opcional (análisis multimodal en vivo con Gemini) |
+| `GOOGLE_API_KEY_SECONDARY` | Clave Google AI Studio para modelo terciario | Opcional (respaldo de Gemini) |
+| `GROQ_API_KEY` | Clave Groq Cloud para modelo de respaldo independiente | Opcional (fallback con Qwen 2.5 27B / Whisper) |
 | `AI_PRIMARY_MODEL` | Modelo primario multimodal | `gemini-3.8-flash` |
 | `AI_FALLBACK_MODEL` | Modelo de respaldo independiente | `qwen/qwen3.8-27b` |
-| `AI_TERTIARY_MODEL` | Tercer modelo alternativo | `gemini-3.6-flash` |
+| `AI_TERTIARY_MODEL` | Tercer modelo alternativo | `gemini-3.5-flash-lite` |
 | `AI_TIMEOUT_SECONDS` | Tiempo límite por llamada a proveedores de IA | `15` segundos |
 | `AI_MAX_RETRIES` | Reintentos acotados con backoff exponencial y jitter | `2` reintentos |
 | `AGENT_MAX_ITERATIONS` | Límite #1: máximo de turnos del agente por consulta | `5` iteraciones |
@@ -122,26 +146,39 @@ Todas las variables se configuran en el archivo `.env` en la raíz del proyecto.
 
 ## Ejecución de pruebas automatizadas y suite de evaluación
 
-### 1. Pruebas automatizadas (`pytest`)
-Con los contenedores en ejecución, ejecuta la suite de 20 pruebas automatizadas (salud, CRUD, validación de archivos/EXIF/GPS/PII, *rate limiting*, resiliencia `429`/`503`/`TIMEOUT`/`INVALID_JSON`/`GROQ_FAIL`/`TOTAL`, los 4 límites del agente y prueba E2E entre contenedores):
+### 1. Suite Hermética de Backend (`pytest`)
+Ejecuta la suite hermética de 154 pruebas automáticas (contratos de seguridad F1-F8, invariantes A-L de almacenamiento inmutable, procedencia ética de servidor, ledger de auditoría, resiliencia `429`/`503`/`TIMEOUT`/`TOTAL`, y los 4 límites del agente):
 
 ```powershell
-docker compose exec -T api pytest -v
+docker compose exec -T api pytest -m "not live" -v
 ```
 
-### 2. Suite de evaluación formal (6 casos dorados SQL + 15 consultas representativas)
+*(Resultado verificado: **154 passed, 1 deselected, 0 failed**).*
+
+### 2. Pruebas E2E de Interfaz de Usuario (Playwright)
+Para ejecutar la suite de navegador de doble flujo (cámara real en vivo + muestra sintética oficial con persistencia):
+
+```powershell
+cd frontend
+npm install
+npm run test:e2e
+```
+
+*(Resultado verificado: **2 passed (100%)**).*
+
+### 3. Suite de evaluación formal (6 casos dorados SQL + 15 consultas representativas)
 Para ejecutar la evaluación formal y regenerar `eval/resultados/reporte_evaluacion.json` y `eval/resultados/reporte_evaluacion.md`:
 
 ```powershell
 # Verificación determinista rápida (SQL dorado + matriz de resiliencia y guardrails):
 docker compose exec -T api python eval/evaluar.py --mode deterministic
 
-# Suite completa de 15 consultas con llamadas en vivo al router Gemini -> Groq -> Gemini:
+# Suite completa con llamadas en vivo al router Gemini -> Groq -> Gemini:
 docker compose exec -T api python eval/evaluar.py --mode all --pause 1.5
 ```
 
-### 3.Cómo simular fallos de proveedores (`FALLA_FORZADA`)
-Puedes inyectar fallos controlados en caliente desde la **Consola de Observabilidad y Resiliencia** en http://localhost:5173 (autenticando con `ADMIN_TOKEN`), o mediante API:
+### 4. Simulación de fallos controlados (`FALLA_FORZADA`)
+Puedes inyectar fallos controlados en caliente desde la **Consola de Observabilidad y Resiliencia** en `http://localhost:5173` (autenticando con `ADMIN_TOKEN`), o mediante API:
 
 ```powershell
 # Simular HTTP 429 en proveedor primario (conmuta automáticamente a Groq):
@@ -149,7 +186,7 @@ Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injec
   -Headers @{"X-Admin-Token"="$env:ADMIN_TOKEN"; "Content-Type"="application/json"} `
   -Body '{"mode":"429","reset_circuits":true}'
 
-# Simular caída total de los 3 proveedores (guarda reportes en PENDING_ANALYSIS):
+# Simular caída total de proveedores (guarda reportes en PENDING_ANALYSIS sin exponer errores):
 Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injection" `
   -Headers @{"X-Admin-Token"="$env:ADMIN_TOKEN"; "Content-Type"="application/json"} `
   -Body '{"mode":"TOTAL","reset_circuits":true}'
@@ -162,64 +199,7 @@ Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injec
 
 ---
 
-## Orquestador Autónomo de Desarrollo y Auditoría (CIVIA Autopilot)
-
-CIVIA incluye un sistema de orquestación autónomo que elimina la intermediación manual del desarrollador entre **Antigravity CLI (`agy`)** con Gemini 3.8 Flash High como desarrollador y **Codex CLI (`codex exec`)** como auditor independiente.
-
-### 1. Iniciar con un único comando
-El usuario puede lanzar el flujo autónomo con una sola línea en PowerShell 7:
-
-```powershell
-pwsh -File scripts/civia-autopilot.ps1
-```
-
-El orquestador coordina automáticamente el ciclo:
-1. Lectura de memoria persistente (`PROJECT_SPEC.md`, `DEVELOPER.md`, `AUDITOR.md`, `ACCEPTANCE.md`).
-2. Entrega de contexto y prompts a Antigravity CLI.
-3. Ejecución de pruebas automatizadas deterministas (`pytest`).
-4. Generación de checkpoint commit en Git si las pruebas básicas pasan.
-5. Creación de un **Git worktree congelado y aislado** para auditoría.
-6. Invocación de Codex CLI en modo no interactivo de solo lectura (`--sandbox read-only`).
-7. Validación de informe estructurado JSON (`PASS`, `FAIL`, `PARCIAL`).
-8. Cierre de hallazgos y avance o reintento de ciclo con realimentación contextual.
-
-### 2. Opciones y Modos de Ejecución
-- **Modo Simulación determinista (sin consumir tokens ni requerir CLIs externos):**
-  ```powershell
-  pwsh -File scripts/civia-autopilot.ps1 -Simulate
-  ```
-- **Diagnóstico de Preflight del entorno:**
-  ```powershell
-  pwsh -File scripts/civia-autopilot.ps1 -PreflightOnly
-  ```
-- **Fijar bloque, hallazgo o límite de ciclos:**
-  ```powershell
-  pwsh -File scripts/civia-autopilot.ps1 -Block G2.1 -Finding M-03 -MaxCycles 3
-  ```
-- **Reiniciar memoria de estado:**
-  ```powershell
-  pwsh -File scripts/civia-autopilot.ps1 -ResetState
-  ```
-
-### 3. Suite de Verificación del Orquestador (11 escenarios)
-Para comprobar los 11 escenarios de fallo, recuperación, límites de ciclos, detección de estancamiento y guardrails de seguridad del orquestador:
-
-```powershell
-python -m pytest orchestrator/tests/test_orchestrator_scenarios.py -v
-```
-
-### 4. Políticas de Seguridad y Guardrails
-- **Bases de datos desechables:** Ninguna prueba se ejecuta sobre la base habitual (`civia`).
-- **Aislamiento en Git Worktrees:** Codex jamás muta el código del árbol de trabajo de desarrollo.
-- **Sin credenciales en logs:** Sanitización y redacción automática de tokens, llaves API y contraseñas.
-- **Límites de autonomía:** Bloqueo terminante de `git push`, merge hacia `main` y sentencias destructivas. Máximo de 5 ciclos por hallazgo y detección de ciclos sin progreso (*zero diff*).
-- **Reportes:** Registro persistente en `orchestrator/state.json`, `orchestrator/reports/execution_report.md` y `execution_report.json`.
-
----
-
-## Mantenimiento, diagnóstico y solución de problemas en Windows 11
-
-### 1. Comandos de ciclo de vida seguro (No destructivos)
+## Mantenimiento, diagnóstico y ciclo de vida seguro
 
 - **Verificar estado de los contenedores:**
   ```powershell
@@ -227,119 +207,38 @@ python -m pytest orchestrator/tests/test_orchestrator_scenarios.py -v
   ```
 - **Monitorear registros (logs) en tiempo real:**
   ```powershell
-  # Logs combinados de todos los servicios:
-  docker compose logs -f
-
-  # Logs específicos del backend API o de la base de datos:
   docker compose logs -f api
   docker compose logs -f db
   docker compose logs -f frontend
   ```
 - **Reiniciar servicios conservando los datos:**
   ```powershell
-  # Reinicio directo de contenedores:
   docker compose restart
-
-  # O detención y reanudación segura (los datos en volúmenes persisten intactos):
-  docker compose down
-  docker compose up -d
   ```
-- **Reconstruir imágenes tras cambios de código:**
+- **Detener servicios sin borrar datos:**
   ```powershell
-  docker compose build --no-cache
-  docker compose up -d
+  docker compose down
   ```
+  *(Los volúmenes `civia_postgres` y `civia_uploads` persisten intactos).*
 
 ---
 
-### 2. Comandos destructivos (Uso exclusivo para reinicio total)
+## Arquitectura de Resiliencia y Documentación del Proyecto
 
-> [!CAUTION]
-> **Pérdida irreversible de datos locales:** El comando `docker compose down -v` elimina por completo los volúmenes de almacenamiento (`civia_postgres` y `civia_uploads`), borrando todos los reportes, fotos y trazabilidad acumulados. **NO utilices este comando como solución rutinaria.**
-> ```powershell
-> # ÚNICAMENTE si deseas resetear el sistema a su estado inicial de fábrica:
-> docker compose down -v
-> docker compose up --build -d
-> ```
-
----
-
-### 3. Solución de problemas frecuentes en Windows 11
-
-1. **Conflicto de puertos (`5173`, `8000` o `5432` ocupados):**
-   Si otro proceso o una instancia previa está escuchando en los puertos requeridos, identifícalo con:
-   ```powershell
-   Get-NetTCPConnection -LocalPort 5173, 8000, 5432 -ErrorAction SilentlyContinue | Format-Table -Property LocalPort, OwningProcess, State
-   # O mediante comando clásico:
-   netstat -ano | findstr ":5173 :8000 :5432"
-   ```
-   Detén la instancia anterior con `docker compose down` o termina el proceso conflictivo antes de iniciar CIVIA.
-
-2. **Docker Desktop o motor WSL2 no responden:**
-   - Comprueba el estado de WSL2:
-     ```powershell
-     wsl --status
-     ```
-   - Si el subsistema está bloqueado, apágalo limpiamente y reinícialo:
-     ```powershell
-     wsl --shutdown
-     ```
-   - Abre Docker Desktop y espera a que el icono en la bandeja del sistema indique `Engine running`.
-
-3. **Error al validar configuración de entorno (`.env`):**
-   Comprueba que Docker Compose interprete las variables correctamente sin errores de sintaxis:
-   ```powershell
-   docker compose config
-   ```
-   Si muestra advertencias sobre `ADMIN_TOKEN`, asegúrate de que `.env` contenga una clave no vacía de al menos 32 caracteres generada por `.\scripts\run.ps1`.
-
-4. **Política de ejecución restringida de scripts en PowerShell (`PSSecurityException`):**
-   Si Windows 11 bloquea la ejecución de `.\scripts\run.ps1`, ejecuta:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\scripts\run.ps1
-   # O utiliza directamente:
-   docker compose up --build -d
-   ```
-
-5. **Límite de cuota o latencia en proveedores gratuitos de IA:**
-   Si Google AI Studio o Groq devuelven `429 (Too Many Requests)` durante pruebas continuas, el sistema conmuta automáticamente al siguiente nivel de la cadena (`Gemini` → `Groq` → `Gemini`). También puedes ejecutar las suites en modo determinista local sin consumir cuota:
-   ```powershell
-   docker compose exec -T api python eval/evaluar.py --mode deterministic
-   ```
-
----
-
-## Guía detallada para clonación e instalación en otro computador
-
-Para una guía paso a paso completa con capturas conceptuales, checklist de sustentación académica para el profesor y protocolo de verificación reproducible en un segundo computador limpio, consulta:
-- **[`docs/guia_instalacion_otro_pc.md`](docs/guia_instalacion_otro_pc.md)**
-
----
-
-## Arquitectura de Resiliencia, Agente y Documentación del Proyecto
-
-1. **Flujo vertical ciudadano**:
-   - Captura de descripción, fotografía (`JPEG`/`PNG`/`WEBP` <= 5 MB, >= 32x32 px, sin metadatos EXIF), nota de voz opcional (<= 60s / <= 5 MB) y coordenadas GPS o selección en mapa de Cali.
-   - Almacenamiento en PostgreSQL + clasificación multimodal con contrato estricto `AIAnalysisContract`.
-   - Separación explícita entre diagnóstico sugerido por IA (`ai_category` / `ai_severity`) y confirmación o corrección humana (`final_category` / `final_severity`, `human_confirmed`).
-2. **Router resiliente de 3 niveles (`Gemini` → `Groq` → `Gemini`)**:
-   - Reintentos acotados con *backoff* exponencial + *jitter*, *circuit breaker* por proveedor/modelo y reparación acotada de JSON inválido.
-   - Si fallan todos los proveedores (`FALLA_FORZADA=TOTAL`), el reporte se conserva en `PENDING_ANALYSIS` sin exponer *tracebacks*, errores HTTP ni nombres de proveedores al ciudadano.
-3. **Agente con herramientas tipadas y 4 límites verificables**:
-   - Herramientas: `consultar_reportes`, `obtener_reporte`, `clasificar_evidencia` y `proponer_actualizacion_critica`.
-   - Cuatro límites: (1) máximo de iteraciones, (2) presupuesto de tokens, (3) *timeout* por herramienta y global, y (4) confirmación humana obligatoria en `pending_approvals` para cualquier escritura crítica (la IA jamás modifica la tabla `reports` directamente).
+1. **Flujo vertical ciudadano**: Captura de descripción, fotografía (`JPEG`/`PNG`/`WEBP` <= 5 MB, >= 32x32 px, sin metadatos EXIF), audio opcional y coordenadas GPS en Cali. Almacenamiento en PostgreSQL 17 y contrato estricto `AIAnalysisContract`.
+2. **Router resiliente de 3 niveles (`Gemini` → `Groq` → `Gemini`)**: Reintentos acotados con *backoff* exponencial + *jitter*, *circuit breaker* por proveedor/modelo y reparación de JSON.
+3. **Agente con herramientas tipadas y 4 límites**: `consultar_reportes`, `obtener_reporte`, `clasificar_evidencia` y `proponer_actualizacion_critica`. Límites verificables de iteraciones, tokens, timeout y aprobación humana obligatoria en `pending_approvals` (la IA jamás escribe directamente en la tabla `reports`).
 
 ### Documentación de referencia
 - [`CLAUDE.md`](CLAUDE.md): Guía de ejecución autónoma para Claude Code y agentes de IA.
-- [`GEMINI.md`](GEMINI.md): Guía de ejecución para modelos y agentes Gemini.
+- [`GEMINI.md`](GEMINI.md): Guía de ejecución para modelos y agentes Gemini / Antigravity.
 - [`docs/AI_DEPLOY.md`](docs/AI_DEPLOY.md): Protocolo de despliegue y auditoría asistido por IA.
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md): Arquitectura de despliegue local y análisis de opciones cloud.
-- [`docs/guia_instalacion_otro_pc.md`](docs/guia_instalacion_otro_pc.md): Guía de instalación y sustentación para el profesor en otra máquina Windows 11.
+- [`docs/guia_instalacion_otro_pc.md`](docs/guia_instalacion_otro_pc.md): Guía de instalación y sustentación para el profesor en otra máquina Windows 11 o Linux.
 - [`docs/arquitectura.md`](docs/arquitectura.md): Arquitectura C4, flujo vertical y esquema de datos.
-- [`docs/decisiones.md`](docs/decisiones.md): Justificación de SQL vs. NO RAG, diseño del agente y métricas reales (`P50`, `P90`, tokens, costos y precisión).
-- [`docs/checklist_rubrica.md`](docs/checklist_rubrica.md): Mapeo verificable contra los 5 criterios de evaluación del Momento 2.
-- [`docs/guion_sustentacion.md`](docs/guion_sustentacion.md): Guion de sustentación en vivo (6 minutos de demo + 3 minutos de preguntas).
-- [`eval/plantilla_usabilidad.md`](eval/plantilla_usabilidad.md): Protocolo de evaluación de usabilidad con usuario externo (3 tareas).
+- [`docs/decisiones.md`](docs/decisiones.md): Justificación de SQL directo vs. NO RAG, diseño del agente y métricas reales.
+- [`docs/checklist_rubrica.md`](docs/checklist_rubrica.md): Mapeo verificable contra los criterios de evaluación del Momento 2.
+- [`docs/guion_sustentacion.md`](docs/guion_sustentacion.md): Guion de sustentación en vivo (demo + preguntas).
 - [`docs/estado.md`](docs/estado.md): Registro de avance y pruebas por fase.
 - [`docs/entrega_final.md`](docs/entrega_final.md): Informe oficial de entrega académica final.
 

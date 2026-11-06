@@ -101,7 +101,7 @@ git status
    python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); p.write_text(re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', p.read_text()))"
    ```
 3. **Claves de Inteligencia Artificial (OPCIONALES — Solo requeridas para inferencia multimodal en vivo):**
-   - **NO son necesarias para evaluar el sistema:** La captura con cámara, la subida de fotos, la georreferenciación, la radicación, la persistencia en PostgreSQL 17, el seguimiento, la consulta en mapa y la suite hermética de 147 pruebas automáticas operan al 100% de forma determinista y local sin ninguna clave externa.
+   - **NO son necesarias para evaluar el sistema:** La captura con cámara, la subida de fotos, la georreferenciación, la radicación, la persistencia en PostgreSQL 17, el seguimiento, la consulta en mapa y la suite hermética de 154 pruebas automáticas operan al 100% de forma determinista y local sin ninguna clave externa.
    - Si el profesor desea probar el análisis multimodal de imágenes en vivo conectando con Google Gemini o Groq, puede añadir sus claves opcionales en `.env`:
      ```ini
      GOOGLE_API_KEY_PRIMARY=AIzaSy...
@@ -170,7 +170,7 @@ Verás la interfaz ciudadana de CIVIA:
 
 1. En la PWA (`http://localhost:5173`), localiza la sección **"Nuevo Reporte Ciudadano"**.
 2. **Ubicación GPS:** Haz clic sobre cualquier punto del mapa de Cali (por ejemplo en el centro, Comuna 2 o San Antonio) o pulsa el botón *"Usar mi ubicación actual"*. Comprueba que las coordenadas se completen automáticamente dentro del Valle del Cauca.
-3. **Fotografía:** Pulsa el botón **"Generar foto sintética"** (o adjunta una imagen real PNG/JPG). Esto dibuja un patrón de prueba en un canvas HTML5 garantizando que no se suban datos privados.
+3. **Fotografía:** Puedes pulsar el botón de cámara web para capturar una foto real del dispositivo, seleccionar una imagen desde tu disco, o pulsar una de las muestras sintéticas fotorrealistas de demostración.
 4. **Categoría y Descripción:**
    - Categoría: Selecciona `Hueco`.
    - Título: `Bache pronunciado en vía principal`.
@@ -239,7 +239,7 @@ El conteo incluirá los 10 reportes sintéticos iniciales más los reportes nuev
 | **Logs de la API Backend** | `docker compose logs --tail=50 -f api` |
 | **Logs de la Base de Datos** | `docker compose logs --tail=50 db` |
 | **Logs del Servidor Nginx** | `docker compose logs --tail=50 frontend` |
-| **Ejecutar suite hermética de 147 pruebas** | `docker compose exec -T api pytest -m "not live" -v` |
+| **Ejecutar suite hermética de 154 pruebas** | `docker compose exec -T api pytest -m "not live" -v` |
 | **Ejecutar pruebas E2E de navegador (opcional)** | `cd frontend && npm install && npm run test:e2e` |
 | **Ejecutar evaluación formal** | `docker compose exec -T api python eval/evaluar.py --mode deterministic` |
 
