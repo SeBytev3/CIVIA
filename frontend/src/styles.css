@@ -208,34 +208,74 @@ textarea:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 0.45rem;
+  gap: 0.5rem;
+  min-height: 44px;
   padding: 0.65rem 1.15rem;
   border-radius: 8px;
   font-weight: 600;
-  border: none;
+  font-size: 0.92rem;
+  border: 1px solid transparent;
   cursor: pointer;
   background: var(--civia-teal);
   color: #ffffff;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, transform 0.1s ease;
 }
 
-.civia-btn:hover:not(:disabled) {
+.civia-btn:hover:not(:disabled):not(.secondary):not(.accent):not(.danger) {
   background: var(--civia-teal-dark);
+  color: #ffffff;
+}
+
+.civia-btn:focus-visible {
+  outline: 3px solid var(--civia-mint);
+  outline-offset: 2px;
 }
 
 .civia-btn:disabled {
-  opacity: 0.6;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
 .civia-btn.secondary {
-  background: #e7f0ef;
-  color: var(--civia-teal-dark);
-  border: 1px solid #bfd0cd;
+  background: #eef5f4;
+  color: #08333e;
+  border: 1.5px solid #8ba8a3;
+}
+
+.civia-btn.secondary:hover:not(:disabled) {
+  background: #d6e8e5;
+  color: #041c22;
+  border-color: #537a74;
 }
 
 .civia-btn.accent {
   background: var(--civia-amber);
   color: #ffffff;
+  border-color: var(--civia-amber);
+}
+
+.civia-btn.accent:hover:not(:disabled) {
+  background: #c3530e;
+  border-color: #c3530e;
+  color: #ffffff;
+}
+
+.civia-btn.danger {
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #f87171;
+}
+
+.civia-btn.danger:hover:not(:disabled) {
+  background: #fecaca;
+  color: #7f1d1d;
+  border-color: #ef4444;
+}
+
+.civia-btn.sm {
+  min-height: 36px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.82rem;
 }
 
 .civia-map-shell {
@@ -456,4 +496,216 @@ textarea:focus-visible {
 .civia-table th {
   background: #f0f5f4;
   color: var(--civia-teal-dark);
+}
+
+
+/* Aviso obligatorio sobre correo no habilitado */
+.civia-notice-card {
+  background: #f0f7f9;
+  border: 1.5px solid #a8d5e2;
+  border-left: 5px solid var(--civia-teal);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.2rem;
+  margin: 1rem 0;
+}
+
+.civia-notice-title {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--civia-teal-dark);
+  margin-bottom: 0.35rem;
+}
+
+.civia-notice-body {
+  font-size: 0.88rem;
+  line-height: 1.45;
+  color: #1a3c44;
+  margin: 0.25rem 0 0.6rem 0;
+}
+
+.civia-notice-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: #e2f0f3;
+  border: 1px solid #b6dce5;
+  padding: 0.3rem 0.65rem;
+  border-radius: 6px;
+  font-size: 0.82rem;
+  color: #0b4553;
+  font-weight: 600;
+}
+
+/* Tarjeta destacada de éxito post-envío */
+.civia-success-banner {
+  background: #ecfdf5;
+  border: 2px solid #6ee7b7;
+  border-radius: var(--radius-lg);
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 4px 16px rgba(16, 185, 129, 0.08);
+}
+
+.civia-success-code-box {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #ffffff;
+  border: 1.5px solid #a7f3d0;
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1.25rem;
+  margin: 0.85rem 0;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.civia-tracking-display {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 1.5rem;
+  font-weight: 800;
+  color: var(--civia-teal-dark);
+  letter-spacing: 0.04em;
+}
+
+/* Línea de tiempo de trazabilidad ciudadana (Events) */
+.civia-events-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  position: relative;
+  margin: 1rem 0;
+  padding-left: 1.5rem;
+}
+
+.civia-events-timeline::before {
+  content: '';
+  position: absolute;
+  left: 7px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: #cbdad7;
+}
+
+.civia-event-row {
+  position: relative;
+  padding-bottom: 1.1rem;
+}
+
+.civia-event-row:last-child {
+  padding-bottom: 0;
+}
+
+.civia-event-node {
+  position: absolute;
+  left: -1.5rem;
+  top: 3px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 3px solid var(--civia-teal);
+  box-sizing: border-box;
+}
+
+.civia-event-node.system {
+  border-color: #3b82f6;
+}
+
+.civia-event-node.admin {
+  border-color: var(--civia-amber);
+}
+
+.civia-event-content {
+  background: #ffffff;
+  border: 1px solid #e1ebe9;
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+  box-shadow: 0 1px 3px rgba(15, 76, 92, 0.04);
+}
+
+.civia-event-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.78rem;
+  color: var(--civia-muted);
+  margin-bottom: 0.25rem;
+}
+
+.civia-event-msg {
+  font-size: 0.88rem;
+  color: #1a2e35;
+  font-weight: 500;
+  margin: 0;
+}
+
+/* Notificaciones administrativas */
+.civia-notif-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.65rem;
+  margin-top: 0.85rem;
+}
+
+.civia-notif-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.85rem 1rem;
+  border-radius: 8px;
+  border: 1px solid var(--civia-border);
+  background: #ffffff;
+  transition: all 0.15s ease;
+  flex-wrap: wrap;
+}
+
+.civia-notif-item.unread {
+  background: #f0f8f7;
+  border-left: 4px solid var(--civia-teal);
+  border-color: #aed1cb;
+}
+
+.civia-notif-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--civia-amber);
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin-left: 0.35rem;
+}
+
+/* Acordeón de modo de prueba discreto */
+.civia-demo-details {
+  background: #fbfdfc;
+  border: 1px solid #dbe6e4;
+  border-radius: 8px;
+  padding: 0.6rem 0.85rem;
+  margin: 0.75rem 0;
+}
+
+.civia-demo-details summary {
+  font-weight: 600;
+  font-size: 0.84rem;
+  color: #3b5f67;
+  cursor: pointer;
+  user-select: none;
+}
+
+.civia-demo-details summary:hover {
+  color: var(--civia-teal-dark);
+}
+
+.civia-demo-details[open] {
+  padding-bottom: 0.85rem;
 }

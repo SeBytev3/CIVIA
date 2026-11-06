@@ -41,6 +41,14 @@ export interface ReportItem {
   distance_km: number | null;
   is_synthetic: boolean;
   citizen_edit_token?: string | null;
+  assigned_to?: string | null;
+  assigned_at?: string | null;
+  external_delivery_status?: string;
+  external_delivery_channel?: string;
+  external_delivery_message?: string;
+  admin_review_status?: string;
+  last_public_note?: string | null;
+  events?: ReportEventItem[];
   created_at: string;
   updated_at: string;
 }
@@ -167,4 +175,39 @@ export interface PendingApprovalItem {
   decided_by: string | null;
   decided_at: string | null;
   created_at: string;
+}
+
+export interface ReportEventItem {
+  id: string;
+  report_id: string;
+  event_type: string;
+  previous_status: string | null;
+  new_status: string | null;
+  public_message: string;
+  actor_type: 'CITIZEN' | 'ADMIN' | 'SYSTEM';
+  created_at: string;
+}
+
+export interface AdminNotificationItem {
+  id: string;
+  report_id: string;
+  tracking_code: string;
+  title: string;
+  message: string;
+  is_read: boolean;
+  is_synthetic: boolean;
+  read_at: string | null;
+  created_at: string;
+  photo_url?: string | null;
+  category?: string | null;
+  status?: string | null;
+  neighborhood?: string | null;
+}
+
+export interface AdminNotificationsResponse {
+  total: number;
+  unread_total: number;
+  unread_citizen: number;
+  unread_synthetic: number;
+  items: AdminNotificationItem[];
 }

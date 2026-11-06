@@ -148,6 +148,11 @@ async function launchBrowser() {
 
     // Seleccionar muestra oficial de Poste / Cables (OTRO)
     console.log('  2.1 Seleccionando muestra sintética oficial (Poste / Cables)...');
+    const demoSummary = page.locator('summary:has-text("Opciones de prueba")');
+    if (await demoSummary.count() > 0) {
+      await demoSummary.click();
+      await page.waitForTimeout(200);
+    }
     await page.click('button:has-text("Poste / Cables")');
     await page.waitForSelector('text=Imagen generada con IA · Simulación');
 

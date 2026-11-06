@@ -256,11 +256,11 @@ def estimate_prompt_tokens(conversation: list[dict[str, Any]], tools_spec: list[
         if isinstance(content, str):
             history_chars += len(content)
         elif isinstance(content, list):
-            history_chars += len(json.dumps(content))
+            history_chars += len(json.dumps(content, default=str))
         if "args" in msg:
-            history_chars += len(json.dumps(msg["args"]))
+            history_chars += len(json.dumps(msg["args"], default=str))
         if "result" in msg:
-            history_chars += len(json.dumps(msg["result"]))
+            history_chars += len(json.dumps(msg["result"], default=str))
     total_chars = system_chars + tools_chars + history_chars
     # Estimación conservadora en español y estructuras JSON: 3.0 caracteres por token
     return max(60, int(math.ceil(total_chars / 3.0)))
@@ -1107,7 +1107,7 @@ def _call_agent_turn_gemini(
                         "role": "user",
                         "parts": [
                             {
-                                "text": f"Resultado de herramienta {m['name']}: {json.dumps(m['result'], ensure_ascii=False)}"
+                                "text": f"Resultado de herramienta {m['name']}: {json.dumps(m['result'], default=str, ensure_ascii=False)}"
                             }
                         ],
                     }
@@ -1205,7 +1205,7 @@ def _call_agent_turn_groq(
                     "role": "tool",
                     "tool_call_id": f"call_{idx - 1}",
                     "name": m["name"],
-                    "content": json.dumps(m["result"], ensure_ascii=False),
+                    "content": json.dumps(m["result"], default=str, ensure_ascii=False),
                 }
             )
 

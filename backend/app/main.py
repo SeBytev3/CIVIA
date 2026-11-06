@@ -43,22 +43,30 @@ from app.repository import (
     confirm_report_category,
     create_report,
     get_report_by_tracking_code,
+    get_report_events,
     get_report_raw,
     get_reports_summary_stats,
+    list_admin_notifications,
     list_reports,
+    mark_admin_notification_read,
+    mark_all_admin_notifications_read,
     row_to_public_dict,
     update_report_ai_analysis,
+    update_report_management,
     update_report_status,
 )
 from app.seed import get_known_synthetic_sha256_set
 from app.schemas import (
+    AdminNotificationsResponse,
     AgentQueryRequest,
     AgentQueryResponse,
     ApprovalDecisionRequest,
     FaultInjectionRequest,
     OperationStatusResponse,
     ReportConfirmRequest,
+    ReportEventPublic,
     ReportListResponse,
+    ReportManagementUpdateRequest,
     ReportPublicResponse,
     ReportStatusUpdateRequest,
 )
@@ -778,3 +786,88 @@ def admin_decide_approval(approval_id: UUID, payload: ApprovalDecisionRequest) -
 @app.post("/api/admin/seed", dependencies=[Depends(verify_admin_token)])
 def admin_seed_reports(force_reset: bool = Query(default=False)) -> dict[str, Any]:
     return seed_synthetic_reports(force_reset=force_reset)
+
+
+@app.get("/api/reports/{report_id}/events", response_model=list[ReportEventPublic])
+def get_report_events_by_id(report_id: UUID):
+    raw = get_report_raw(report_id, include_events=False)
+    if not raw:
+        raise CitizenValidationError(
+            "No se encontró el reporte solicitado.",
+            status_code=404,
+            code="REPORT_NOT_FOUND",
+        )
+    return get_report_events(report_id)
+
+
+@app.get("/api/reports/by-code/{tracking_code}/events", response_model=list[ReportEventPublic])
+def get_report_events_by_tracking_code(tracking_code: str):
+    raw = get_report_by_tracking_code(tracking_code, include_events=False)
+    if not raw:
+        raise CitizenValidationError(
+            "No se encontró ningún reporte con el código indicado.",
+            status_code=404,
+            code="REPORT_NOT_FOUND",
+        )
+    return get_report_events(raw["id"])
+
+
+@app.get(
+    "/api/admin/notifications",
+    response_model=AdminNotificationsResponse,
+    dependencies=[Depends(verify_admin_token)],
+)
+def admin_get_notifications(
+    limit: int = Query(default=50, ge=1, le=200),
+    unread_only: bool = Query(default=False),
+    filter_type: str = Query(default="ALL"),
+) -> dict[str, Any]:
+    return list_admin_notifications(limit=limit, unread_only=unread_only, filter_type=filter_type)
+
+
+@app.patch(
+    "/api/admin/notifications/{notification_id}/read",
+    dependencies=[Depends(verify_admin_token)],
+)
+def admin_mark_notification_as_read(notification_id: UUID) -> dict[str, Any]:
+    ok = mark_admin_notification_read(notification_id)
+    if not ok:
+        raise CitizenValidationError(
+            "No se encontró la notificación o ya fue procesada.",
+            status_code=404,
+            code="NOTIFICATION_NOT_FOUND",
+        )
+    return {"status": "ok", "id": str(notification_id)}
+
+
+@app.post(
+    "/api/admin/notifications/mark-all-read",
+    dependencies=[Depends(verify_admin_token)],
+)
+def admin_mark_all_notifications_as_read() -> dict[str, Any]:
+    count = mark_all_admin_notifications_read()
+    return {"status": "ok", "updated_count": count}
+
+
+@app.post(
+    "/api/admin/reports/{report_id}/management",
+    response_model=ReportPublicResponse,
+    dependencies=[Depends(verify_admin_token)],
+)
+def admin_update_report_management(
+    report_id: UUID,
+    payload: ReportManagementUpdateRequest,
+):
+    updated = update_report_management(
+        report_id,
+        assigned_to=payload.assigned_to,
+        admin_review_status=payload.admin_review_status,
+        public_note=payload.public_note,
+    )
+    if not updated:
+        raise CitizenValidationError(
+            "No se encontró el reporte indicado para gestión.",
+            status_code=404,
+            code="REPORT_NOT_FOUND",
+        )
+    return row_to_public_dict(updated)

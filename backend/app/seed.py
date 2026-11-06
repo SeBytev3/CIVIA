@@ -50,51 +50,27 @@ def get_synthetic_evidence_bytes(code: str, kind: str) -> tuple[bytes, str, str,
     return fallback_data, f"synthetic_{code_lower}_{sha_fallback}.png", "image/png", 1024, 768
 
 
-def generate_synthetic_evidence_png(kind: str, code: str, width: int = 240, height: int = 160) -> bytes:
-    """Genera una imagen PNG sintética identificada (>=240x160 px) para pruebas y demo."""
-    img = Image.new("RGB", (width, height), color=(235, 238, 242))
+def generate_synthetic_evidence_png(kind: str, code: str, width: int = 1024, height: int = 768) -> bytes:
+    """
+    Genera una tarjeta limpia y neutral con identificación ética de prueba (sin dibujos geométricos tipo Paint).
+    Utilizada exclusivamente como salvaguarda en memoria si un activo empaquetado no estuviera disponible.
+    """
+    kind_u = kind.upper()
+    img = Image.new("RGB", (width, height), color=(15, 23, 42))
     draw = ImageDraw.Draw(img)
 
-    kind_u = kind.upper()
-    if kind_u == "HUECO":
-        # Asfalto gris con líneas viales y cráter oscuro en la calzada
-        draw.rectangle([0, 30, width, height - 24], fill=(82, 86, 92))
-        draw.rectangle([15, 92, 55, 98], fill=(245, 208, 66))
-        draw.rectangle([185, 92, 225, 98], fill=(245, 208, 66))
-        draw.ellipse([70, 58, 170, 125], fill=(28, 30, 34), outline=(140, 140, 145), width=3)
-        draw.ellipse([86, 70, 152, 114], fill=(45, 38, 32))
-    elif kind_u == "BASURAS":
-        # Acera y acumulación de bolsas y residuos sólidos
-        draw.rectangle([0, 30, width, 100], fill=(195, 210, 225))
-        draw.rectangle([0, 100, width, height - 24], fill=(150, 155, 160))
-        draw.ellipse([45, 68, 110, 126], fill=(35, 42, 46))
-        draw.ellipse([95, 62, 165, 128], fill=(46, 115, 68))
-        draw.ellipse([140, 78, 198, 128], fill=(168, 118, 62))
-        draw.rectangle([75, 55, 145, 82], fill=(215, 75, 65))
-    elif kind_u == "TALA":
-        # Pradera verde con tocón de árbol cortado y tronco caído
-        draw.rectangle([0, 30, width, 85], fill=(185, 225, 245))
-        draw.rectangle([0, 85, width, height - 24], fill=(88, 158, 82))
-        draw.rectangle([50, 75, 92, 122], fill=(118, 76, 42))
-        draw.ellipse([48, 68, 94, 84], fill=(212, 175, 125), outline=(92, 58, 28), width=2)
-        draw.polygon([(105, 102), (205, 88), (212, 112), (110, 122)], fill=(110, 70, 38))
-        draw.ellipse([175, 68, 232, 122], fill=(48, 118, 52))
-    elif kind_u == "QUEMA":
-        # Ladera con llamas naranjas/rojas y columna de humo gris
-        draw.rectangle([0, 30, width, 95], fill=(140, 145, 155))
-        draw.polygon([(0, 136), (75, 78), (175, 92), (width, 136)], fill=(96, 82, 65))
-        draw.ellipse([85, 32, 185, 86], fill=(95, 98, 105))
-        draw.polygon([(70, 122), (98, 56), (124, 122)], fill=(235, 68, 36))
-        draw.polygon([(105, 124), (135, 48), (168, 124)], fill=(250, 142, 32))
-        draw.polygon([(115, 124), (135, 72), (154, 124)], fill=(255, 215, 55))
-    else:
-        draw.rectangle([0, 30, width, height - 24], fill=(120, 145, 175))
+    draw.rectangle([16, 16, width - 16, height - 16], outline=(51, 65, 85), width=2)
+    draw.rectangle([16, 16, width - 16, 96], fill=(30, 41, 59))
+    draw.text((40, 42), "CIVIA — SISTEMA DE REPORTES CIUDADANOS (CALI)", fill=(248, 250, 252))
 
-    # Franja superior e inferior identificando explícitamente que es dato sintético
-    draw.rectangle([0, 0, width, 28], fill=(22, 36, 56))
-    draw.text((8, 8), f"SINTETICO DEMO CIVIA - {kind_u}", fill=(255, 255, 255))
-    draw.rectangle([0, height - 24, width, height], fill=(38, 52, 72))
-    draw.text((8, height - 18), f"REF: {code} (NO PRIVADO)", fill=(220, 232, 245))
+    draw.text((40, 220), "MUESTRA DE EVALUACIÓN ACADÉMICA", fill=(148, 163, 184))
+    draw.text((40, 280), f"CATEGORÍA: {kind_u}", fill=(56, 189, 248))
+    draw.text((40, 340), f"RADICADO: {code}", fill=(248, 250, 252))
+    draw.text((40, 420), "Fotografía sintética de catálogo ético para demostración técnica.", fill=(148, 163, 184))
+    draw.text((40, 460), "Sin datos privados ni capturas ciudadanas reales.", fill=(100, 116, 139))
+
+    draw.rectangle([16, height - 80, width - 16, height - 16], fill=(30, 41, 59))
+    draw.text((40, height - 56), "SIMULACIÓN ÉTICA · PROCEDENCIA CERTIFICADA POR SERVIDOR", fill=(226, 232, 240))
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")

@@ -7,7 +7,8 @@
     "dev": "vite --host 0.0.0.0 --port 5173",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 0.0.0.0 --port 4173",
-    "test:e2e": "node ../scripts/test_e2e_final.cjs"
+    "test:e2e": "node ../scripts/test_e2e_final.cjs",
+    "test:ux": "node ../scripts/test_citizen_ux_suite.cjs"
   },
   "dependencies": {
     "leaflet": "^1.9.4",

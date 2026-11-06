@@ -155,16 +155,23 @@ docker compose exec -T api pytest -m "not live" -v
 
 *(Resultado verificado: **154 passed, 1 deselected, 0 failed**).*
 
-### 2. Pruebas E2E de Interfaz de Usuario (Playwright)
-Para ejecutar la suite de navegador de doble flujo (cámara real en vivo + muestra sintética oficial con persistencia):
+### 2. Pruebas E2E de Interfaz de Usuario y Experiencia Ciudadana (Playwright)
+La plataforma incluye dos suites completas de pruebas de interfaz en navegador:
 
-```powershell
-cd frontend
-npm install
-npm run test:e2e
-```
+- **Suite de cámara real y evidencias sintéticas (doble flujo):**
+  ```powershell
+  cd frontend
+  npm run test:e2e
+  ```
+  *(Resultado verificado: **2 passed (100%)**).*
 
-*(Resultado verificado: **2 passed (100%)**).*
+- **Suite de experiencia ciudadana, accesibilidad y trazabilidad:**
+  Valida flujo vertical sin lenguaje técnico, desplazamiento automático accesible, copiado de radicado, aviso obligatorio de correo no habilitado, línea de tiempo de eventos ciudadanos (`report_events`), cierre limpio de detalles y bandeja de notificaciones administrativas (`admin_notifications`) en Desktop (1366x768) y Móvil (390x844):
+  ```powershell
+  cd frontend
+  npm run test:ux
+  ```
+  *(Resultado verificado: **100% passed**).*
 
 ### 3. Suite de evaluación formal (6 casos dorados SQL + 15 consultas representativas)
 Para ejecutar la evaluación formal y regenerar `eval/resultados/reporte_evaluacion.json` y `eval/resultados/reporte_evaluacion.md`:

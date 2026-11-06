@@ -4,6 +4,41 @@
 
 ---
 
+## Refinamiento Integral UX/UI, Trazabilidad Ciudadana y Notificaciones Internas (2026-11-05)
+
+### 1. Transformación de Experiencia Ciudadana (Plataforma Humana y Empática)
+- **Eliminación de mensajes y jerga técnica:** Se removieron referencias a "PostgreSQL", "análisis multimodal" y códigos de error internos en las vistas ciudadanas. El proceso de guardado comunica: *"Estamos guardando tu reporte de forma segura y procesando la evidencia fotográfica..."*, con mensajes claros de confirmación y consulta.
+- **Flujo vertical post-envío fluido y accesible:** Tras el envío exitoso, la interfaz realiza scroll automático suave y transfiere el foco al encabezado del resultado. Se muestra de inmediato el radicado oficial en formato destacado grande (ej. `CIV-2026-...`), acompañado de un botón accesible *"Copiar radicado"* con feedback visual (*"✓ ¡Radicado copiado!"*).
+- **Aviso obligatorio sobre entrega externa:** Se incorporó en todas las vistas de resultado y seguimiento la advertencia institucional:
+  > *"Tu reporte fue registrado correctamente en CIVIA y estará disponible para seguimiento con tu número de radicado. Por ahora, el envío de notificaciones por correo electrónico a las entidades responsables no está habilitado. Tu reporte permanecerá guardado en la plataforma para su consulta y gestión."*
+  Indicando explícitamente: **"Correo a entidad: No enviado — servicio no habilitado"** (`external_delivery_status: 'NOT_ENABLED'`).
+- **Limpieza de formulario e inputs:** El formulario de creación se limpia automáticamente solo tras confirmarse el guardado exitoso en base de datos. El input de búsqueda de radicado en la pestaña de seguimiento inicia completamente vacío (con placeholder amigable) y con un estado vacío ilustrativo que orienta al usuario.
+- **Retiro de dibujos Paint y modo demo discreto:** Se eliminaron las figuras geométricas trazadas en canvas. Las muestras fotográficas y los ejemplos de prueba para evaluadores se ubicaron dentro de acordeones colapsables discretos (`<details className="civia-demo-details">`), preservando una interfaz limpia para el ciudadano común.
+- **Corrección de contrastes y accesibilidad:** Se reestructuraron las reglas CSS de `.civia-btn`, eliminando la regla global que oscurecía botones secundarios en `:hover` con texto oscuro. Se verificaron contrastes WCAG AA (>= 4.5:1), anillo de foco visible con `outline: 3px solid var(--civia-mint)` y touch targets accesibles.
+- **Cierre de detalle no destructivo:** El botón *"✕ Cerrar detalle"* oculta la tarjeta de inspección y restaura suavemente el foco accesible al elemento desencadenante sin alterar listas ni filtros.
+
+### 2. Trazabilidad Ciudadana y Notificaciones Internas
+- **Línea de tiempo de eventos (`report_events`):** Cada reporte registra cronológicamente sus hitos: registro (`REPORT_REGISTERED`), análisis automático por IA (`AI_ANALYSIS_COMPLETED`), confirmación ciudadana (`CITIZEN_CONFIRMED`), asignación institucional (`ASSIGNED_TO_DEPARTMENT`) y actualizaciones de estado, mostrados en una línea de tiempo accesible para el ciudadano.
+- **Bandeja de reportes recibidos en panel administrativo:** Sección protegida con `ADMIN_TOKEN` que muestra alertas automáticas por cada reporte ciudadano o sintético registrado, con contadores de no leídos (`unread_total`, `unread_citizen`, `unread_synthetic`), filtros por origen y estado, opción de marcar leída individual o masiva (sin alterar el estado del reporte), y panel para asignar dependencias responsables y notas públicas de avance.
+
+### 3. Matriz de Correspondencia de Skills Aplicadas
+| Hallazgo / Necesidad UX | Skill Pertinente | Instrucción Concreta Aplicada | Verificación Adversarial Realizada |
+| :--- | :--- | :--- | :--- |
+| Botones secundarios ilegibles en hover | `ui-a11y` | Especificidad en variantes de botón; contrastes WCAG AA >= 4.5:1 | Inspección de estilos computados en Playwright: fondo `#d6e8e5` sobre texto oscuro |
+| Desorientación tras envío de reporte | `ui-ux-pro-max` | ScrollIntoView accesible suave y foco en encabezado de resultado | Playwright verificó foco en `h3` con `tabIndex={-1}` y radicado destacado |
+| Comunicación técnica al ciudadano | `frontend-api-integration-patterns` | Reemplazar jerga de base de datos por lenguaje cálido y claro | Test E2E validó ausencia de "PostgreSQL" y "multimodal" en alertas |
+| Información de correo no enviado | `backend-security-coder` | Transparencia ética; desacoplar guardado de entrega externa | Verificado aviso obligatorio y badge `NOT_ENABLED` |
+| Trazabilidad de hitos y auditoría | `postgres-best-practices` | Migración 007 con tabla `report_events` y `admin_notifications` | 154 contratos herméticos pasando al 100% |
+| Fallo de serialización UUID/datetime | `systematic-debugging` | Diagnóstico de causa raíz; serialización limpia y `default=str` | Corrección RED -> GREEN en suite de 154 tests |
+
+### 4. Resultados de Pruebas y Aceptación
+- **Suite Hermética Backend Docker:** **154 PASSED**, 1 deselected, 0 failed (100% GREEN en 43.37s).
+- **Suite E2E de Refinamiento UX/UI (Playwright):** **100% PASSED** (`scripts/test_citizen_ux_suite.cjs`) en Desktop (1366x768) y Móvil (390x844).
+- **Suite E2E de Cámara Real y Sintéticos:** **2/2 PASSED** (`scripts/test_e2e_final.cjs`).
+- **Frontend Build (Vite + TypeScript):** `tsc -b && vite build` completado exitosamente sin errores.
+
+---
+
 ## Release Final Definitivo — Cierre de Integridad Inmutable, Bootstrap Autónomo y Validación de Clon Limpio (2026-11-05)
 
 ### 1. Almacenamiento Inmutable Content-Addressed y Cierre de Integridad Fotográfica

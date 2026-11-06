@@ -1,9 +1,12 @@
 import type {
+  
+  AdminNotificationsResponse,
   AgentQueryResponse,
   ObservabilityData,
   OperationStatusResponse,
   PendingApprovalItem,
   ReportCategory,
+  ReportEventItem,
   ReportItem,
   ReportListResponse,
   ReportSeverity,
@@ -206,4 +209,78 @@ export async function decideAdminApproval(
     },
     body: JSON.stringify({ approve, decided_by: decidedBy }),
   });
+}
+
+export async function fetchReportEvents(
+  identifier: string,
+  byTrackingCode: boolean = false
+): Promise<ReportEventItem[]> {
+  const url = byTrackingCode
+    ? `/api/reports/by-code/${encodeURIComponent(identifier.trim())}/events`
+    : `/api/reports/${encodeURIComponent(identifier.trim())}/events`;
+  return safeJsonFetch<ReportEventItem[]>(url);
+}
+
+export async function fetchAdminNotifications(
+  adminToken: string,
+  options?: { limit?: number; unread_only?: boolean; filter_type?: string }
+): Promise<AdminNotificationsResponse> {
+  const sp = new URLSearchParams();
+  if (options?.limit) sp.set('limit', String(options.limit));
+  if (options?.unread_only) sp.set('unread_only', 'true');
+  if (options?.filter_type) sp.set('filter_type', options.filter_type);
+  const qs = sp.toString();
+  return safeJsonFetch<AdminNotificationsResponse>(
+    `/api/admin/notifications${qs ? `?${qs}` : ''}`,
+    {
+      headers: { 'X-Admin-Token': adminToken.trim() },
+    }
+  );
+}
+
+export async function markAdminNotificationRead(
+  adminToken: string,
+  notificationId: string
+): Promise<void> {
+  await safeJsonFetch(
+    `/api/admin/notifications/${encodeURIComponent(notificationId)}/read`,
+    {
+      method: 'PATCH',
+      headers: { 'X-Admin-Token': adminToken.trim() },
+    }
+  );
+}
+
+export async function markAllAdminNotificationsRead(
+  adminToken: string
+): Promise<{ updated_count: number }> {
+  return safeJsonFetch<{ updated_count: number }>(
+    '/api/admin/notifications/mark-all-read',
+    {
+      method: 'POST',
+      headers: { 'X-Admin-Token': adminToken.trim() },
+    }
+  );
+}
+
+export async function updateReportManagement(
+  adminToken: string,
+  reportId: string,
+  payload: {
+    assigned_to?: string;
+    admin_review_status?: string;
+    public_note?: string;
+  }
+): Promise<ReportItem> {
+  return safeJsonFetch<ReportItem>(
+    `/api/admin/reports/${encodeURIComponent(reportId)}/management`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Admin-Token': adminToken.trim(),
+      },
+      body: JSON.stringify(payload),
+    }
+  );
 }

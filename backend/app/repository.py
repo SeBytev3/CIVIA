@@ -103,6 +103,26 @@ def row_to_public_dict(row: dict[str, Any]) -> dict[str, Any]:
         "distance_km": round(float(dist), 3) if dist is not None else None,
         "is_synthetic": bool(row.get("is_synthetic", False)),
         "citizen_edit_token": row.get("_citizen_edit_token"),
+        "assigned_to": row.get("assigned_to"),
+        "assigned_at": row.get("assigned_at"),
+        "external_delivery_status": row.get("external_delivery_status") or "NOT_ENABLED",
+        "external_delivery_channel": "Correo electrónico (No habilitado)",
+        "external_delivery_message": "Correo a entidad: No enviado — servicio no habilitado",
+        "admin_review_status": row.get("admin_review_status") or "PENDING_REVIEW",
+        "last_public_note": _sanitize_public_text(row.get("last_public_note")),
+        "events": [
+            {
+                "id": str(ev["id"]),
+                "report_id": str(ev["report_id"]),
+                "event_type": str(ev.get("event_type") or ""),
+                "previous_status": ev.get("previous_status"),
+                "new_status": ev.get("new_status"),
+                "public_message": _sanitize_public_text(ev.get("public_message")) or str(ev.get("public_message") or ""),
+                "actor_type": str(ev.get("actor_type") or "SYSTEM"),
+                "created_at": ev["created_at"].isoformat() if hasattr(ev["created_at"], "isoformat") else str(ev["created_at"]),
+            }
+            for ev in (row.get("events") or [])
+        ],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -364,6 +384,49 @@ def create_report(
                     ),
                 )
 
+            # Registrar evento inicial de trazabilidad ciudadana
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type, created_at)
+                    VALUES (gen_random_uuid(), %s, 'REPORT_REGISTERED', NULL, 'PENDING_ANALYSIS', 'Reporte recibido y registrado exitosamente en la plataforma CIVIA.', 'CITIZEN', %s)
+                    ON CONFLICT DO NOTHING;
+                    """,
+                    (row["id"], row["created_at"]),
+                )
+                # Registrar notificación interna para la administración
+                cur.execute(
+                    """
+                    INSERT INTO admin_notifications (id, report_id, title, message, is_read, is_synthetic, created_at)
+                    VALUES (gen_random_uuid(), %s, %s, %s, FALSE, %s, %s)
+                    ON CONFLICT (report_id) DO NOTHING;
+                    """,
+                    (
+                        row["id"],
+                        f"Nuevo reporte recibido: {row['tracking_code']}",
+                        f"Reporte ciudadano registrado en {row.get('neighborhood') or row.get('comuna') or 'Santiago de Cali'}. Pendiente de revisión.",
+                        bool(is_synthetic),
+                        row["created_at"],
+                    ),
+                )
+            except Exception:
+                pass
+
+            try:
+                cur.execute(
+                    """
+                    SELECT id, report_id, event_type, previous_status, new_status,
+                           public_message, actor_type, created_at
+                    FROM report_events
+                    WHERE report_id = %s
+                    ORDER BY created_at ASC;
+                    """,
+                    (row["id"],),
+                )
+                row["events"] = cur.fetchall()
+            except Exception:
+                row["events"] = []
+
             conn.commit()
             if _ON_REPORT_CREATED_HOOK is not None and not is_synthetic:
                 try:
@@ -375,25 +438,57 @@ def create_report(
             return row
 
 
-def get_report_raw(report_id: UUID | str) -> dict[str, Any] | None:
+def get_report_raw(report_id: UUID | str, include_events: bool = True) -> dict[str, Any] | None:
     try:
         rid = UUID(str(report_id))
-    except ValueError:
+    except (ValueError, TypeError):
         return None
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM reports WHERE id = %s;", (rid,))
-            return cur.fetchone()
+            row = cur.fetchone()
+            if row and include_events:
+                try:
+                    cur.execute(
+                        """
+                        SELECT id, report_id, event_type, previous_status, new_status,
+                               public_message, actor_type, created_at
+                        FROM report_events
+                        WHERE report_id = %s
+                        ORDER BY created_at ASC;
+                        """,
+                        (row["id"],),
+                    )
+                    row["events"] = cur.fetchall()
+                except Exception:
+                    row["events"] = []
+            return row
 
 
-def get_report_by_tracking_code(tracking_code: str) -> dict[str, Any] | None:
+def get_report_by_tracking_code(tracking_code: str, include_events: bool = True) -> dict[str, Any] | None:
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT * FROM reports WHERE UPPER(tracking_code) = UPPER(%s);",
                 (tracking_code.strip(),),
             )
-            return cur.fetchone()
+            row = cur.fetchone()
+            if row and include_events:
+                try:
+                    cur.execute(
+                        """
+                        SELECT id, report_id, event_type, previous_status, new_status,
+                               public_message, actor_type, created_at
+                        FROM report_events
+                        WHERE report_id = %s
+                        ORDER BY created_at ASC;
+                        """,
+                        (row["id"],),
+                    )
+                    row["events"] = cur.fetchall()
+                except Exception:
+                    row["events"] = []
+            return row
 
 
 def update_report_ai_analysis(
@@ -443,6 +538,36 @@ def update_report_ai_analysis(
                 ),
             )
             row = cur.fetchone()
+            if row is not None:
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type)
+                        VALUES (gen_random_uuid(), %s, 'AI_ANALYSIS_COMPLETED', 'PENDING_ANALYSIS', %s, %s, 'SYSTEM');
+                        """,
+                        (
+                            rid,
+                            row["status"],
+                            f"Análisis preliminar de IA completado. Categoría sugerida: {ai_category}.",
+                        ),
+                    )
+                except Exception:
+                    pass
+            try:
+                cur.execute(
+                    """
+                    SELECT id, report_id, event_type, previous_status, new_status,
+                           public_message, actor_type, created_at
+                    FROM report_events
+                    WHERE report_id = %s
+                    ORDER BY created_at ASC;
+                    """,
+                    (rid,),
+                )
+                row["events"] = cur.fetchall()
+            except Exception:
+                row["events"] = []
+
             conn.commit()
             return row
 
@@ -510,6 +635,22 @@ def confirm_report_category(
                 (final_category, final_severity, human_override_note, rid),
             )
             row = cur.fetchone()
+            if row is not None:
+                try:
+                    cur.execute(
+                        """
+                        INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type)
+                        VALUES (gen_random_uuid(), %s, 'CITIZEN_CONFIRMED', %s, %s, %s, 'CITIZEN');
+                        """,
+                        (
+                            rid,
+                            existing["status"],
+                            row["status"],
+                            f"Categoría confirmada por el ciudadano: {final_category}." + (f" Nota: {human_override_note}" if human_override_note else ""),
+                        ),
+                    )
+                except Exception:
+                    pass
             conn.commit()
             return row
 
@@ -587,6 +728,22 @@ def update_report_status(
                     json.dumps(result_payload),
                 ),
             )
+        if row is not None:
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type)
+                    VALUES (gen_random_uuid(), %s, 'STATUS_UPDATED', %s, %s, %s, 'ADMIN');
+                    """,
+                    (
+                        rid,
+                        existing["status"],
+                        status,
+                        f"Estado administrativo actualizado a: {status}." + (f" Motivo: {note}" if note else ""),
+                    ),
+                )
+            except Exception:
+                pass
         conn.commit()
         return row
 
@@ -732,3 +889,210 @@ def get_reports_summary_stats() -> dict[str, Any]:
                 "by_status": by_status,
                 "by_comuna": by_comuna,
             }
+
+
+def get_report_events(report_id: UUID | str) -> list[dict[str, Any]]:
+    try:
+        rid = UUID(str(report_id))
+    except (ValueError, TypeError):
+        return []
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    SELECT id, report_id, event_type, previous_status, new_status,
+                           public_message, actor_type, created_at
+                    FROM report_events
+                    WHERE report_id = %s
+                    ORDER BY created_at ASC;
+                    """,
+                    (rid,),
+                )
+                return cur.fetchall()
+            except Exception:
+                return []
+
+
+def list_admin_notifications(
+    limit: int = 50,
+    unread_only: bool = False,
+    filter_type: str = "ALL",
+) -> dict[str, Any]:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    SELECT
+                        COUNT(*) AS total,
+                        COUNT(*) FILTER (WHERE NOT is_read) AS unread_total,
+                        COUNT(*) FILTER (WHERE NOT is_read AND NOT is_synthetic) AS unread_citizen,
+                        COUNT(*) FILTER (WHERE NOT is_read AND is_synthetic) AS unread_synthetic
+                    FROM admin_notifications;
+                    """
+                )
+                counts = cur.fetchone() or {"total": 0, "unread_total": 0, "unread_citizen": 0, "unread_synthetic": 0}
+
+                query = """
+                    SELECT an.*,
+                           r.tracking_code,
+                           r.status,
+                           r.neighborhood,
+                           r.final_category,
+                           r.ai_category,
+                           r.photo_sha256
+                    FROM admin_notifications an
+                    JOIN reports r ON r.id = an.report_id
+                    WHERE 1=1
+                """
+                params = []
+                if unread_only:
+                    query += " AND NOT an.is_read"
+                if filter_type == "CITIZEN":
+                    query += " AND NOT an.is_synthetic"
+                elif filter_type == "SYNTHETIC":
+                    query += " AND an.is_synthetic"
+
+                query += " ORDER BY an.created_at DESC LIMIT %s;"
+                params.append(limit)
+
+                cur.execute(query, tuple(params))
+                items = []
+                for row in cur.fetchall():
+                    report_id = str(row["report_id"])
+                    photo_sha = row.get("photo_sha256")
+                    photo_url = f"/api/reports/{report_id}/photo?v={photo_sha[:16]}" if photo_sha else f"/api/reports/{report_id}/photo"
+                    items.append({
+                        "id": row["id"],
+                        "report_id": row["report_id"],
+                        "tracking_code": row["tracking_code"],
+                        "title": row["title"],
+                        "message": row["message"],
+                        "is_read": bool(row["is_read"]),
+                        "is_synthetic": bool(row["is_synthetic"]),
+                        "read_at": row.get("read_at"),
+                        "created_at": row["created_at"],
+                        "photo_url": photo_url,
+                        "category": row.get("final_category") or row.get("ai_category"),
+                        "status": row.get("status"),
+                        "neighborhood": row.get("neighborhood"),
+                    })
+
+                return {
+                    "total": int(counts["total"] or 0),
+                    "unread_total": int(counts["unread_total"] or 0),
+                    "unread_citizen": int(counts["unread_citizen"] or 0),
+                    "unread_synthetic": int(counts["unread_synthetic"] or 0),
+                    "items": items,
+                }
+            except Exception:
+                return {"total": 0, "unread_total": 0, "unread_citizen": 0, "unread_synthetic": 0, "items": []}
+
+
+def mark_admin_notification_read(notification_id: UUID | str) -> bool:
+    try:
+        nid = UUID(str(notification_id))
+    except (ValueError, TypeError):
+        return False
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    UPDATE admin_notifications
+                    SET is_read = TRUE, read_at = NOW()
+                    WHERE id = %s
+                    RETURNING id;
+                    """,
+                    (nid,),
+                )
+                res = cur.fetchone()
+                conn.commit()
+                return res is not None
+            except Exception:
+                return False
+
+
+def mark_all_admin_notifications_read() -> int:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            try:
+                cur.execute(
+                    """
+                    UPDATE admin_notifications
+                    SET is_read = TRUE, read_at = NOW()
+                    WHERE NOT is_read;
+                    """
+                )
+                count = cur.rowcount
+                conn.commit()
+                return count
+            except Exception:
+                return 0
+
+
+def update_report_management(
+    report_id: UUID | str,
+    *,
+    assigned_to: str | None = None,
+    admin_review_status: str | None = None,
+    public_note: str | None = None,
+) -> dict[str, Any] | None:
+    try:
+        rid = UUID(str(report_id))
+    except (ValueError, TypeError):
+        return None
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM reports WHERE id = %s FOR UPDATE;", (rid,))
+            existing = cur.fetchone()
+            if not existing:
+                return None
+
+            updates = []
+            params = []
+            if assigned_to is not None:
+                updates.append("assigned_to = %s, assigned_at = NOW()")
+                params.append(assigned_to.strip() or None)
+            if admin_review_status is not None:
+                updates.append("admin_review_status = %s")
+                params.append(admin_review_status)
+            if public_note is not None:
+                updates.append("last_public_note = %s")
+                params.append(public_note.strip() or None)
+
+            if updates:
+                updates.append("updated_at = NOW()")
+                params.append(rid)
+                query = f"UPDATE reports SET {', '.join(updates)} WHERE id = %s RETURNING *;"
+                cur.execute(query, tuple(params))
+                updated_row = cur.fetchone()
+
+                if assigned_to and assigned_to.strip():
+                    try:
+                        cur.execute(
+                            """
+                            INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type)
+                            VALUES (gen_random_uuid(), %s, 'ASSIGNED_TO_DEPARTMENT', %s, %s, %s, 'ADMIN');
+                            """,
+                            (rid, existing["status"], existing["status"], f"Reporte asignado internamente a: {assigned_to.strip()}."),
+                        )
+                    except Exception:
+                        pass
+
+                if public_note and public_note.strip():
+                    try:
+                        cur.execute(
+                            """
+                            INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type)
+                            VALUES (gen_random_uuid(), %s, 'PUBLIC_NOTE_ADDED', %s, %s, %s, 'ADMIN');
+                            """,
+                            (rid, existing["status"], existing["status"], f"Nota de seguimiento: {public_note.strip()}."),
+                        )
+                    except Exception:
+                        pass
+
+                conn.commit()
+                return updated_row
+            return existing

@@ -3,23 +3,31 @@ import {
   confirmReportClassification,
   decideAdminApproval,
   fetchAdminApprovals,
+  fetchAdminNotifications,
   fetchAdminObservability,
   fetchReportByCode,
+  
   fetchReports,
   fetchStats,
   getOperationStatus,
+  markAdminNotificationRead,
+  markAllAdminNotificationsRead,
   queryAgent,
   setAdminFaultInjection,
   submitCitizenReport,
   triggerReportAnalysis,
+  updateReportManagement,
 } from './api';
 import { CaliMap } from './components/CaliMap';
 import type {
+  AdminNotificationItem,
+  AdminNotificationsResponse,
   AgentQueryResponse,
   ObservabilityData,
   OperationStatusResponse,
   PendingApprovalItem,
   ReportCategory,
+  ReportEventItem,
   ReportItem,
   ReportSeverity,
   ReportStats,
@@ -144,7 +152,7 @@ export function App() {
   const recordingTimerRef = useRef<number | null>(null);
 
   // Seguimiento por radicado
-  const [trackingInput, setTrackingInput] = useState<string>('CIV-2026-DEMO0001');
+  const [trackingInput, setTrackingInput] = useState<string>('');
   const [trackedReport, setTrackedReport] = useState<ReportItem | null>(null);
   const [trackingBusy, setTrackingBusy] = useState<boolean>(false);
 
@@ -185,6 +193,21 @@ export function App() {
   const [obsData, setObsData] = useState<ObservabilityData | null>(null);
   const [approvals, setApprovals] = useState<PendingApprovalItem[]>([]);
   const [adminBusy, setAdminBusy] = useState<boolean>(false);
+
+  // Notificaciones internas y gestión administrativa
+  const [adminNotifs, setAdminNotifs] = useState<AdminNotificationsResponse | null>(null);
+  const [notifFilter, setNotifFilter] = useState<string>('ALL');
+  const [notifUnreadOnly, setNotifUnreadOnly] = useState<boolean>(false);
+  const [managementAssignedTo, setManagementAssignedTo] = useState<string>('');
+  const [managementReviewStatus, setManagementReviewStatus] = useState<string>('PENDING_REVIEW');
+  const [managementPublicNote, setManagementPublicNote] = useState<string>('');
+  const [savingManagement, setSavingManagement] = useState<boolean>(false);
+
+  // Estado post-envío y accesibilidad
+  const [newlyCreatedReport, setNewlyCreatedReport] = useState<ReportItem | null>(null);
+  const [copiedRadicado, setCopiedRadicado] = useState<boolean>(false);
+  const successHeadingRef = useRef<HTMLHeadingElement | null>(null);
+  const lastFocusedElementRef = useRef<HTMLElement | null>(null);
 
   const loadStatsAndReports = useCallback(async () => {
     setLoadingReports(true);
@@ -228,11 +251,107 @@ export function App() {
     void loadStatsAndReports();
   }, [loadStatsAndReports]);
 
-  const openReportInspection = (rep: ReportItem) => {
+  const handleCopyTrackingCode = async (code: string) => {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        await navigator.clipboard.writeText(code);
+      } else {
+        const ta = document.createElement('textarea');
+        ta.value = code;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+      }
+      setCopiedRadicado(true);
+      setTimeout(() => setCopiedRadicado(false), 2500);
+    } catch {
+      setCopiedRadicado(false);
+    }
+  };
+
+  const openReportInspection = (rep: ReportItem, triggerEl?: HTMLElement | null) => {
+    lastFocusedElementRef.current = triggerEl || (document.activeElement as HTMLElement | null);
     setSelectedReport(rep);
     setConfirmCat((rep.final_category || rep.ai_category || 'HUECO') as ReportCategory);
     setConfirmSev((rep.final_severity || rep.ai_severity || 'MEDIA') as ReportSeverity);
     setConfirmNote(rep.human_override_note || '');
+    setManagementAssignedTo(rep.assigned_to || '');
+    setManagementReviewStatus(rep.admin_review_status || 'PENDING_REVIEW');
+    setManagementPublicNote('');
+  };
+
+  const handleCloseInspection = () => {
+    setSelectedReport(null);
+    setTimeout(() => {
+      if (lastFocusedElementRef.current && typeof lastFocusedElementRef.current.focus === 'function') {
+        lastFocusedElementRef.current.focus();
+      }
+    }, 50);
+  };
+
+  const renderExternalDeliveryNotice = () => (
+    <div className="civia-notice-card" role="region" aria-label="Información sobre notificaciones">
+      <div className="civia-notice-title">
+        <span aria-hidden="true">ℹ️</span> Información sobre notificaciones y entidades responsables
+      </div>
+      <p className="civia-notice-body">
+        Tu reporte fue registrado correctamente en CIVIA y estará disponible para seguimiento con tu número de radicado. Por ahora, el envío de notificaciones por correo electrónico a las entidades responsables no está habilitado. Tu reporte permanecerá guardado en la plataforma para su consulta y gestión.
+      </p>
+      <div className="civia-notice-status">
+        <strong>Estado de entrega externa:</strong> Correo a entidad: No enviado — servicio no habilitado
+      </div>
+    </div>
+  );
+
+  const renderEventsTimeline = (events?: ReportEventItem[]) => {
+    if (!events || events.length === 0) {
+      return (
+        <div style={{ fontSize: '0.85rem', color: 'var(--civia-muted)', padding: '0.4rem 0' }}>
+          Reporte registrado en la plataforma. Pendiente de siguientes actuaciones operativas.
+        </div>
+      );
+    }
+
+    const formatEventDate = (dtStr: string) => {
+      try {
+        const d = new Date(dtStr);
+        return d.toLocaleString('es-CO', {
+          dateStyle: 'short',
+          timeStyle: 'short',
+        });
+      } catch {
+        return dtStr;
+      }
+    };
+
+    const getActorLabel = (actor: string) => {
+      if (actor === 'CITIZEN') return 'Ciudadano';
+      if (actor === 'ADMIN') return 'Operador CIVIA';
+      return 'Sistema IA';
+    };
+
+    return (
+      <div className="civia-events-timeline" role="list" aria-label="Historial de eventos del reporte">
+        {events.map((ev) => (
+          <div key={ev.id} className="civia-event-row" role="listitem">
+            <div
+              className={`civia-event-node ${ev.actor_type.toLowerCase()}`}
+              aria-hidden="true"
+            />
+            <div className="civia-event-content">
+              <div className="civia-event-meta">
+                <strong>{getActorLabel(ev.actor_type)}</strong>
+                <time dateTime={ev.created_at}>{formatEventDate(ev.created_at)}</time>
+              </div>
+              <p className="civia-event-msg">{ev.public_message}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    );
   };
 
   const handleCaptureBrowserGps = () => {
@@ -483,7 +602,7 @@ export function App() {
 
     setSubmittingReport(true);
     setSubmitLifecycleStep(
-      'Validando archivo e insertando reporte en PostgreSQL; ejecutando análisis multimodal...'
+      'Estamos guardando tu reporte de forma segura y procesando la evidencia fotográfica...'
     );
 
     try {
@@ -508,17 +627,37 @@ export function App() {
           // Ignorar si sessionStorage no está disponible
         }
       }
+      setNewlyCreatedReport(created);
       setTrackedReport(created);
       setTrackingInput(created.tracking_code);
       setConfirmCat((created.final_category || created.ai_category || 'HUECO') as ReportCategory);
       setConfirmSev((created.final_severity || created.ai_severity || 'MEDIA') as ReportSeverity);
       setConfirmNote(created.human_override_note || '');
       setSelectedReport(null);
+
+      // Limpiar formulario tras éxito confirmado
+      handleDiscardPhoto();
+      setFormDescription('');
+      setFormTitle('');
+      setFormNeighborhood('');
+      setFormAddress('');
+      setFormAudio(null);
+      stopCamera();
+      stopAudioRecording();
+
       setActiveTab('seguimiento');
       setGlobalSuccess(
-        `Reporte registrado con código ${created.tracking_code}. ${created.status_message}`
+        `¡Tu reporte fue recibido exitosamente con radicado ${created.tracking_code}!`
       );
       await loadStatsAndReports();
+
+      // Scroll accesible y foco al encabezado del resultado
+      setTimeout(() => {
+        if (successHeadingRef.current) {
+          successHeadingRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          successHeadingRef.current.focus();
+        }
+      }, 100);
     } catch (err) {
       setGlobalError(err instanceof Error ? err.message : 'No fue posible registrar el reporte.');
     } finally {
@@ -704,21 +843,70 @@ export function App() {
   };
 
   const loadAdminPanel = useCallback(async () => {
+    if (!adminToken.trim()) return;
     setAdminBusy(true);
     setGlobalError(null);
     try {
-      const [obs, appList] = await Promise.all([
+      const [obs, appList, notifs] = await Promise.all([
         fetchAdminObservability(adminToken),
         fetchAdminApprovals(adminToken),
+        fetchAdminNotifications(adminToken, {
+          filter_type: notifFilter,
+          unread_only: notifUnreadOnly,
+          limit: 50,
+        }),
       ]);
       setObsData(obs);
       setApprovals(appList.items);
+      setAdminNotifs(notifs);
     } catch (err) {
       setGlobalError(err instanceof Error ? err.message : 'Token administrativo inválido.');
     } finally {
       setAdminBusy(false);
     }
-  }, [adminToken]);
+  }, [adminToken, notifFilter, notifUnreadOnly]);
+
+  const handleMarkNotifRead = async (notificationId: string) => {
+    try {
+      await markAdminNotificationRead(adminToken, notificationId);
+      await loadAdminPanel();
+    } catch (err) {
+      setGlobalError(err instanceof Error ? err.message : 'No se pudo actualizar la notificación.');
+    }
+  };
+
+  const handleMarkAllNotifsRead = async () => {
+    try {
+      const res = await markAllAdminNotificationsRead(adminToken);
+      setGlobalSuccess(`Se marcaron ${res.updated_count} notificaciones como leídas.`);
+      await loadAdminPanel();
+    } catch (err) {
+      setGlobalError(err instanceof Error ? err.message : 'No se pudo completar la operación.');
+    }
+  };
+
+  const handleSaveManagement = async (reportId: string) => {
+    setSavingManagement(true);
+    try {
+      const updated = await updateReportManagement(adminToken, reportId, {
+        assigned_to: managementAssignedTo || undefined,
+        admin_review_status: managementReviewStatus || undefined,
+        public_note: managementPublicNote || undefined,
+      });
+      setSelectedReport(updated);
+      if (trackedReport?.id === updated.id) {
+        setTrackedReport(updated);
+      }
+      setGlobalSuccess(`Gestión actualizada correctamente para el reporte ${updated.tracking_code}.`);
+      setManagementPublicNote('');
+      await loadAdminPanel();
+      await loadStatsAndReports();
+    } catch (err) {
+      setGlobalError(err instanceof Error ? err.message : 'Error al guardar la gestión administrativa.');
+    } finally {
+      setSavingManagement(false);
+    }
+  };
 
   useEffect(() => {
     if (activeTab === 'admin' && adminToken.trim().length > 0) {
@@ -789,12 +977,21 @@ export function App() {
     );
   };
 
-  const renderInspectionPanel = (rep: ReportItem, onClose: () => void) => (
+  const renderInspectionPanel = (rep: ReportItem, _onClose?: () => void) => (
     <div className="civia-panel" style={{ borderLeft: '5px solid var(--civia-teal)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', flexWrap: 'wrap' }}>
         <div>
           <div className="civia-badge-row" style={{ marginBottom: '0.35rem' }}>
-            <span className="civia-badge status">{rep.tracking_code}</span>
+            <span className="civia-badge status" style={{ fontFamily: 'monospace', fontWeight: 800 }}>{rep.tracking_code}</span>
+            <button
+              type="button"
+              className="civia-btn secondary sm"
+              style={{ minHeight: '26px', padding: '0.15rem 0.5rem', fontSize: '0.75rem' }}
+              onClick={() => void handleCopyTrackingCode(rep.tracking_code)}
+              aria-label="Copiar número de radicado al portapapeles"
+            >
+              {copiedRadicado ? '✓ ¡Copiado!' : '📋 Copiar'}
+            </button>
             <span className="civia-badge status">{STATUS_LABELS[rep.status] || rep.status}</span>
             {rep.is_synthetic && (
               <span className="civia-badge synthetic">DATO SINTÉTICO DEMO (NO PRIVADO)</span>
@@ -805,9 +1002,9 @@ export function App() {
         <button
           type="button"
           className="civia-btn secondary"
-          onClick={onClose}
+          onClick={handleCloseInspection}
         >
-          Cerrar detalle
+          ✕ Cerrar detalle
         </button>
       </div>
 
@@ -816,6 +1013,8 @@ export function App() {
       <p style={{ margin: '0.5rem 0', color: 'var(--civia-muted)', fontWeight: 600 }}>
         {rep.status_message}
       </p>
+
+      {renderExternalDeliveryNotice()}
 
       <div className="civia-two-col" style={{ marginTop: '1rem' }}>
         <div>
@@ -966,7 +1165,7 @@ export function App() {
               onClick={() => void handleConfirmClassification(rep)}
             >
               {confirmBusy
-                ? 'Guardando confirmación en PostgreSQL...'
+                ? 'Guardando tu confirmación...'
                 : rep.human_confirmed
                 ? 'Actualizar clasificación confirmada'
                 : 'Confirmar clasificación ciudadana'}
@@ -974,6 +1173,68 @@ export function App() {
           </div>
         </div>
       </div>
+
+      {/* Historial y Trazabilidad Ciudadana */}
+      <div style={{ marginTop: '1.25rem', borderTop: '1px solid var(--civia-border)', paddingTop: '1rem' }}>
+        <h3 style={{ margin: '0 0 0.5rem 0', fontSize: '1.05rem', color: 'var(--civia-teal-dark)' }}>
+          Historial y Trazabilidad Ciudadana
+        </h3>
+        {renderEventsTimeline(rep.events)}
+      </div>
+
+      {/* Panel de Gestión Interna si es Administrador */}
+      {adminToken.trim().length > 0 && (
+        <div style={{ marginTop: '1.25rem', background: '#f0f7f6', border: '1.5px solid #a3cac4', borderRadius: '10px', padding: '1.1rem' }}>
+          <h3 style={{ margin: '0 0 0.4rem 0', fontSize: '1rem', color: 'var(--civia-teal-dark)' }}>
+            🛠️ Gestión Interna y Asignación Operativa (Exclusivo Administrador)
+          </h3>
+          <p style={{ margin: '0 0 0.75rem 0', fontSize: '0.84rem', color: 'var(--civia-muted)' }}>
+            Asigne la entidad responsable y agregue notas públicas de avance que serán visibles en la línea de tiempo del ciudadano.
+          </p>
+          <div className="civia-filter-bar" style={{ gridTemplateColumns: '1fr 1fr', marginBottom: '0.65rem' }}>
+            <div className="civia-field">
+              <label htmlFor="mgmt-assigned">Entidad o dependencia asignada</label>
+              <input
+                id="mgmt-assigned"
+                type="text"
+                placeholder="Ej. Secretaría de Infraestructura, Dagma, Uaesp"
+                value={managementAssignedTo}
+                onChange={(e) => setManagementAssignedTo(e.target.value)}
+              />
+            </div>
+            <div className="civia-field">
+              <label htmlFor="mgmt-status">Estado de revisión interna</label>
+              <select
+                id="mgmt-status"
+                value={managementReviewStatus}
+                onChange={(e) => setManagementReviewStatus(e.target.value)}
+              >
+                <option value="PENDING_REVIEW">Pendiente de revisión</option>
+                <option value="IN_REVIEW">En evaluación técnica</option>
+                <option value="REVIEWED">Revisado y priorizado</option>
+              </select>
+            </div>
+          </div>
+          <div className="civia-field" style={{ marginBottom: '0.75rem' }}>
+            <label htmlFor="mgmt-note">Nota pública para el ciudadano (se registra en la trazabilidad)</label>
+            <input
+              id="mgmt-note"
+              type="text"
+              placeholder="Ej. Cuadrilla técnica programada para inspección en terreno este jueves..."
+              value={managementPublicNote}
+              onChange={(e) => setManagementPublicNote(e.target.value)}
+            />
+          </div>
+          <button
+            type="button"
+            className="civia-btn accent sm"
+            disabled={savingManagement}
+            onClick={() => void handleSaveManagement(rep.id)}
+          >
+            {savingManagement ? 'Guardando gestión...' : 'Guardar Asignación y Publicar Nota'}
+          </button>
+        </div>
+      )}
     </div>
   );
 
@@ -1026,6 +1287,11 @@ export function App() {
               onClick={() => setActiveTab('admin')}
             >
               Observabilidad Admin
+              {adminNotifs && adminNotifs.unread_total > 0 && (
+                <span className="civia-notif-count-badge">
+                  {adminNotifs.unread_total}
+                </span>
+              )}
             </button>
           </nav>
         </div>
@@ -1561,53 +1827,38 @@ export function App() {
                           />
                         </div>
 
-                        {/* Muestras sintéticas para prueba académica */}
-                        <div
-                          style={{
-                            background: '#ffffff',
-                            border: '1px solid #dce4e2',
-                            borderRadius: '8px',
-                            padding: '0.75rem',
-                          }}
-                        >
-                          <div
-                            style={{
-                              fontSize: '0.82rem',
-                              fontWeight: 700,
-                              color: 'var(--civia-teal-dark)',
-                              marginBottom: '0.45rem',
-                            }}
-                          >
-                            🔬 O seleccionar muestra sintética de prueba para demostración (Cali):
+                        {/* Muestras sintéticas discretas para prueba académica */}
+                        <details className="civia-demo-details">
+                          <summary>🔬 Opciones de prueba con muestras sintéticas (Solo evaluación académica)</summary>
+                          <div style={{ marginTop: '0.6rem' }}>
+                            <div
+                              style={{
+                                display: 'flex',
+                                flexWrap: 'wrap',
+                                gap: '0.4rem',
+                              }}
+                            >
+                              {(
+                                [
+                                  ['HUECO', '🕳️ Hueco vial'],
+                                  ['BASURAS', '🗑️ Basuras'],
+                                  ['TALA', '🌳 Tala / Ramas'],
+                                  ['QUEMA', '🔥 Quema'],
+                                  ['OTRO', '⚡ Poste / Cables'],
+                                ] as const
+                              ).map(([cat, label]) => (
+                                <button
+                                  key={cat}
+                                  type="button"
+                                  className="civia-btn secondary sm"
+                                  onClick={() => void handleSelectSyntheticSample(cat)}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
                           </div>
-                          <div
-                            style={{
-                              display: 'flex',
-                              flexWrap: 'wrap',
-                              gap: '0.4rem',
-                            }}
-                          >
-                            {(
-                              [
-                                ['HUECO', '🕳️ Hueco vial'],
-                                ['BASURAS', '🗑️ Basuras'],
-                                ['TALA', '🌳 Tala / Ramas'],
-                                ['QUEMA', '🔥 Quema'],
-                                ['OTRO', '⚡ Poste / Cables'],
-                              ] as const
-                            ).map(([cat, label]) => (
-                              <button
-                                key={cat}
-                                type="button"
-                                className="civia-btn secondary"
-                                style={{ fontSize: '0.78rem', padding: '0.35rem 0.6rem' }}
-                                onClick={() => void handleSelectSyntheticSample(cat)}
-                              >
-                                {label}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
+                        </details>
                       </>
                     )}
                   </div>
@@ -1746,14 +1997,78 @@ export function App() {
         {/* PESTAÑA 3: SEGUIMIENTO POR RADICADO */}
         {activeTab === 'seguimiento' && (
           <section className="civia-panel">
+            {newlyCreatedReport && (
+              <div className="civia-success-banner" role="region" aria-label="Resultado de registro de reporte">
+                <h3
+                  ref={successHeadingRef}
+                  tabIndex={-1}
+                  style={{
+                    margin: '0 0 0.5rem 0',
+                    color: '#064e3b',
+                    fontSize: '1.3rem',
+                    outline: 'none',
+                  }}
+                >
+                  🎉 ¡Tu reporte ha sido registrado exitosamente!
+                </h3>
+                <p style={{ margin: '0 0 0.85rem 0', color: '#065f46', fontSize: '0.92rem' }}>
+                  Guarda tu número de radicado para hacer seguimiento o presentar solicitudes adicionales sobre este incidente.
+                </p>
+
+                <div className="civia-success-code-box">
+                  <div>
+                    <div style={{ fontSize: '0.78rem', textTransform: 'uppercase', color: '#047857', fontWeight: 700 }}>
+                      Número de Radicado Oficial
+                    </div>
+                    <div className="civia-tracking-display">
+                      {newlyCreatedReport.tracking_code}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="civia-btn secondary sm"
+                    onClick={() => void handleCopyTrackingCode(newlyCreatedReport.tracking_code)}
+                    aria-label="Copiar número de radicado al portapapeles"
+                  >
+                    {copiedRadicado ? '✓ ¡Radicado copiado!' : '📋 Copiar radicado'}
+                  </button>
+                </div>
+
+                {renderExternalDeliveryNotice()}
+
+                <div style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap', marginTop: '1rem' }}>
+                  <button
+                    type="button"
+                    className="civia-btn secondary"
+                    onClick={() => {
+                      setNewlyCreatedReport(null);
+                      setActiveTab('reportar');
+                    }}
+                  >
+                    ➕ Registrar otro reporte
+                  </button>
+                  <button
+                    type="button"
+                    className="civia-btn secondary"
+                    onClick={() => {
+                      setNewlyCreatedReport(null);
+                      setActiveTab('explorar');
+                    }}
+                  >
+                    🗺️ Volver al mapa de reportes
+                  </button>
+                </div>
+              </div>
+            )}
+
             <h2>Seguimiento de Reporte mediante Código de Radicado</h2>
             <p style={{ color: 'var(--civia-muted)', marginTop: 0 }}>
-              Consulte el estado real en PostgreSQL, el diagnóstico sugerido por IA y la confirmación ciudadana ingresando su código `CIV-2026-...`.
+              Consulte el estado de atención, el diagnóstico y el historial de trazabilidad de su reporte ingresando su número de radicado.
             </p>
 
             <form
               onSubmit={(e) => void handleSearchTrackingCode(e)}
-              style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap', marginBottom: '1rem' }}
+              style={{ display: 'flex', gap: '0.65rem', flexWrap: 'wrap', marginBottom: '1.25rem' }}
             >
               <input
                 type="text"
@@ -1761,36 +2076,56 @@ export function App() {
                 value={trackingInput}
                 onChange={(e) => setTrackingInput(e.target.value)}
                 placeholder="Ej. CIV-2026-DEMO0001"
-                style={{ padding: '0.65rem 0.85rem', borderRadius: '8px', border: '1px solid #bfd0cd', minWidth: '250px' }}
+                style={{ padding: '0.65rem 0.85rem', borderRadius: '8px', border: '1px solid #bfd0cd', minWidth: '260px' }}
               />
               <button type="submit" className="civia-btn" disabled={trackingBusy}>
-                {trackingBusy ? 'Consultando BD...' : 'Consultar Radicado'}
+                {trackingBusy ? 'Consultando reporte...' : 'Consultar Radicado'}
               </button>
             </form>
 
-            <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
-              <span style={{ fontSize: '0.82rem', color: 'var(--civia-muted)', alignSelf: 'center' }}>
-                Radicados sintéticos de prueba rápida:
-              </span>
-              {['CIV-2026-DEMO0001', 'CIV-2026-DEMO0002', 'CIV-2026-DEMO0004', 'CIV-2026-DEMO0008'].map(
-                (code) => (
-                  <button
-                    key={code}
-                    type="button"
-                    className="civia-btn secondary"
-                    style={{ padding: '0.35rem 0.7rem', fontSize: '0.8rem' }}
-                    onClick={() => {
-                      setTrackingInput(code);
-                      void handleSearchTrackingCode(undefined, code);
-                    }}
-                  >
-                    {code}
-                  </button>
-                )
-              )}
-            </div>
+            <details className="civia-demo-details" style={{ marginBottom: '1.25rem' }}>
+              <summary>🔬 Radicados de prueba para evaluación (Demostración académica)</summary>
+              <div style={{ display: 'flex', gap: '0.45rem', flexWrap: 'wrap', marginTop: '0.6rem' }}>
+                {['CIV-2026-DEMO0001', 'CIV-2026-DEMO0002', 'CIV-2026-DEMO0004', 'CIV-2026-DEMO0008'].map(
+                  (code) => (
+                    <button
+                      key={code}
+                      type="button"
+                      className="civia-btn secondary sm"
+                      onClick={() => {
+                        setTrackingInput(code);
+                        void handleSearchTrackingCode(undefined, code);
+                      }}
+                    >
+                      {code}
+                    </button>
+                  )
+                )}
+              </div>
+            </details>
 
-            {trackedReport && renderInspectionPanel(trackedReport, () => setTrackedReport(null))}
+            {trackedReport ? (
+              renderInspectionPanel(trackedReport, () => setTrackedReport(null))
+            ) : (
+              <div
+                style={{
+                  background: '#f9fcfb',
+                  border: '1px dashed #c0d5d0',
+                  borderRadius: '8px',
+                  padding: '2.5rem 1.5rem',
+                  textAlign: 'center',
+                  color: 'var(--civia-muted)',
+                }}
+              >
+                <div style={{ fontSize: '2.2rem', marginBottom: '0.5rem' }}>🔍</div>
+                <h3 style={{ margin: '0 0 0.35rem 0', color: 'var(--civia-teal-dark)' }}>
+                  Consulta el estado y avance de tu reporte
+                </h3>
+                <p style={{ margin: 0, fontSize: '0.9rem', maxWidth: '520px', marginLeft: 'auto', marginRight: 'auto' }}>
+                  Ingresa tu número de radicado en el campo superior para revisar los datos registrados, la clasificación confirmada y los hitos de gestión.
+                </p>
+              </div>
+            )}
           </section>
         )}
 
@@ -1992,6 +2327,123 @@ export function App() {
 
             {obsData && (
               <>
+                {/* BANDEJA DE REPORTES RECIBIDOS (NOTIFICACIONES INTERNAS) */}
+                <div style={{ background: '#f5f9f8', padding: '1.1rem', borderRadius: '10px', border: '1px solid var(--civia-border)', marginBottom: '1.25rem' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.65rem', marginBottom: '0.75rem' }}>
+                    <div>
+                      <h3 style={{ margin: 0, fontSize: '1.05rem', color: 'var(--civia-teal-dark)' }}>
+                        📬 Bandeja de Reportes Recibidos (Notificaciones Internas)
+                      </h3>
+                      <p style={{ margin: '0.2rem 0 0', fontSize: '0.82rem', color: 'var(--civia-muted)' }}>
+                        Alertas generadas automáticamente al registrarse reportes en CIVIA. No modifica el estado de los reportes.
+                      </p>
+                    </div>
+                    {adminNotifs && adminNotifs.unread_total > 0 && (
+                      <button
+                        type="button"
+                        className="civia-btn secondary sm"
+                        onClick={() => void handleMarkAllNotifsRead()}
+                      >
+                        ✓ Marcar todas como leídas
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Filtros y contadores */}
+                  <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap', alignItems: 'center', marginBottom: '0.85rem' }}>
+                    <span style={{ fontSize: '0.82rem', fontWeight: 600 }}>Filtrar:</span>
+                    {[
+                      { key: 'ALL', label: `Todos (${adminNotifs?.total || 0})` },
+                      { key: 'CITIZEN', label: `Ciudadanos (${adminNotifs ? (adminNotifs.total - (adminNotifs.unread_synthetic || 0)) : 0})` },
+                      { key: 'SYNTHETIC', label: 'Sintéticos Demo' },
+                    ].map((f) => (
+                      <button
+                        key={f.key}
+                        type="button"
+                        className={`civia-btn sm ${notifFilter === f.key ? 'accent' : 'secondary'}`}
+                        onClick={() => setNotifFilter(f.key)}
+                      >
+                        {f.label}
+                      </button>
+                    ))}
+                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.35rem', fontSize: '0.82rem', marginLeft: '0.5rem', cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={notifUnreadOnly}
+                        onChange={(e) => setNotifUnreadOnly(e.target.checked)}
+                      />
+                      Solo no leídas ({adminNotifs?.unread_total || 0})
+                    </label>
+                  </div>
+
+                  {/* Lista de notificaciones */}
+                  {adminNotifs && adminNotifs.items.length > 0 ? (
+                    <div className="civia-notif-grid">
+                      {adminNotifs.items.map((nt: AdminNotificationItem) => (
+                        <div
+                          key={nt.id}
+                          className={`civia-notif-item ${!nt.is_read ? 'unread' : ''}`}
+                        >
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flex: 1, minWidth: '240px' }}>
+                            {nt.photo_url && (
+                              <img
+                                src={nt.photo_url}
+                                alt="Evidencia"
+                                style={{ width: '48px', height: '48px', borderRadius: '6px', objectFit: 'cover', background: '#e2e8f0' }}
+                              />
+                            )}
+                            <div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '0.45rem', flexWrap: 'wrap' }}>
+                                <strong style={{ fontSize: '0.88rem' }}>{nt.tracking_code}</strong>
+                                {nt.category && <span className={`civia-badge cat-${nt.category}`}>{nt.category}</span>}
+                                {nt.is_synthetic && <span className="civia-badge synthetic">Sintético</span>}
+                                {!nt.is_read && (
+                                  <span style={{ fontSize: '0.72rem', background: 'var(--civia-amber)', color: '#fff', padding: '0.1rem 0.4rem', borderRadius: '4px', fontWeight: 700 }}>
+                                    NUEVO
+                                  </span>
+                                )}
+                              </div>
+                              <p style={{ margin: '0.2rem 0 0', fontSize: '0.82rem', color: '#334155' }}>
+                                {nt.message}
+                              </p>
+                              <div style={{ fontSize: '0.75rem', color: 'var(--civia-muted)', marginTop: '0.2rem' }}>
+                                Recibido: {new Date(nt.created_at).toLocaleString('es-CO')}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                            {!nt.is_read && (
+                              <button
+                                type="button"
+                                className="civia-btn secondary sm"
+                                onClick={() => void handleMarkNotifRead(nt.id)}
+                              >
+                                Marcar leída
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              className="civia-btn sm"
+                              onClick={async () => {
+                                const rep = await fetchReportByCode(nt.tracking_code);
+                                openReportInspection(rep);
+                                setActiveTab('explorar');
+                              }}
+                            >
+                              Ver reporte y gestionar
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: '0.85rem', color: 'var(--civia-muted)', textAlign: 'center', padding: '1rem' }}>
+                      No hay notificaciones con el filtro seleccionado.
+                    </div>
+                  )}
+                </div>
+
                 <div style={{ background: '#f5f9f8', padding: '1rem', borderRadius: '10px', border: '1px solid var(--civia-border)', marginBottom: '1rem' }}>
                   <h3 style={{ marginTop: 0, fontSize: '1rem' }}>
                     Simulador de Fallas Controladas (`FALLA_FORZADA` actual: {obsData.effective_fault_mode})

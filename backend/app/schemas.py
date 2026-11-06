@@ -55,6 +55,17 @@ class ReportStatusUpdateRequest(BaseModel):
     note: str | None = Field(default=None, max_length=500)
 
 
+
+class ReportEventPublic(BaseModel):
+    id: UUID
+    report_id: UUID
+    event_type: str
+    previous_status: str | None = None
+    new_status: str | None = None
+    public_message: str
+    actor_type: str = "SYSTEM"
+    created_at: datetime
+
 class ReportPublicResponse(BaseModel):
     id: UUID
     tracking_code: str
@@ -88,6 +99,14 @@ class ReportPublicResponse(BaseModel):
     distance_km: float | None = None
     is_synthetic: bool = False
     citizen_edit_token: str | None = None
+    assigned_to: str | None = None
+    assigned_at: datetime | None = None
+    external_delivery_status: str = "NOT_ENABLED"
+    external_delivery_channel: str = "Correo electrónico (No habilitado)"
+    external_delivery_message: str = "Correo a entidad: No enviado — servicio no habilitado"
+    admin_review_status: str = "PENDING_REVIEW"
+    last_public_note: str | None = None
+    events: list[ReportEventPublic] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
@@ -158,3 +177,33 @@ class FaultInjectionRequest(BaseModel):
     )
     reset_circuits: bool = True
 
+
+
+class AdminNotificationItem(BaseModel):
+    id: UUID
+    report_id: UUID
+    tracking_code: str
+    title: str
+    message: str
+    is_read: bool = False
+    is_synthetic: bool = False
+    read_at: datetime | None = None
+    created_at: datetime
+    photo_url: str | None = None
+    category: str | None = None
+    status: str | None = None
+    neighborhood: str | None = None
+
+
+class AdminNotificationsResponse(BaseModel):
+    total: int
+    unread_total: int
+    unread_citizen: int
+    unread_synthetic: int
+    items: list[AdminNotificationItem]
+
+
+class ReportManagementUpdateRequest(BaseModel):
+    assigned_to: str | None = Field(default=None, max_length=120)
+    admin_review_status: Literal["PENDING_REVIEW", "IN_REVIEW", "REVIEWED"] | None = None
+    public_note: str | None = Field(default=None, max_length=500)

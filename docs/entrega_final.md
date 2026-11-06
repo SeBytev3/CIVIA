@@ -76,21 +76,20 @@ La versión de entrega final ha sido sometida a un riguroso protocolo de pruebas
   - Resiliencia ante fallos inyectados: `429`, `503`, `TIMEOUT`, `INVALID_JSON`, `TOTAL`.
 
 ### 2. Pruebas de Interfaz y Flujo de Extremo a Extremo (Playwright E2E)
-- **Total pruebas ejecutadas:** 2
-- **Aprobadas:** **2 PASSED (100%)**
-- **Test 1 — Flujo de Fotografía Real de Cámara en Vivo:**
-  - Emulación de cámara web (`getUserMedia`).
-  - Captura de cuadro a `<canvas>` y envío de fotografía JPEG real a la API.
-  - Obtención de código de radicado único.
-  - Verificación en servidor de procedencia ciudadana real (`is_synthetic = false`).
-  - Descarga y verificación HTTP 200 de la imagen almacenada.
-  - Recarga de la página y comprobación de persistencia íntegra en PostgreSQL 17.
-- **Test 2 — Flujo de Muestra Sintética Oficial:**
-  - Carga de muestra oficial con distintivo de simulación ética.
-  - Envío a la API y obtención de radicado.
-  - Verificación en servidor de procedencia sintética certificada (`is_synthetic = true`).
-  - Verificación de renderizado en `objectFit: contain` sin recortes de la franja ética.
-  - Recarga y persistencia en base de datos.
+- **Suites ejecutadas:** 2 suites completas (`test_e2e_final.cjs` y `test_citizen_ux_suite.cjs`).
+- **Aprobación:** **100% PASSED** (0 fallos).
+- **Suite E2E 1 — Cámara Real en Vivo y Evidencia Sintética Oficial (`test_e2e_final.cjs`):**
+  - *Flujo 1 (Cámara real):* Emulación de cámara web (`getUserMedia`), captura de fotograma JPEG real, envío a la API, radicación única, comprobación `is_synthetic = false`, descarga y verificación HTTP 200 de la foto, y persistencia tras recarga en PostgreSQL 17.
+  - *Flujo 2 (Muestra sintética):* Carga de muestra oficial con franja ética, envío, verificación `is_synthetic = true`, renderizado en `objectFit: contain` sin recortes y persistencia en base de datos.
+- **Suite E2E 2 — Refinamiento UX/UI, Accesibilidad y Trazabilidad Ciudadana (`test_citizen_ux_suite.cjs`):**
+  - *Lenguaje empático:* Supresión total de jerga técnica y errores API visibles al ciudadano.
+  - *Flujo vertical post-envío:* Desplazamiento automático accesible hacia el banner de éxito con foco accesible (`tabIndex={-1}`), radicado destacado grande y botón interactivo *"Copiar radicado"* con confirmación visual.
+  - *Limpieza de formulario:* Liberación de cámara/micrófono y reseteo de inputs exclusivamente tras confirmación de éxito en servidor.
+  - *Trazabilidad de eventos:* Línea de tiempo cronológica accesible (`report_events`) con hitos de registro, análisis y gestión institucional.
+  - *Aviso transparente:* Notificación visible informando que el correo a entidades externas no está habilitado (`external_delivery_status: 'NOT_ENABLED'`) y que el reporte permanece guardado de forma permanente.
+  - *Bandeja administrativa:* Panel protegido (`admin_notifications`) con contadores de pendientes, filtros y actualización de asignación.
+  - *Cierre limpio de detalles:* Botón *"✕ Cerrar detalle"* con restauración de foco al elemento de origen sin desconfigurar filtros ni mapas.
+  - *Contraste y diseño:* Verificación de contraste WCAG AA (>= 4.5:1) en hover de botones y pruebas tanto en Desktop (1366x768) como en Móvil (390x844).
 
 ### 3. Prueba de Clon Limpio en Directorio Temporal Aislado
 - **Directorio de prueba:** Carpeta temporal independiente (`%TEMP%\civia_clean_...`).
