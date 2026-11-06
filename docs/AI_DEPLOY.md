@@ -81,7 +81,7 @@ docker compose exec -T api pytest -m "not live" -v
 Este procedimiento canónico utiliza la red interna y las credenciales seguras generadas localmente en `.env`, sin exponer contraseñas predecibles ni depender de nombres de red manuales.
 
 **Resultado esperado:**
-`155 passed, 1 deselected, 0 failed`.
+`168 passed, 1 deselected, 0 failed`.
 
 ---
 
@@ -90,6 +90,28 @@ La documentación exhaustiva de los 23 endpoints clasificados en 8 categorías t
 
 ---
 
-## 7. Estado Oficial de Despliegue en la Nube
+## 7. Gestión Segura de Credenciales de IA y Acceso Administrativo
+1. **Detección y Comprobación de Proveedores:**
+   ```powershell
+   docker compose exec -T api python -m app.validate_providers
+   # O con verificación real de conectividad:
+   docker compose exec -T api python -m app.validate_providers --live
+   ```
+2. **Configuración Posterior sin Reiniciar PostgreSQL:**
+   Si las claves se suministran tras el arranque inicial, aplíquelas en menos de 3 segundos con:
+   ```powershell
+   .\scripts\setup_ai_keys.ps1
+   ```
+   *(En Linux / macOS: `./scripts/setup_ai_keys.sh`)*
+   Este comando actualiza exclusivamente `.env` y recrea la API con `docker compose up -d --no-deps api` preservando los datos de PostgreSQL.
+3. **Acceso Administrativo Seguro al Panel Web:**
+   El agente debe instruir al evaluador a abrir `http://localhost:5173`, dirigirse a la pestaña **Administración**, y copiar el `ADMIN_TOKEN` al portapapeles sin exponerlo en pantalla ni logs:
+   ```powershell
+   powershell -Command "Get-Content .env | Select-String '^ADMIN_TOKEN=' | ForEach-Object { $_.Line.Split('=',2)[1].Trim() } | Set-Clipboard; Write-Host 'ADMIN_TOKEN copiado al portapapeles.'"
+   ```
+
+---
+
+## 8. Estado Oficial de Despliegue en la Nube
 > **DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA**  
 > Ver justificación detallada en [`docs/DEPLOYMENT.md`](DEPLOYMENT.md).

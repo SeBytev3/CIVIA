@@ -31,6 +31,8 @@ Equipo: Stefania Córdoba y Sebastian Espinosa. Proyecto de Ingeniería de Aplic
   1. La rama oficial es `main`.
   2. Ejecutar `.\scripts\run.ps1` (PowerShell) o `./scripts/run.sh` (Bash).
   3. Comprobar salud en `http://localhost:8000/health` y acceso a frontend en `http://localhost:5173`.
-  4. La suite hermética se valida mediante el comando canónico sin secretos incrustados: `docker compose exec -T api pytest -m "not live" -v`.
-  5. El estado oficial de nube es "DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA", asegurando reproducibilidad completa en máquina local o VM sin costos no presupuestados.
-  6. La especificación técnica completa de la API REST y Swagger UI (`http://localhost:8000/docs`) está documentada canónicamente en `docs/API.md` (23 endpoints en 8 categorías temáticas).
+  4. La suite hermética se valida mediante el comando canónico sin secretos incrustados: `docker compose exec -T api pytest -m "not live" -v` (168 contratos herméticos verificados).
+  5. Comprobar el estado de credenciales de IA con: `docker compose exec -T api python -m app.validate_providers`. Si están pendientes, guiar al usuario a configurarlas con `.\scripts\setup_ai_keys.ps1` (o `./scripts/setup_ai_keys.sh`) sin reiniciar PostgreSQL. NUNCA solicitar claves por el chat.
+  6. Para acceder a Administración en `http://localhost:5173`, guiar al evaluador a copiar `ADMIN_TOKEN` directamente al portapapeles con el comando de PowerShell documentado, sin imprimirlo en pantalla ni en logs.
+  7. El estado oficial de nube es "DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA", asegurando reproducibilidad completa en máquina local o VM sin costos no presupuestados.
+  8. La especificación técnica completa de la API REST y Swagger UI (`http://localhost:8000/docs`) está documentada canónicamente en `docs/API.md` (23 endpoints en 8 categorías temáticas).

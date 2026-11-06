@@ -99,12 +99,19 @@ git status
    python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); pw=secrets.token_hex(16); text=re.sub(r'(?m)^POSTGRES_PASSWORD=.*$', f'POSTGRES_PASSWORD={pw}', p.read_text()); text=re.sub(r'(?m)^DATABASE_URL=.*$', f'DATABASE_URL=postgresql://civia:{pw}@db:5432/civia', text); text=re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', text); p.write_text(text)"
    ```
 3. **Claves de Inteligencia Artificial (OPCIONALES — Solo requeridas para inferencia multimodal en vivo):**
-   - **NO son necesarias para evaluar el sistema:** La captura con cámara, la subida de fotos, la georreferenciación, la radicación, la persistencia en PostgreSQL 17, el seguimiento, la consulta en mapa y la suite hermética de 155 pruebas automáticas operan al 100% de forma determinista y local sin ninguna clave externa.
-   - Si el profesor desea probar el análisis multimodal de imágenes en vivo conectando con Google Gemini o Groq, puede añadir sus claves opcionales en `.env`:
-     ```ini
-     GOOGLE_API_KEY_PRIMARY=AIzaSy...
-     GOOGLE_API_KEY_SECONDARY=AIzaSy...
-     GROQ_API_KEY=gsk_...
+   - **NO son necesarias para evaluar el sistema:** La captura con cámara web real, la subida de fotos, la georreferenciación, la radicación, la persistencia en PostgreSQL 17, el seguimiento, la consulta en mapa y la suite hermética de 168 pruebas automáticas operan al 100% de forma determinista y local en **Modo MVP Local** sin ninguna clave externa.
+   - **Detección interactiva:** Al ejecutar `.\scripts\run.ps1` o `./scripts/run.sh`, el sistema detecta si las claves faltan. Si la terminal es interactiva, permite ingresarlas con caracteres enmascarados o pulsar Enter para continuar en Modo MVP Local.
+   - **Configuración posterior sin reiniciar la base de datos:** Si desea configurar o rotar las claves después del despliegue inicial sin perder datos ni reinstalar PostgreSQL, ejecute:
+     ```powershell
+     .\scripts\setup_ai_keys.ps1
+     ```
+     *(En Linux / macOS: `./scripts/setup_ai_keys.sh`)*.  
+     Este script actualiza el archivo `.env` de forma protegida y recrea únicamente el servicio de la API (`docker compose up -d --no-deps api`) en menos de 3 segundos.
+   - **Validación de proveedores:** Compruebe que las variables llegaron al contenedor con:
+     ```powershell
+     docker compose exec -T api python -m app.validate_providers
+     # O con validación de ping en vivo:
+     docker compose exec -T api python -m app.validate_providers --live
      ```
 
 ---
@@ -188,7 +195,16 @@ Verás la interfaz ciudadana de CIVIA:
 ## 11. Prueba de Administración, Aprobación Humana y Observabilidad
 
 1. En la barra superior de la PWA, ingresa a la pestaña **"Administración"** (la navegación en CIVIA se gestiona fluidamente como una Single Page Application mediante pestañas).
-2. Ingresa el `ADMIN_TOKEN` generado en tu archivo `.env`. (Puedes obtenerlo con `Get-Content .env | Select-String "ADMIN_TOKEN"`).
+2. Ingresa el `ADMIN_TOKEN` generado en tu archivo `.env`.  
+   Para copiarlo directamente al portapapeles **sin imprimirlo en pantalla ni exponerlo en grabaciones o logs**, ejecuta:  
+   - En Windows PowerShell:  
+     ```powershell
+     powershell -Command "Get-Content .env | Select-String '^ADMIN_TOKEN=' | ForEach-Object { $_.Line.Split('=',2)[1].Trim() } | Set-Clipboard; Write-Host 'ADMIN_TOKEN copiado al portapapeles.'"
+     ```  
+   - En Linux / macOS / WSL:  
+     ```bash
+     grep '^ADMIN_TOKEN=' .env | cut -d'=' -f2- | tr -d '\r\n' | (pbcopy 2>/dev/null || xclip -selection clipboard 2>/dev/null || wl-copy 2>/dev/null || echo "[Copie la línea ADMIN_TOKEN de .env]")
+     ```
 3. **Módulo de Aprobación Humana (`pending_approvals`):**
    - Cuando el agente propone una acción crítica (ej. cambiar el estado de un reporte mediante `proponer_actualizacion_critica`), la IA **NO** escribe directamente en la tabla `reports`.
    - La propuesta queda en estado `PENDING` en la consola administrativa.
@@ -282,4 +298,4 @@ Para mantener la máxima transparencia académica:
 ## 17. Declaración de estado de verificación externa
 
 > [!NOTE]
-> Esta guía ha sido verificada en la rama principal `main`, incluyendo la prueba de clonación limpia en carpeta temporal aislada y validación de 155 pruebas herméticas. La instalación física desde cero en un segundo computador portátil Windows 11 queda formalmente dispuesta para su ejecución por parte del evaluador o del equipo durante la sesión de sustentación académica, siguiendo exactamente los pasos descritos en este documento.
+> Esta guía ha sido verificada en la rama principal `main`, incluyendo la prueba de clonación limpia en carpeta temporal aislada y validación de 168 pruebas herméticas. La instalación física desde cero en un segundo computador portátil Windows 11 queda formalmente dispuesta para su ejecución por parte del evaluador o del equipo durante la sesión de sustentación académica, siguiendo exactamente los pasos descritos en este documento.
