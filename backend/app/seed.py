@@ -1,14 +1,18 @@
 import hashlib
 import io
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from PIL import Image, ImageDraw
 
 from app.config import settings
 from app.db import assert_disposable_test_db, get_conn
+
+logger = logging.getLogger(__name__)
 
 
 DEMO_ASSETS_DIR = Path(__file__).parent / "demo_assets"
@@ -30,17 +34,20 @@ def get_synthetic_evidence_bytes(code: str, kind: str) -> tuple[bytes, str, str,
     """
     Obtiene los bytes de la evidencia fotográfica sintética fotorrealista empaquetada.
     Retorna: (file_bytes, filename, mime_type, width, height)
+    Utiliza nombres inmutables versionados por el hash SHA-256 del contenido (Content-Addressed Storage).
     """
     code_lower = code.lower()
     asset_file = DEMO_ASSETS_DIR / f"{code_lower}.jpg"
     if asset_file.exists():
         data = asset_file.read_bytes()
-        filename = f"synthetic_{code_lower}.jpg"
+        sha_prefix = hashlib.sha256(data).hexdigest()[:16]
+        filename = f"synthetic_{code_lower}_{sha_prefix}.jpg"
         return data, filename, "image/jpeg", 1200, 896
 
     # Fallback seguro en memoria si no estuviera el archivo en disco
     fallback_data = generate_synthetic_evidence_png(kind, code, 1024, 768)
-    return fallback_data, f"synthetic_{code_lower}.png", "image/png", 1024, 768
+    sha_fallback = hashlib.sha256(fallback_data).hexdigest()[:16]
+    return fallback_data, f"synthetic_{code_lower}_{sha_fallback}.png", "image/png", 1024, 768
 
 
 def generate_synthetic_evidence_png(kind: str, code: str, width: int = 240, height: int = 160) -> bytes:
@@ -323,7 +330,11 @@ def seed_synthetic_reports(force_reset: bool = False) -> dict[str, int]:
                 bytes_data, photo_name, photo_mime, width, height = get_synthetic_evidence_bytes(
                     item["tracking_code"], item["ai_category"]
                 )
-                (upload_dir / photo_name).write_bytes(bytes_data)
+                dest_file = upload_dir / photo_name
+                if not dest_file.exists():
+                    tmp_staged = upload_dir / f".staging_seed_{os.getpid()}_{uuid4().hex}.tmp"
+                    tmp_staged.write_bytes(bytes_data)
+                    os.replace(tmp_staged, dest_file)
                 sha256_hex = hashlib.sha256(bytes_data).hexdigest()
 
                 cur.execute(
@@ -388,19 +399,20 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
     Actualiza exclusivamente los metadatos fotográficos y archivos de los 10 reportes del catálogo
     sintético (is_synthetic = TRUE AND tracking_code LIKE 'CIV-2026-DEMO%').
 
-    Garantías de integridad y resiliencia:
-    - Validación de SHA-256 de los bytes reales en disco y decodificación PIL.
-    - Detección y reparación de archivos corruptos aunque tengan la misma longitud.
-    - Publicación atómica y segura mediante Two-Phase Staging con compensación y backup:
-      1. Limpieza de archivos temporales huérfanos (.tmp_* y .bak_*) de sesiones interrumpidas.
-      2. Staging previo de archivos en temporales con validación PIL antes de tocar la base de datos.
-      3. Copia de seguridad atómica (.bak_{uuid}) de los archivos destino existentes.
-      4. Publicación atómica mediante os.replace dentro del bloque transaccional coordinado.
-      5. En caso de error (SQL rollback o fallo de sistema de archivos), reversión completa:
-         los archivos destino se restauran desde los backups y se eliminan los temporales.
-      6. Cero riesgo de referencias SQL persistidas hacia archivos no publicados.
-      7. Eliminado todo fallback inseguro de escritura directa no atómica.
-    - Idempotencia estricta: si disco y BD ya coinciden con el activo de referencia, unchanged=10.
+    Arquitectura de Almacenamiento Inmutable Versionado por Contenido (Content-Addressed Storage):
+    1. Las fotografías del catálogo se publican en rutas inmutables con nombre versionado:
+       synthetic_civ-2026-demoXXXX_<sha256[:16]>.jpg
+    2. Nunca se sobrescribe destructivamente un archivo existente referenciado por PostgreSQL.
+    3. Staging atómico en archivo temporal exclusivo por proceso (.staging_{pid}_{uuid}.tmp).
+    4. Verificación de integridad por SHA-256 y decodificación PIL (Image.verify()) antes de publicar.
+    5. Publicación atómica mediante os.replace a la ruta inmutable.
+    6. Verificación física de existencia e integridad en destino.
+    7. Transacción SQL atómica: actualización de fila en PostgreSQL para apuntar al archivo inmutable.
+    8. En caso de rollback SQL o error: los archivos previamente referenciados siguen 100% intactos en disco;
+       la BD sigue apuntando a ellos. Cero referencias rotas y cero copias únicas destruidas.
+    9. Limpieza segura post-commit: únicamente tras commit confirmado y comprobando con
+       COUNT(*) = 0 en PostgreSQL, se eliminan versiones sintéticas antiguas que hayan quedado desreferenciadas.
+    10. Concurrencia segura: dos procesos concurrentes no destruyen archivos mutuos.
     """
     import io
     import os
@@ -409,24 +421,13 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
     target_upload_dir = upload_dir_path or settings.UPLOAD_DIR
     target_upload_dir.mkdir(parents=True, exist_ok=True)
 
-    # Limpieza preventiva de archivos residuales (.tmp_* o .bak_*) de una interrupción previa
-    for residual in target_upload_dir.glob("*.tmp_*"):
-        try:
-            residual.unlink(missing_ok=True)
-        except Exception:
-            pass
-    for residual in target_upload_dir.glob("*.bak_*"):
-        try:
-            residual.unlink(missing_ok=True)
-        except Exception:
-            pass
-
     updated_count = 0
     unchanged_count = 0
     missing_count = 0
 
     catalog_codes = [item["tracking_code"] for item in SYNTHETIC_REPORTS]
     staged_items: list[dict[str, Any]] = []
+    pid = os.getpid()
 
     try:
         with get_conn() as conn:
@@ -448,6 +449,7 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
 
                     rid = row["id"]
                     current_sha = row["photo_sha256"]
+                    current_path = row["photo_path"]
 
                     bytes_data, photo_name, photo_mime, width, height = get_synthetic_evidence_bytes(
                         code, item["ai_category"]
@@ -456,7 +458,7 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
 
                     dest_file = target_upload_dir / photo_name
 
-                    # 1. Comprobación de integridad física del archivo en disco
+                    # 1. Comprobación de integridad física del archivo inmutable en disco
                     disk_valid = False
                     if dest_file.exists() and dest_file.is_file():
                         try:
@@ -468,16 +470,18 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
                         except Exception:
                             disk_valid = False
 
-                    # 2. Si tanto la fila SQL como los bytes en disco están íntegros, es unchanged
-                    if disk_valid and current_sha == expected_sha256 and row["photo_path"] == photo_name:
+                    # 2. Si la fila SQL ya apunta al archivo inmutable y el archivo en disco es íntegro -> unchanged
+                    if disk_valid and current_sha == expected_sha256 and current_path == photo_name:
                         unchanged_count += 1
                         continue
 
-                    # 3. Preparar archivo temporal de staging y verificar su decodificación antes de tocar BD
-                    staged_tmp = target_upload_dir / f"{photo_name}.tmp_{uuid4().hex}"
-                    staged_tmp.write_bytes(bytes_data)
-                    with Image.open(io.BytesIO(bytes_data)) as verify_stage:
-                        verify_stage.verify()
+                    # 3. Si dest_file no existe o está corrupto, preparar staging exclusivo
+                    temp_staged = None
+                    if not disk_valid:
+                        temp_staged = target_upload_dir / f".staging_{pid}_{code.lower()}_{uuid4().hex}.tmp"
+                        temp_staged.write_bytes(bytes_data)
+                        with Image.open(io.BytesIO(bytes_data)) as v_img:
+                            v_img.verify()
 
                     staged_items.append({
                         "rid": rid,
@@ -489,12 +493,11 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
                         "height": height,
                         "expected_sha": expected_sha256,
                         "dest_file": dest_file,
-                        "staged_tmp": staged_tmp,
-                        "backup_file": None,
-                        "replaced": False,
+                        "temp_staged": temp_staged,
+                        "old_path": current_path,
                     })
 
-                # Si no hay nada que actualizar, terminar limpiamente
+                # Si todo está al día
                 if not staged_items:
                     return {
                         "updated": 0,
@@ -503,22 +506,19 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
                         "catalog_total": len(catalog_codes),
                     }
 
-                # Fase 4: Publicación atómica coordinada con respaldo compensatorio
+                # Fase 4: Publicar archivos inmutables en disco antes del commit SQL
                 for entry in staged_items:
+                    temp_staged = entry["temp_staged"]
                     dest = entry["dest_file"]
-                    tmp = entry["staged_tmp"]
+                    if temp_staged is not None and temp_staged.exists():
+                        os.replace(temp_staged, dest)
+                        entry["temp_staged"] = None
 
-                    # Si existe un archivo previo en el destino, moverlo a backup temporal
-                    if dest.exists():
-                        bak = target_upload_dir / f"{dest.name}.bak_{uuid4().hex}"
-                        os.replace(dest, bak)
-                        entry["backup_file"] = bak
+                    # Verificar que dest existe e íntegro
+                    if not dest.exists():
+                        raise OSError(f"No se pudo asegurar la existencia del archivo inmutable {dest.name}")
 
-                    # Mover archivo de staging a destino definitivo de forma atómica
-                    os.replace(tmp, dest)
-                    entry["replaced"] = True
-
-                    # Actualizar metadatos en PostgreSQL dentro de la misma transacción
+                    # Actualizar metadatos en PostgreSQL dentro de la transacción
                     cur.execute(
                         """
                         UPDATE reports
@@ -544,51 +544,41 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
                     )
                     updated_count += 1
 
-                # 5. Confirmar transacción en PostgreSQL
+                # Confirmar transacción SQL
                 conn.commit()
 
-        # Una vez confirmado exitosamente el commit en PostgreSQL, eliminar los backups temporales
-        for entry in staged_items:
-            bak = entry.get("backup_file")
-            if bak and bak.exists():
-                try:
-                    bak.unlink()
-                except Exception:
-                    pass
+        # Fase 5: Limpieza post-commit segura de archivos antiguos que hayan quedado desreferenciados
+        # Solo se ejecuta tras commit exitoso y verificando con COUNT(*)=0 en PostgreSQL
+        with get_conn() as conn_clean:
+            with conn_clean.cursor() as cur_clean:
+                for entry in staged_items:
+                    old_path_str = entry.get("old_path")
+                    new_path_str = entry["photo_name"]
+                    if not old_path_str or old_path_str == new_path_str:
+                        continue
+                    if not old_path_str.startswith("synthetic_civ-2026-demo"):
+                        continue
+                    old_file = target_upload_dir / old_path_str
+                    if not old_file.exists():
+                        continue
+                    cur_clean.execute(
+                        "SELECT COUNT(*) AS ref_count FROM reports WHERE photo_path = %s;",
+                        (old_path_str,),
+                    )
+                    count_row = cur_clean.fetchone()
+                    if count_row and count_row["ref_count"] == 0:
+                        try:
+                            old_file.unlink(missing_ok=True)
+                        except Exception as unlink_err:
+                            logger.warning("No se pudo desvincular archivo antiguo no referenciado %s: %s", old_file, unlink_err)
 
     except Exception:
-        # En caso de error o rollback SQL (o fallo en os.replace), compensar restaurando backups
+        # Limpieza defensiva EXCLUSIVA de los archivos temporales creados por ESTE proceso
         for entry in staged_items:
-            dest = entry.get("dest_file")
-            bak = entry.get("backup_file")
-            replaced = entry.get("replaced", False)
-            tmp = entry.get("staged_tmp")
-
-            if replaced and dest and dest.exists():
-                if bak and bak.exists():
-                    try:
-                        os.replace(bak, dest)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        dest.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-            elif bak and bak.exists() and dest and not dest.exists():
-                try:
-                    os.replace(bak, dest)
-                except Exception:
-                    pass
-
+            tmp = entry.get("temp_staged")
             if tmp and tmp.exists():
                 try:
                     tmp.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            if bak and bak.exists():
-                try:
-                    bak.unlink(missing_ok=True)
                 except Exception:
                     pass
         raise

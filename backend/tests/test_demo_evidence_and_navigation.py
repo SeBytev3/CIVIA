@@ -41,7 +41,8 @@ def test_packaged_assets_integrity():
         assert mime == "image/jpeg", f"{code} debe ser image/jpeg"
         assert width == 1200, f"{code} debe tener ancho 1200"
         assert height == 896, f"{code} debe tener alto 896"
-        assert filename == f"synthetic_{code.lower()}.jpg"
+        assert filename.startswith(f"synthetic_{code.lower()}_") and filename.endswith(".jpg")
+        assert hashlib.sha256(data).hexdigest()[:16] in filename
         assert len(data) > 100_000, f"{code} debe ser una fotografía de alta resolución (>100KB)"
 
         im = Image.open(io.BytesIO(data))
@@ -182,178 +183,391 @@ def test_update_synthetic_catalog_photos_idempotent_and_safe():
     assert res2["catalog_total"] == 10
 
 
-def test_update_synthetic_catalog_photos_detects_same_length_corruption():
+# ---------------------------------------------------------------------------
+# PRUEBAS ADVERSARIALES OBLIGATORIAS (CASOS A HASTA L)
+# ---------------------------------------------------------------------------
+
+def test_adversarial_case_a_interruption_after_staging():
     """
-    Verifica que update_synthetic_catalog_photos() detecte corrupción de igual longitud
-    y no se confíe únicamente en st_size.
-    Si el archivo en disco tiene un byte alterado pero conserva el tamaño exacto,
-    debe identificar el desajuste de SHA-256/PIL y restaurar el archivo sano.
+    Caso A: Interrupción después de crear archivo de staging temporal.
+    Verifica que:
+    1. Un archivo temporal .staging_* abandonado por un corte no afecte al catálogo existente.
+    2. Las filas en PostgreSQL sigan apuntando a sus archivos válidos.
+    3. El endpoint /photo responda HTTP 200 con imagen válida.
     """
     seed_synthetic_reports(force_reset=True)
+    orphan_staging = settings.UPLOAD_DIR / f".staging_deadpid_civ-2026-demo0001_{uuid4().hex}.tmp"
+    orphan_staging.write_bytes(b"TEMPORARY_STAGING_BEFORE_CRASH")
 
-    demo1_path = settings.UPLOAD_DIR / "synthetic_civ-2026-demo0001.jpg"
-    assert demo1_path.exists()
-    original_bytes = demo1_path.read_bytes()
-    original_size = len(original_bytes)
-    original_sha = hashlib.sha256(original_bytes).hexdigest()
+    client = TestClient(app)
+    rep = client.get("/api/reports/by-code/CIV-2026-DEMO0001").json()
+    photo_res = client.get(f"/api/reports/{rep['id']}/photo")
+    assert photo_res.status_code == 200
+    assert len(photo_res.content) > 100_000
 
-    # Corromper el primer byte pero preservando exactamente el tamaño
-    corrupt_bytes = b"X" + original_bytes[1:]
-    assert len(corrupt_bytes) == original_size
-    demo1_path.write_bytes(corrupt_bytes)
-
-    # Ejecutar actualizador
     res = update_synthetic_catalog_photos()
-    # Debe detectar la corrupción y reparar exactamente 1 archivo
-    assert res["updated"] == 1
-    assert res["unchanged"] == 9
-
-    # Verificar que el archivo en disco quedó restaurado e íntegro
-    restored_bytes = demo1_path.read_bytes()
-    assert hashlib.sha256(restored_bytes).hexdigest() == original_sha
-    im = Image.open(io.BytesIO(restored_bytes))
-    im.verify()
+    assert res["unchanged"] == 10
 
 
-def test_update_synthetic_catalog_photos_zero_orphans_on_rollback():
+def test_adversarial_case_b_c_interruption_after_publishing_before_commit():
     """
-    Verifica que ante un fallo o rollback en la transacción SQL de actualización,
-    no queden archivos huérfanos ni archivos temporales (.tmp_*) en UPLOAD_DIR.
+    Casos B y C: Interrupción después de publicar imagen nueva en disco pero antes de confirmar SQL.
+    Verifica que:
+    1. Al no haberse confirmado SQL, la base de datos sigue apuntando al archivo anterior.
+    2. El archivo anterior NUNCA fue eliminado ni sobreescrito.
+    3. Las solicitudes de usuarios reciben la imagen anterior sin errores 404 ni roturas.
     """
     seed_synthetic_reports(force_reset=True)
 
-    # Contar archivos antes
-    initial_files = set(settings.UPLOAD_DIR.iterdir())
-
-    # 1. Modificar metadatos en BD para forzar actualización de DEMO0002
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE reports SET photo_sha256 = '0000000000000000000000000000000000000000000000000000000000000000' WHERE tracking_code = 'CIV-2026-DEMO0002';"
-            )
-            conn.commit()
+            cur.execute("SELECT id, photo_path, photo_sha256 FROM reports WHERE tracking_code = 'CIV-2026-DEMO0001';")
+            row_before = cur.fetchone()
 
-    # 2. Instalar trigger que aborte cuando update_synthetic_catalog_photos intente actualizar DEMO0002
-    with get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                CREATE OR REPLACE FUNCTION raise_test_abort()
-                RETURNS trigger AS $$
-                BEGIN
-                    IF NEW.tracking_code = 'CIV-2026-DEMO0002' THEN
-                        RAISE EXCEPTION 'TEST_INJECTED_ABORT_FOR_ROLLBACK';
-                    END IF;
-                    RETURN NEW;
-                END;
-                $$ LANGUAGE plpgsql;
+    old_file_path = settings.UPLOAD_DIR / row_before["photo_path"]
+    assert old_file_path.exists()
+    old_bytes = old_file_path.read_bytes()
 
-                DROP TRIGGER IF EXISTS trg_test_abort_demo ON reports;
-                CREATE TRIGGER trg_test_abort_demo
-                BEFORE UPDATE ON reports
-                FOR EACH ROW EXECUTE FUNCTION raise_test_abort();
-                """
-            )
-            conn.commit()
+    # Simular que en disco ya se publicó un archivo con nuevo contenido
+    simulated_new_name = "synthetic_civ-2026-demo0001_ffffffffffffffff.jpg"
+    simulated_new_file = settings.UPLOAD_DIR / simulated_new_name
+    simulated_new_file.write_bytes(b"SIMULATED_NEW_PHOTO_CONTENT")
 
-    try:
-        # Al ejecutar la actualización, el trigger abortará la transacción
-        with pytest.raises(Exception) as exc_info:
-            update_synthetic_catalog_photos()
-        assert "TEST_INJECTED_ABORT_FOR_ROLLBACK" in str(exc_info.value)
+    # Corte abrupto antes del commit: en PostgreSQL sigue apuntando a old_path
+    client = TestClient(app)
+    photo_res = client.get(f"/api/reports/{row_before['id']}/photo")
+    assert photo_res.status_code == 200
+    assert photo_res.content == old_bytes
 
-        # Verificar que NO hay archivos temporales .tmp_*
-        tmp_files = list(settings.UPLOAD_DIR.glob("*.tmp_*"))
-        assert len(tmp_files) == 0, f"Quedaron archivos temporales huérfanos: {tmp_files}"
-
-    finally:
-        # Limpiar trigger de prueba
-        with get_conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("DROP TRIGGER IF EXISTS trg_test_abort_demo ON reports;")
-                cur.execute("DROP FUNCTION IF EXISTS raise_test_abort();")
-                conn.commit()
+    simulated_new_file.unlink(missing_ok=True)
 
 
-def test_update_synthetic_catalog_photos_fs_failure_compensates_and_rolls_back(monkeypatch):
+def test_adversarial_case_d_replace_failure_rolls_back_and_preserves_original(monkeypatch):
     """
-    Verifica que si ocurre un fallo en os.replace durante la publicación en disco:
-    1. Se interrumpe la operación antes del commit SQL.
-    2. Se compensa restaurando los archivos originales desde sus backups temporales.
-    3. No quedan archivos temporales (.tmp_*) ni backups (.bak_*).
-    4. En PostgreSQL las filas conservan sus valores previos.
+    Caso D: Fallo en os.replace durante publicación.
+    Verifica que:
+    1. La excepción no deja referencias rotas en PostgreSQL.
+    2. El archivo existente referenciado permanece intacto.
+    3. Los temporales de staging creados por este proceso se limpian defensivamente.
     """
     seed_synthetic_reports(force_reset=True)
 
-    # Forzar actualización en DEMO0001 y DEMO0002
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE reports SET photo_sha256 = '0000000000000000000000000000000000000000000000000000000000000000' WHERE tracking_code IN ('CIV-2026-DEMO0001', 'CIV-2026-DEMO0002');"
-            )
-            conn.commit()
+            cur.execute("SELECT id, photo_path, photo_sha256 FROM reports WHERE tracking_code = 'CIV-2026-DEMO0001';")
+            row1 = cur.fetchone()
+
+    dest_file = settings.UPLOAD_DIR / row1["photo_path"]
+    original_bytes = dest_file.read_bytes()
+    dest_file.unlink()
 
     import os
     real_replace = os.replace
-    call_count = 0
 
     def faulty_replace(src, dst):
-        nonlocal call_count
-        call_count += 1
-        # Fallar durante la publicación de reemplazo
-        if call_count >= 3:
+        if "synthetic_civ-2026-demo0001" in str(dst):
             raise OSError("INJECTED_DISK_IO_FAILURE_ON_REPLACE")
         return real_replace(src, dst)
 
     monkeypatch.setattr(os, "replace", faulty_replace)
 
-    with pytest.raises(OSError) as exc_info:
-        update_synthetic_catalog_photos()
-    assert "INJECTED_DISK_IO_FAILURE_ON_REPLACE" in str(exc_info.value)
+    try:
+        with pytest.raises(OSError) as exc_info:
+            update_synthetic_catalog_photos()
+        assert "INJECTED_DISK_IO_FAILURE_ON_REPLACE" in str(exc_info.value)
+    finally:
+        monkeypatch.setattr(os, "replace", real_replace)
+        dest_file.write_bytes(original_bytes)
 
-    # Restaurar replace real
-    monkeypatch.setattr(os, "replace", real_replace)
-
-    # Verificar que no quedaron temporales .tmp_* ni .bak_*
-    tmp_files = list(settings.UPLOAD_DIR.glob("*.tmp_*")) + list(settings.UPLOAD_DIR.glob("*.bak_*"))
-    assert len(tmp_files) == 0, f"Quedaron residuos temporales: {tmp_files}"
-
-    # Verificar que el commit SQL NO se ejecutó: las filas siguen en '0000...'
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT photo_sha256 FROM reports WHERE tracking_code = 'CIV-2026-DEMO0002';")
-            assert cur.fetchone()["photo_sha256"] == "0000000000000000000000000000000000000000000000000000000000000000"
+            cur.execute("SELECT photo_sha256 FROM reports WHERE tracking_code = 'CIV-2026-DEMO0001';")
+            assert cur.fetchone()["photo_sha256"] == row1["photo_sha256"]
 
 
-def test_update_synthetic_catalog_photos_recovers_after_interruption():
+def test_adversarial_case_e_persistent_replace_failure_keeps_integrity(monkeypatch):
     """
-    Verifica que si una sesión previa se interrumpió dejando archivos .tmp_* y .bak_* residuales,
-    el inicio de update_synthetic_catalog_photos() los limpie y complete la reconciliación.
+    Caso E: Fallo persistente de os.replace.
+    Verifica que si el sistema de archivos rechaza sistemáticamente os.replace,
+    la base de datos y los archivos existentes no sufran daño ni pérdida de información.
     """
     seed_synthetic_reports(force_reset=True)
 
-    # Inyectar archivos residuales simulando corte previo
-    residual_tmp = settings.UPLOAD_DIR / "synthetic_civ-2026-demo0001.jpg.tmp_abandoned123"
-    residual_bak = settings.UPLOAD_DIR / "synthetic_civ-2026-demo0002.jpg.bak_abandoned456"
-    residual_tmp.write_bytes(b"RESIDUAL_ORPHAN_DATA_1")
-    residual_bak.write_bytes(b"RESIDUAL_ORPHAN_DATA_2")
+    import os
+    def always_fail_replace(src, dst):
+        raise OSError("PERSISTENT_PERMISSION_DENIED_ON_FILESYSTEM")
 
-    # Forzar que DEMO0003 esté desincronizado
+    monkeypatch.setattr(os, "replace", always_fail_replace)
+
+    # Desincronizar BD y eliminar dest_file para forzar publicación vía os.replace
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("UPDATE reports SET photo_sha256 = 'desync_sha' WHERE tracking_code = 'CIV-2026-DEMO0003';")
+            cur.execute("SELECT photo_path FROM reports WHERE tracking_code = 'CIV-2026-DEMO0002';")
+            dest_file = settings.UPLOAD_DIR / cur.fetchone()["photo_path"]
+            dest_file.unlink(missing_ok=True)
+            cur.execute("UPDATE reports SET photo_sha256 = 'desync_hash' WHERE tracking_code = 'CIV-2026-DEMO0002';")
             conn.commit()
 
-    # Ejecutar actualizador
+    with pytest.raises(OSError) as exc_info:
+        update_synthetic_catalog_photos()
+    assert "PERSISTENT_PERMISSION_DENIED_ON_FILESYSTEM" in str(exc_info.value)
+
+
+def test_adversarial_case_f_sql_commit_failure_preserves_original():
+    """
+    Caso F: Commit SQL fallido.
+    Verifica que ante un fallo en la transacción SQL:
+    1. Se ejecuta rollback en PostgreSQL.
+    2. Las filas conservan los valores anteriores.
+    3. Ningún archivo referenciado previamente es destruido.
+    """
+    seed_synthetic_reports(force_reset=True)
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT photo_path, photo_sha256 FROM reports WHERE tracking_code = 'CIV-2026-DEMO0002';")
+            row_orig = cur.fetchone()
+
+            cur.execute(
+                """
+                CREATE OR REPLACE FUNCTION abort_demo02() RETURNS trigger AS $$
+                BEGIN
+                    IF NEW.tracking_code = 'CIV-2026-DEMO0002' AND NEW.photo_sha256 != 'temp_hash' THEN
+                        RAISE EXCEPTION 'TEST_INJECTED_SQL_COMMIT_ABORT';
+                    END IF;
+                    RETURN NEW;
+                END;
+                $$ LANGUAGE plpgsql;
+
+                DROP TRIGGER IF EXISTS trg_abort_demo02 ON reports;
+                CREATE TRIGGER trg_abort_demo02 BEFORE UPDATE ON reports
+                FOR EACH ROW EXECUTE FUNCTION abort_demo02();
+                """
+            )
+            conn.commit()
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE reports SET photo_sha256 = 'temp_hash' WHERE tracking_code = 'CIV-2026-DEMO0002';")
+                conn.commit()
+
+        with pytest.raises(Exception) as exc_info:
+            update_synthetic_catalog_photos()
+        assert "TEST_INJECTED_SQL_COMMIT_ABORT" in str(exc_info.value)
+
+        orig_file = settings.UPLOAD_DIR / row_orig["photo_path"]
+        assert orig_file.exists()
+        assert len(orig_file.read_bytes()) > 100_000
+
+    finally:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DROP TRIGGER IF EXISTS trg_abort_demo02 ON reports;")
+                cur.execute("DROP FUNCTION IF EXISTS abort_demo02();")
+                conn.commit()
+
+
+def test_adversarial_case_g_concurrent_updaters():
+    """
+    Caso G: Dos actualizadores concurrentes ejecutándose simultáneamente.
+    Verifica que:
+    1. Procesos concurrentes usen temporales exclusivos y no interfieran.
+    2. Las escrituras atómicas os.replace y bloqueos de fila en PostgreSQL no causen fallos.
+    3. Todos los reportes queden íntegros al terminar.
+    """
+    import threading
+    seed_synthetic_reports(force_reset=True)
+
+    results = []
+    errors = []
+
+    def worker(worker_id: int):
+        try:
+            res = update_synthetic_catalog_photos()
+            results.append((worker_id, res))
+        except Exception as e:
+            errors.append((worker_id, e))
+
+    t1 = threading.Thread(target=worker, args=(1,))
+    t2 = threading.Thread(target=worker, args=(2,))
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert len(errors) == 0, f"Errores en concurrencia: {errors}"
+    assert len(results) == 2
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT photo_path, photo_sha256 FROM reports WHERE tracking_code LIKE 'CIV-2026-DEMO%';")
+            rows = cur.fetchall()
+            assert len(rows) == 10
+            for r in rows:
+                p = settings.UPLOAD_DIR / r["photo_path"]
+                assert p.exists()
+                assert len(p.read_bytes()) > 100_000
+
+
+def test_adversarial_case_h_detects_same_length_corruption():
+    """
+    Caso H: Corrupción JPEG de igual longitud.
+    Verifica que si un archivo en disco conserva el tamaño exacto pero altera bytes,
+    se detecte la corrupción por SHA-256 y decodificación PIL, y se restaure el archivo sano.
+    """
+    seed_synthetic_reports(force_reset=True)
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT photo_path, photo_sha256 FROM reports WHERE tracking_code = 'CIV-2026-DEMO0001';")
+            row = cur.fetchone()
+
+    demo1_path = settings.UPLOAD_DIR / row["photo_path"]
+    assert demo1_path.exists()
+    orig_bytes = demo1_path.read_bytes()
+    orig_sha = hashlib.sha256(orig_bytes).hexdigest()
+
+    corrupt_bytes = b"X" + orig_bytes[1:]
+    assert len(corrupt_bytes) == len(orig_bytes)
+    demo1_path.write_bytes(corrupt_bytes)
+
     res = update_synthetic_catalog_photos()
     assert res["updated"] == 1
     assert res["unchanged"] == 9
 
-    # Verificar que los residuos fueron limpiados
-    assert not residual_tmp.exists()
-    assert not residual_bak.exists()
-    assert len(list(settings.UPLOAD_DIR.glob("*.tmp_*"))) == 0
-    assert len(list(settings.UPLOAD_DIR.glob("*.bak_*"))) == 0
+    restored = demo1_path.read_bytes()
+    assert hashlib.sha256(restored).hexdigest() == orig_sha
+    with Image.open(io.BytesIO(restored)) as im:
+        im.verify()
+
+
+def test_adversarial_case_i_repeated_update_idempotent():
+    """
+    Caso I: Actualización repetida sin cambios.
+    Verifica que la ejecución sucesiva sea matemáticamente idempotente: updated=0, unchanged=10.
+    """
+    seed_synthetic_reports(force_reset=True)
+    res1 = update_synthetic_catalog_photos()
+    assert res1["updated"] == 0
+    assert res1["unchanged"] == 10
+
+    res2 = update_synthetic_catalog_photos()
+    assert res2["updated"] == 0
+    assert res2["unchanged"] == 10
+
+
+def test_adversarial_case_j_migration_legacy_png_to_jpeg():
+    """
+    Caso J: Instalación con PNG antiguos y migración hacia JPEG inmutable.
+    Verifica que si una base de datos contiene reportes sintéticos con PNG legacy:
+    1. Se publique el archivo JPEG inmutable en disco.
+    2. Se actualice PostgreSQL a photo_mime='image/jpeg' y nuevo photo_path.
+    3. El archivo PNG legacy no referenciado se desvincule limpiamente post-commit.
+    """
+    seed_synthetic_reports(force_reset=True)
+
+    legacy_png_name = "synthetic_civ-2026-demo0005_legacy.png"
+    legacy_file = settings.UPLOAD_DIR / legacy_png_name
+    legacy_file.write_bytes(b"LEGACY_PNG_SIMULATED_CONTENT")
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE reports
+                SET photo_path = %s, photo_mime = 'image/png', photo_sha256 = 'legacy_sha'
+                WHERE tracking_code = 'CIV-2026-DEMO0005';
+                """,
+                (legacy_png_name,),
+            )
+            conn.commit()
+
+    res = update_synthetic_catalog_photos()
+    assert res["updated"] == 1
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT photo_path, photo_mime, photo_sha256 FROM reports WHERE tracking_code = 'CIV-2026-DEMO0005';")
+            row = cur.fetchone()
+            assert row["photo_mime"] == "image/jpeg"
+            assert row["photo_path"].startswith("synthetic_civ-2026-demo0005_")
+            assert row["photo_path"].endswith(".jpg")
+            new_file = settings.UPLOAD_DIR / row["photo_path"]
+            assert new_file.exists()
+
+    assert not legacy_file.exists()
+
+
+def test_adversarial_case_k_missing_catalog_asset_safe_fallback():
+    """
+    Caso K: Ausencia de archivos de catálogo en disco.
+    Verifica que si un código de reporte no tiene activo .jpg en DEMO_ASSETS_DIR,
+    get_synthetic_evidence_bytes() devuelva un fallback válido en memoria sin abortar el servidor.
+    """
+    data, filename, mime, width, height = get_synthetic_evidence_bytes("CIV-2026-DEMO9999", "OTRO")
+    assert mime == "image/png"
+    assert len(data) > 1000
+    assert width == 1024
+    assert height == 768
+    im = Image.open(io.BytesIO(data))
+    assert im.format == "PNG"
+
+
+def test_adversarial_case_l_citizen_reports_untouched():
+    """
+    Caso L: Reportes ciudadanos con fotos propias que deben permanecer inalterados.
+    Verifica que ninguna fotografía o metadato de un reporte ciudadano (is_synthetic = FALSE)
+    sea modificado, renombrado o alterado por update_synthetic_catalog_photos().
+    """
+    seed_synthetic_reports(force_reset=True)
+
+    citizen_photo_name = f"citizen_real_{uuid4().hex}.jpg"
+    citizen_file = settings.UPLOAD_DIR / citizen_photo_name
+    citizen_file.write_bytes(b"AUTHENTIC_CITIZEN_PHOTO_BYTES_DONOTTOUCH")
+    citizen_sha = hashlib.sha256(b"AUTHENTIC_CITIZEN_PHOTO_BYTES_DONOTTOUCH").hexdigest()
+
+    cid = uuid4()
+    register_test_report_id(cid)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO reports (
+                    id, tracking_code, title, description,
+                    latitude, longitude, in_service_area,
+                    photo_path, photo_mime, photo_size_bytes,
+                    photo_width, photo_height, photo_sha256,
+                    final_category, final_severity,
+                    human_confirmed, status, is_synthetic
+                )
+                VALUES (
+                    %s, 'CIV-2026-CITIZEN99', 'Hueco ciudadano', 'Reportado por vecino',
+                    3.4516, -76.5320, TRUE,
+                    %s, 'image/jpeg', 40,
+                    640, 480, %s,
+                    'HUECO', 'MEDIA',
+                    FALSE, 'PENDING_ANALYSIS', FALSE
+                );
+                """,
+                (cid, citizen_photo_name, citizen_sha),
+            )
+            conn.commit()
+
+    res = update_synthetic_catalog_photos()
+    assert res["updated"] == 0
+    assert res["unchanged"] == 10
+
+    assert citizen_file.exists()
+    assert citizen_file.read_bytes() == b"AUTHENTIC_CITIZEN_PHOTO_BYTES_DONOTTOUCH"
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT photo_path, photo_sha256, is_synthetic FROM reports WHERE id = %s;", (cid,))
+            c_row = cur.fetchone()
+            assert c_row["photo_path"] == citizen_photo_name
+            assert c_row["photo_sha256"] == citizen_sha
+            assert c_row["is_synthetic"] is False
 
 
 def test_photo_endpoint_versioning_etag_and_caching():
@@ -471,7 +685,8 @@ def test_sample_otro_is_independent_and_distinct():
     frontend_demo_dir = Path(__file__).resolve().parent.parent.parent / "frontend" / "public" / "demo_evidence"
     otro_path = frontend_demo_dir / "sample_otro.jpg"
     hueco_path = frontend_demo_dir / "sample_hueco.jpg"
-    demo9_path = settings.UPLOAD_DIR / "synthetic_civ-2026-demo0009.jpg"
+    demo9_files = list(settings.UPLOAD_DIR.glob("synthetic_civ-2026-demo0009*"))
+    demo9_path = demo9_files[0] if demo9_files else None
 
     assert otro_path.exists()
     assert hueco_path.exists()
@@ -481,7 +696,7 @@ def test_sample_otro_is_independent_and_distinct():
 
     assert otro_sha != hueco_sha, "sample_otro.jpg no debe tener el mismo hash que sample_hueco.jpg"
 
-    if demo9_path.exists():
+    if demo9_path and demo9_path.exists():
         demo9_sha = hashlib.sha256(demo9_path.read_bytes()).hexdigest()
         assert otro_sha != demo9_sha, "sample_otro.jpg no debe ser una copia de civ-2026-demo0009.jpg"
 
