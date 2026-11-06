@@ -709,3 +709,238 @@ textarea:focus-visible {
 .civia-demo-details[open] {
   padding-bottom: 0.85rem;
 }
+
+/* =========================================================================
+   ESTILOS CIVIA 1.0 - MARKDOWN SEGURO Y EXPERIENCIA CIUDADANA
+   ========================================================================= */
+
+.civia-agent-response-card {
+  background: #ffffff;
+  border: 1px solid var(--civia-border);
+  border-radius: var(--radius-md);
+  padding: 1.15rem 1.35rem;
+  box-shadow: 0 2px 8px rgba(15, 76, 92, 0.05);
+  margin-bottom: 1rem;
+}
+
+.civia-agent-response-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.95rem;
+  color: var(--civia-teal-dark);
+  font-weight: 700;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #edf2f1;
+}
+
+.civia-agent-icon {
+  font-size: 1.25rem;
+}
+
+/* Renderizado seguro de Markdown */
+.safe-markdown-root {
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--civia-text);
+  word-break: break-word;
+}
+
+.safe-markdown-root .markdown-heading {
+  color: var(--civia-teal-dark);
+  margin: 1.1rem 0 0.45rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.safe-markdown-root .markdown-h1 {
+  font-size: 1.15rem;
+  border-bottom: 1px solid var(--civia-border);
+  padding-bottom: 0.35rem;
+}
+
+.safe-markdown-root .markdown-h2 {
+  font-size: 1.05rem;
+}
+
+.safe-markdown-root .markdown-h3,
+.safe-markdown-root .markdown-h4,
+.safe-markdown-root .markdown-h5,
+.safe-markdown-root .markdown-h6 {
+  font-size: 0.98rem;
+}
+
+.safe-markdown-root .markdown-paragraph {
+  margin: 0.55rem 0;
+}
+
+.safe-markdown-root .markdown-paragraph:first-child {
+  margin-top: 0;
+}
+
+.safe-markdown-root .markdown-paragraph:last-child {
+  margin-bottom: 0;
+}
+
+.safe-markdown-root .markdown-list {
+  margin: 0.55rem 0;
+  padding-left: 1.35rem;
+}
+
+.safe-markdown-root .markdown-list-item {
+  margin-bottom: 0.3rem;
+}
+
+.safe-markdown-root .markdown-strong {
+  font-weight: 700;
+  color: #0b3742;
+}
+
+.safe-markdown-root .markdown-em {
+  font-style: italic;
+}
+
+.safe-markdown-root .markdown-table-wrapper {
+  overflow-x: auto;
+  margin: 0.85rem 0;
+  border: 1px solid var(--civia-border);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.safe-markdown-root .markdown-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.88rem;
+  text-align: left;
+}
+
+.safe-markdown-root .markdown-th {
+  background: #edf5f4;
+  color: var(--civia-teal-dark);
+  padding: 0.55rem 0.85rem;
+  font-weight: 700;
+  border-bottom: 2px solid var(--civia-border);
+}
+
+.safe-markdown-root .markdown-td {
+  padding: 0.55rem 0.85rem;
+  border-bottom: 1px solid var(--civia-border);
+  color: var(--civia-text);
+}
+
+.safe-markdown-root .markdown-tr:last-child .markdown-td {
+  border-bottom: none;
+}
+
+.safe-markdown-root .markdown-tr:nth-child(even) {
+  background-color: #fafcfb;
+}
+
+.safe-markdown-root .markdown-inline-code {
+  background: #eef5f4;
+  color: var(--civia-teal-dark);
+  padding: 0.15rem 0.4rem;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.88em;
+  border: 1px solid #d4e3e0;
+}
+
+.safe-markdown-root .markdown-pre {
+  background: #14242b;
+  color: #e2f1ef;
+  padding: 0.75rem 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+}
+
+.safe-markdown-root .markdown-code-block {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.5;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  border: none;
+}
+
+.safe-markdown-root .markdown-link {
+  color: var(--civia-teal);
+  text-decoration: underline;
+  font-weight: 600;
+}
+
+.safe-markdown-root .markdown-link:hover {
+  color: var(--civia-mint);
+}
+
+.safe-markdown-root .markdown-text-link {
+  color: var(--civia-text);
+  font-weight: 600;
+}
+
+.safe-markdown-root .markdown-img-blocked {
+  display: inline-block;
+  padding: 0.2rem 0.5rem;
+  background: #eef2f2;
+  color: var(--civia-muted);
+  border-radius: 4px;
+  font-size: 0.8rem;
+  border: 1px dashed var(--civia-border);
+}
+
+.safe-markdown-root .markdown-blockquote {
+  border-left: 4px solid var(--civia-mint);
+  margin: 0.75rem 0;
+  padding: 0.35rem 0.85rem;
+  background: #f7fbfa;
+  color: var(--civia-muted);
+  border-radius: 0 6px 6px 0;
+}
+
+.safe-markdown-root .markdown-hr {
+  border: none;
+  border-top: 1px solid var(--civia-border);
+  margin: 1rem 0;
+}
+
+/* Eventos y trazabilidad ciudadana amigable */
+.civia-event-badge {
+  display: inline-block;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--civia-teal);
+  background: #e8f4f2;
+  padding: 0.15rem 0.45rem;
+  border-radius: 4px;
+}
+
+/* Estado vacío amigable */
+.civia-empty-state {
+  text-align: center;
+  padding: 2.5rem 1.5rem;
+  background: #ffffff;
+  border: 1px dashed var(--civia-border);
+  border-radius: var(--radius-md);
+  margin: 1rem 0;
+}
+
+.civia-empty-state-icon {
+  font-size: 2.2rem;
+  margin-bottom: 0.5rem;
+}
+
+.civia-empty-state h3 {
+  margin: 0 0 0.35rem;
+  color: var(--civia-teal-dark);
+  font-size: 1.1rem;
+}
+
+.civia-empty-state p {
+  margin: 0 0 1rem;
+  color: var(--civia-muted);
+  font-size: 0.9rem;
+}
