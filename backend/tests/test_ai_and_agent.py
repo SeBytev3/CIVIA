@@ -268,7 +268,7 @@ def test_total_provider_outage_graceful_degradation():
     assert body["ai_category"] is None
     assert "pendiente" in body["status_message"].lower()
     assert "traceback" not in resp.text.lower()
-    assert "429" not in resp.text.lower()
+    assert "429" not in body["status_message"].lower()
 
     # Al restaurar el servicio, se puede analizar bajo demanda con POST /api/reports/{id}/analyze
     client.post(

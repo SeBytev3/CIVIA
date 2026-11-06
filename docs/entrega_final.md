@@ -33,9 +33,9 @@ Se cerraron de forma definitiva y verificable todos los hallazgos señalados en 
 | Hallazgo / Vector | Causa Raíz Identificada | Solución Implementada | Verificación Adversarial |
 |---|---|---|---|
 | **Corrupción de igual longitud en catálogo** | `seed.py` solo comparaba existencia y tamaño `st_size`. Archivos con bytes alterados no se reparaban. | Validación por SHA-256 de bytes reales en disco y decodificación con PIL (`Image.verify()`). | `test_update_synthetic_catalog_photos_detects_same_length_corruption` PASSED. Detecta y restaura archivo corrompido (`updated=1`, `unchanged=9`). |
-| **Archivos huérfanos ante rollback SQL** | Escritura directa en disco antes de la confirmación de la transacción en PostgreSQL. | Staging atómico en temporales `.tmp_{uuid}` y publicación con `os.replace` solo tras `conn.commit()`. Limpieza garantizada en `except`. | `test_update_synthetic_catalog_photos_zero_orphans_on_rollback` PASSED. Trigger aborta y deja 0 archivos huérfanos. |
-| **Caché rancia tras actualización** | URL estática servida con `Cache-Control: max-age=3600`. El navegador servía la versión antigua sin consultar al servidor. | `photo_url` versionada con `?v={photo_sha256[:16]}`. En `main.py`, soporte ETag/304 y `Cache-Control: public, max-age=31536000, immutable` para URLs versionadas y `max-age=0, must-revalidate` para la URL canónica. | `test_photo_endpoint_versioning_etag_and_caching` PASSED. HTTP 304 verificado con `If-None-Match`. |
-| **Procedencia ética eludida en reporte ciudadano** | Muestras sintéticas generadas podían enviarse sin marca si ya existía descripción. La imagen se recortaba con `objectFit: cover`. | Backend impone `is_synthetic = True` si el hash de la foto coincide con el catálogo sintético conocido. Frontend utiliza `objectFit: contain` sobre fondo oscuro y muestra distintivo HTML exterior `ℹ Imagen generada con IA · Simulación`. | `test_synthetic_photo_ethical_provenance_enforced_on_server` PASSED. Verificación visual Playwright PASSED. |
+| **Archivos huérfanos y atomicidad de publicación en catálogo** | `seed.py` hacía commit SQL antes de `os.replace` y mantenía un fallback inseguro de `write_bytes`. | Eliminado el fallback directo. Implementado Two-Phase Staging coordinado: staging en temporales validado con PIL, backup atómico a `.bak_{uuid}` con `os.replace`, publicación atómica antes de `conn.commit()`, y reversión total desde backups en `except`. Limpieza garantizada de residuos en arranque. | `test_update_synthetic_catalog_photos_fs_failure_compensates_and_rolls_back`, `test_update_synthetic_catalog_photos_recovers_after_interruption` y `test_update_synthetic_catalog_photos_zero_orphans_on_rollback` PASSED. Cero referencias rotas y cero huérfanos. |
+| **Caché rancia tras actualización** | URL estática servida con `Cache-Control: max-age=3600`. El navegador servía la versión antigua sin consultar al servidor. | `photo_url` versionada con `?v={photo_sha256[:16]}`. En `main.py`, soporte ETag/304 e inmutabilidad (`Cache-Control: public, max-age=31536000, immutable`) para URLs versionadas y `max-age=0, must-revalidate` para la URL canónica. | `test_photo_endpoint_versioning_etag_and_caching` PASSED. HTTP 304 verificado con `If-None-Match`. |
+| **Procedencia ética eludida en reporte ciudadano** | Muestras sintéticas generadas podían enviarse sin marca si ya existía descripción. El cliente podía enviar `is_synthetic=true` en cualquier foto arbitraria. La imagen se recortaba con `objectFit: cover`. | Backend no confía en `is_synthetic` provisto por el cliente: impone `is_synthetic = True` exclusivamente si el hash de la foto coincide con las 11 muestras oficiales conocidas del catálogo. Fotos externas arbitrarias con `is_synthetic=true` son catalogadas como `is_synthetic = False`. Frontend utiliza `objectFit: contain` sobre fondo oscuro y muestra distintivo HTML exterior `ℹ Imagen generada con IA · Simulación`. | `test_synthetic_photo_ethical_provenance_enforced_on_server` PASSED (evaluando casos de catálogo y fotos externas arbitrarias). Verificación visual Playwright PASSED. |
 | **Muestra OTRO duplicada** | `sample_otro.jpg` copiaba DEMO0009 (socavón de HUECO). | Se generó una escena fotorrealista propia e independiente de poste ladeado y cableado urbano en Cali mediante subagente de IA. | `test_sample_otro_is_independent_and_distinct` PASSED. SHA-256 único y distinto. |
 
 ---
@@ -43,20 +43,31 @@ Se cerraron de forma definitiva y verificable todos los hallazgos señalados en 
 ## 3. Matriz de Pruebas y Resultados de Aceptación
 
 ### A. Suite Hermética Backend (Pytest)
-- **Total pruebas ejecutadas:** 146
-- **Pruebas pasadas (GREEN):** **145 PASSED**
+- **Total pruebas ejecutadas:** 148
+- **Pruebas pasadas (GREEN):** **147 PASSED**
 - **Pruebas deseleccionadas:** 1 (marcador `live` de IA en vivo)
 - **Fallos:** **0 FAILED**
-- **Tiempo de ejecución:** 24.34 segundos
-- **Cobertura:** Seguridad de tokens, ledger de estados, autorización de edición, idempotencia, resiliencia a fallas 429/503/timeout, circuit breaker, agente agéntico con 4 límites, catálogo fotográfico, ETag/caché, procedencia ética y persistencia PostgreSQL.
+- **Tiempo de ejecución:** 26.12 segundos
+- **Cobertura:** Seguridad de tokens, ledger de estados, autorización de edición, idempotencia, resiliencia a fallas 429/503/timeout, circuit breaker, agente agéntico con 4 límites, catálogo fotográfico con Two-Phase Staging y compensación por rollback de FS/BD, ETag/caché inmutable, procedencia ética certificada en servidor y persistencia PostgreSQL.
 
-### B. Pruebas de Interfaz de Usuario y Flujo E2E (Playwright en Chromium / Edge)
-- **Acceso PWA:** HTTP 200, título y componentes cargados correctamente.
-- **Captura con cámara web en tiempo real:** Activación de visor `<video>` con `getUserMedia`, disparo de foto a `<canvas>`, generación de archivo JPEG y apagado estricto de pistas (`track.stop()`) al cerrar o cambiar de pestaña.
-- **Selección de muestras sintéticas:** Carga de activo local, asignación de categoría y descripción demo, presentación de distintivo HTML `ℹ Imagen generada con IA · Simulación`.
-- **Envío y persistencia:** Envío multipart a `/api/reports`, creación en base de datos, retorno de radicado `CIV-2026-5A30F0B466`.
-- **Recarga y consulta de radicado:** Recarga completa de la página en el navegador; consulta exitosa del radicado en PostgreSQL con recuperación intacta de los datos y la fotografía sin recortes.
-- **Errores de consola:** Cero errores críticos de JavaScript.
+### B. Pruebas de Interfaz de Usuario y Flujo Dual E2E Portable (Playwright)
+- **Portabilidad garantizada:** `playwright` declarado en `devDependencies` de `frontend/package.json` con script `npm run test:e2e`. Cero rutas absolutas fijas en `scripts/test_e2e_final.cjs`. Detección automática y flexible de Chromium estándar con fallback a Google Chrome o Microsoft Edge.
+- **Test 1 — Fotografía Ciudadana Real con Cámara en Vivo:**
+  - Activación de cámara emulada mediante `getUserMedia`.
+  - Captura de cuadro a `<canvas>` y generación de fotografía JPEG real del dispositivo.
+  - Envío de la fotografía real a `/api/reports`.
+  - Generación y recepción de radicado ciudadano (ej. `CIV-2026-CA1BFF8D95`).
+  - Verificación en servidor de procedencia ciudadana real (`is_synthetic = false`).
+  - Descarga y verificación HTTP 200 de la imagen almacenada en `/api/reports/{id}/photo` (12916 bytes válidos).
+  - Recarga del navegador (`page.reload()`) y confirmación de persistencia íntegra en PostgreSQL.
+- **Test 2 — Muestra Sintética Oficial de Catálogo:**
+  - Carga de muestra oficial (ej. Poste / Cables), asignación de categoría y descripción.
+  - Verificación de distintivo ético exterior HTML `ℹ Imagen generada con IA · Simulación` en vista previa.
+  - Envío a API y obtención de radicado (ej. `CIV-2026-C263227696`).
+  - Verificación en servidor de procedencia sintética ética certificada (`is_synthetic = true`).
+  - Verificación de renderizado visual con regla CSS `objectFit: contain` sobre fondo oscuro, preservando íntegra la franja de simulación ética sin recortes.
+  - Recarga de página y confirmación de persistencia.
+- **Errores de consola:** Cero errores de JavaScript.
 
 ---
 

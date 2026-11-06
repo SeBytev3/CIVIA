@@ -4,27 +4,32 @@
 
 ---
 
-## Fase Final — Remediación Completa, Despliegue Autónomo y Release MAIN (2026-11-05)
+## Fase Final — Portabilidad, Publicación Segura de Catálogo y Release MAIN (2026-11-05)
 
-### 1. Remediación de Auditoría Codex (100% CERRADA)
-- **Detección de corrupción de igual longitud:** seed.py valida SHA-256 de bytes en disco y decodificación PIL (Image.verify()); repara automáticamente archivos alterados sin confiar en st_size.
-- **Cero archivos huérfanos ante rollback SQL:** Staging atómico en temporales .tmp_{uuid} y publicación mediante os.replace únicamente tras confirmación conn.commit(); limpieza garantizada en bloque except.
-- **Caché versionada inmutable:** photo_url incluye versión ?v={photo_sha256[:16]}; soporte ETag/304 e inmutabilidad (Cache-Control: public, max-age=31536000, immutable), con revalidación forzada (max-age=0, must-revalidate) en la URL canónica.
-- **Procedencia ética forzada en servidor:** En main.py, si el SHA-256 de una foto coincide con cualquier activo o muestra sintética, se impone incondicionalmente is_synthetic = True en el servidor y PostgreSQL. En frontend, la imagen se presenta con objectFit: contain sobre fondo oscuro, preservando visible la franja de simulación de 48px sin recortes y con distintivo HTML visible.
-- **Muestra OTRO independiente:** Generada escena fotográfica fotorrealista propia (cali_utility_pole_cables_otro...) con poste y cableado en Cali, sustituyendo el duplicado de socavón de DEMO0009.
+### 1. Remediación de Auditoría Codex y Portabilidad Completa (100% CERRADA)
+- **Publicación segura de catálogo con Two-Phase Staging y compensación:** En `seed.py`, se eliminó el fallback no atómico de escritura directa. Se implementó Two-Phase Staging con validación PIL previa, backups atómicos `.bak_{uuid}` con `os.replace` previo a `conn.commit()`, rollback compensatorio en bloque `except` restaurando archivos originales y eliminando temporales, garantizando cero referencias rotas y cero huérfanos ante fallos de disco o interrupciones. Se limpian residuos preventivamente en arranque.
+- **Procedencia ética forzada en servidor:** En `main.py`, el servidor no confía en el campo `is_synthetic` arbitrario del cliente; la procedencia sintética se certifica exclusivamente por coincidencia criptográfica SHA-256 contra las 11 muestras oficiales del catálogo. Fotos externas enviadas con `is_synthetic=true` son catalogadas con `is_synthetic=false`.
+- **Caché versionada inmutable:** `photo_url` incluye versión `?v={photo_sha256[:16]}`; soporte ETag/304 e inmutabilidad (`Cache-Control: public, max-age=31536000, immutable`), con revalidación forzada (`max-age=0, must-revalidate`) en la URL canónica.
+- **Muestra OTRO independiente:** Generada escena fotográfica fotorrealista propia (`cali_utility_pole_cables_otro...`) con poste y cableado en Cali, sustituyendo el duplicado de socavón de DEMO0009.
 
-### 2. Captura y Subida en Navegador
-- Implementada interfaz de captura directa con cámara web de dispositivo mediante getUserMedia(), visor video, botón de captura a canvas, reintento y apagado garantizado de pistas (track.stop()) al cerrar, desmontar o cambiar de pestaña.
+### 2. Captura Ciudadana y Pruebas Portables
+- Interfaz con cámara web (`getUserMedia`), visor video, botón de captura a canvas, reintento y apagado garantizado de pistas (`track.stop()`) al cerrar, desmontar o cambiar de pestaña.
 - Soporte para subida de archivos locales y drag & drop (JPEG, PNG, WEBP, máx. 5 MB).
 - Muestras sintéticas de prueba demo accesibles con un clic para evaluación académica.
+- **Portabilidad Playwright E2E:** Eliminadas todas las rutas absolutas locales en `scripts/test_e2e_final.cjs`. Declarada dependencia de desarrollo `playwright` en `frontend/package.json` con comando `npm run test:e2e`. Detección automática y flexible de navegador (Chromium estándar de Playwright con fallback a Chrome/Edge).
+- **Suite Dual E2E:** 
+  1. *Test 1 (Cámara real en vivo):* Captura cuadro con cámara emulada, envía la foto real del dispositivo a la API, obtiene radicado, descarga la imagen almacenada por HTTP 200, verifica `is_synthetic=false` y confirma persistencia en PostgreSQL tras recarga (`page.reload()`). PASS.
+  2. *Test 2 (Muestra sintética oficial):* Selecciona muestra de catálogo, verifica distintivo ético en vista previa, envía a API, obtiene radicado, verifica `is_synthetic=true` en servidor y estilo `objectFit: contain` en vista de detalle, y confirma persistencia tras recarga. PASS.
 
 ### 3. Resultados de Pruebas
-- **Suite Hermética Backend:** 145 PASSED, 1 deselected, 0 failed en 24.34s.
-- **Prueba E2E Playwright:** Flujo completo validado en Chromium / Edge con emulación de medios: cámara web -> captura -> muestra sintética -> inserción PostgreSQL -> radicado -> persistencia tras recarga. PASS.
+- **Suite Hermética Backend:** 147 PASSED, 1 deselected, 0 failed en 26.12s.
+- **Prueba E2E Playwright:** Flujo dual validado (Cámara en vivo real enviada + Muestra oficial de catálogo) con persistencia en PostgreSQL y recarga. PASS.
+- **Frontend Build:** `tsc -b && vite build` completado sin advertencias ni errores.
 
-### 4. Publicación en MAIN
-- Autorizada la integración y publicación en la rama main de GitHub.
-- Documentación integral para agentes (CLAUDE.md, GEMINI.md, AGENTS.md, docs/AI_DEPLOY.md, docs/DEPLOYMENT.md, docs/entrega_final.md).
+### 4. Publicación en MAIN y Documentación
+- Rama `main` como rama principal y funcional en GitHub.
+- `scripts/run.sh` con formato de saltos de línea LF.
+- `docs/guia_instalacion_otro_pc.md` actualizado para `main`, sin rutas ni credenciales fijas del equipo original, aclarando que las claves de Gemini/Groq son opcionales y solo para inferencia en vivo, no requeridas para radicación, mapa, fotos ni persistencia.
 - Estado cloud: 'DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA'.
 
 ---

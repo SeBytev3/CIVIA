@@ -275,6 +275,87 @@ def test_update_synthetic_catalog_photos_zero_orphans_on_rollback():
                 conn.commit()
 
 
+def test_update_synthetic_catalog_photos_fs_failure_compensates_and_rolls_back(monkeypatch):
+    """
+    Verifica que si ocurre un fallo en os.replace durante la publicación en disco:
+    1. Se interrumpe la operación antes del commit SQL.
+    2. Se compensa restaurando los archivos originales desde sus backups temporales.
+    3. No quedan archivos temporales (.tmp_*) ni backups (.bak_*).
+    4. En PostgreSQL las filas conservan sus valores previos.
+    """
+    seed_synthetic_reports(force_reset=True)
+
+    # Forzar actualización en DEMO0001 y DEMO0002
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE reports SET photo_sha256 = '0000000000000000000000000000000000000000000000000000000000000000' WHERE tracking_code IN ('CIV-2026-DEMO0001', 'CIV-2026-DEMO0002');"
+            )
+            conn.commit()
+
+    import os
+    real_replace = os.replace
+    call_count = 0
+
+    def faulty_replace(src, dst):
+        nonlocal call_count
+        call_count += 1
+        # Fallar durante la publicación de reemplazo
+        if call_count >= 3:
+            raise OSError("INJECTED_DISK_IO_FAILURE_ON_REPLACE")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", faulty_replace)
+
+    with pytest.raises(OSError) as exc_info:
+        update_synthetic_catalog_photos()
+    assert "INJECTED_DISK_IO_FAILURE_ON_REPLACE" in str(exc_info.value)
+
+    # Restaurar replace real
+    monkeypatch.setattr(os, "replace", real_replace)
+
+    # Verificar que no quedaron temporales .tmp_* ni .bak_*
+    tmp_files = list(settings.UPLOAD_DIR.glob("*.tmp_*")) + list(settings.UPLOAD_DIR.glob("*.bak_*"))
+    assert len(tmp_files) == 0, f"Quedaron residuos temporales: {tmp_files}"
+
+    # Verificar que el commit SQL NO se ejecutó: las filas siguen en '0000...'
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT photo_sha256 FROM reports WHERE tracking_code = 'CIV-2026-DEMO0002';")
+            assert cur.fetchone()["photo_sha256"] == "0000000000000000000000000000000000000000000000000000000000000000"
+
+
+def test_update_synthetic_catalog_photos_recovers_after_interruption():
+    """
+    Verifica que si una sesión previa se interrumpió dejando archivos .tmp_* y .bak_* residuales,
+    el inicio de update_synthetic_catalog_photos() los limpie y complete la reconciliación.
+    """
+    seed_synthetic_reports(force_reset=True)
+
+    # Inyectar archivos residuales simulando corte previo
+    residual_tmp = settings.UPLOAD_DIR / "synthetic_civ-2026-demo0001.jpg.tmp_abandoned123"
+    residual_bak = settings.UPLOAD_DIR / "synthetic_civ-2026-demo0002.jpg.bak_abandoned456"
+    residual_tmp.write_bytes(b"RESIDUAL_ORPHAN_DATA_1")
+    residual_bak.write_bytes(b"RESIDUAL_ORPHAN_DATA_2")
+
+    # Forzar que DEMO0003 esté desincronizado
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE reports SET photo_sha256 = 'desync_sha' WHERE tracking_code = 'CIV-2026-DEMO0003';")
+            conn.commit()
+
+    # Ejecutar actualizador
+    res = update_synthetic_catalog_photos()
+    assert res["updated"] == 1
+    assert res["unchanged"] == 9
+
+    # Verificar que los residuos fueron limpiados
+    assert not residual_tmp.exists()
+    assert not residual_bak.exists()
+    assert len(list(settings.UPLOAD_DIR.glob("*.tmp_*"))) == 0
+    assert len(list(settings.UPLOAD_DIR.glob("*.bak_*"))) == 0
+
+
 def test_photo_endpoint_versioning_etag_and_caching():
     """
     Verifica:
@@ -315,44 +396,71 @@ def test_photo_endpoint_versioning_etag_and_caching():
 
 def test_synthetic_photo_ethical_provenance_enforced_on_server():
     """
-    Verifica que si un usuario sube una fotografía cuyo SHA-256 coincide
-    con una muestra del catálogo sintético, el backend fuerce is_synthetic = TRUE
-    en el servidor, impidiendo que una muestra sintética pase como reporte real.
+    Verifica el principio de procedencia certificada por servidor:
+    1. Si un usuario sube una muestra oficial del catálogo sintético (aun enviando is_synthetic=False),
+       el servidor impone criptográficamente is_synthetic = TRUE.
+    2. Si un usuario sube una fotografía arbitraria/externa pretendiendo marcarla con is_synthetic=True,
+       el servidor NO confunde esa marca voluntaria con procedencia certificada y guarda is_synthetic = FALSE.
     """
     seed_synthetic_reports(force_reset=True)
     client = TestClient(app)
 
-    # Tomar la muestra de HUECO
+    # Caso 1: Foto del catálogo oficial enviada con is_synthetic=false -> Servidor certifica is_synthetic=True
     sample_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "public" / "demo_evidence" / "sample_hueco.jpg"
     assert sample_path.exists()
     sample_bytes = sample_path.read_bytes()
 
-    # Enviar reporte simulando ser ordinario (is_synthetic no enviado o enviado como False)
-    payload = {
+    payload_sample = {
         "description": "Reporte ciudadano común con fotografía de prueba enviada sin marca",
         "latitude": 3.4516,
         "longitude": -76.5320,
         "is_synthetic": "false",
+        "auto_analyze": "false",
     }
-    files = {
+    files_sample = {
         "photo": ("evidencia.jpg", io.BytesIO(sample_bytes), "image/jpeg"),
     }
 
-    create_res = client.post("/api/reports", data=payload, files=files)
+    create_res = client.post("/api/reports", data=payload_sample, files=files_sample)
     assert create_res.status_code == 201
-    created = create_res.json()
-    created_id = created["id"]
-    register_test_report_id(created_id)
+    created_official = create_res.json()
+    register_test_report_id(created_official["id"])
 
-    # El servidor DEBE haber impuesto is_synthetic = True por coincidencia de hash ético
-    assert created["is_synthetic"] is True
+    assert created_official["is_synthetic"] is True
 
-    # Verificar en PostgreSQL
+    # Caso 2: Fotografía externa/arbitraria enviada con is_synthetic=true -> Servidor guarda is_synthetic=False
+    # Generar una imagen JPEG válida externa no presente en el catálogo
+    test_img = Image.new("RGB", (640, 480), color=(120, 180, 240))
+    buf = io.BytesIO()
+    test_img.save(buf, format="JPEG")
+    arbitrary_bytes = buf.getvalue()
+
+    payload_arbitrary = {
+        "description": "Reporte ciudadano ordinario donde cliente envía is_synthetic=true fraudulentamente",
+        "latitude": 3.4520,
+        "longitude": -76.5330,
+        "is_synthetic": "true",
+        "auto_analyze": "false",
+    }
+    files_arbitrary = {
+        "photo": ("camara_usuario.jpg", io.BytesIO(arbitrary_bytes), "image/jpeg"),
+    }
+
+    create_arb_res = client.post("/api/reports", data=payload_arbitrary, files=files_arbitrary)
+    assert create_arb_res.status_code == 201
+    created_arb = create_arb_res.json()
+    register_test_report_id(created_arb["id"])
+
+    # El servidor NO valida procedencia oficial para una foto externa arbitraria
+    assert created_arb["is_synthetic"] is False
+
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT is_synthetic FROM reports WHERE id = %s;", (created_id,))
-            row = cur.fetchone()
-            assert row["is_synthetic"] is True
+            cur.execute("SELECT is_synthetic FROM reports WHERE id = %s;", (created_official["id"],))
+            assert cur.fetchone()["is_synthetic"] is True
+
+            cur.execute("SELECT is_synthetic FROM reports WHERE id = %s;", (created_arb["id"],))
+            assert cur.fetchone()["is_synthetic"] is False
 
 
 def test_sample_otro_is_independent_and_distinct():

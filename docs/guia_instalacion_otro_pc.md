@@ -3,8 +3,8 @@
 **Proyecto:** CIVIA — Plataforma de Reportes Ciudadanos Asistidos por IA (Cali y Valle del Cauca)  
 **Equipo:** Stefania Córdoba y Sebastian Espinosa  
 **Asignatura:** Ingeniería de Aplicaciones con IA (Momento 2) · Universidad Cooperativa de Colombia  
-**Rama aprobada por auditoría (G2.1.8 F1–F8):** `fix/auditoria-final`  
-**Commit de código aprobado:** `cf48e710a4d321455864d2b59a4257cdca9938aa`
+**Rama principal y oficial de entrega:** `main`  
+**Estado:** Release Académico Final Verificado y Aprobado
 
 ---
 
@@ -69,7 +69,7 @@ Si el computador de destino es un equipo limpio sin herramientas previas:
 ## 4. Clonación del repositorio y selección de la rama aprobada
 
 > [!IMPORTANT]
-> La versión que supera el 100% de los contratos de auditoría (F1 a F8, atomicidad REST, clasificación causal y recuperación PWA) está congelada en la rama **`fix/auditoria-final`**. Debe realizarse el checkout explícito a esta rama.
+> La versión final de entrega académica se encuentra publicada y disponible directamente en la rama predeterminada **`main`** de GitHub.
 
 Abre PowerShell y ejecuta:
 
@@ -81,12 +81,9 @@ New-Item -ItemType Directory -Force -Path C:\CIVIA_EVAL | Set-Location
 git clone https://github.com/SeBytev3/CIVIA.git
 Set-Location CIVIA
 
-# 3. Cambiar a la rama aprobada
-git checkout fix/auditoria-final
-
-# 4. Verificar que el HEAD apunte al commit aprobado
-git log -1 --oneline
-# Salida esperada: [cf48e71 o commit documental de cierre]
+# 3. Confirmar que se encuentra en la rama main
+git status
+# Salida esperada: On branch main
 ```
 
 ---
@@ -103,9 +100,9 @@ git log -1 --oneline
    ```powershell
    python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); p.write_text(re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', p.read_text()))"
    ```
-3. **Claves de Inteligencia Artificial (opcional para arranque inicial):**
-   - Para evaluar el sistema en **modo local / sintético** (suite dorada determinista, CRUD, radicación, base de datos y consola de observabilidad), **NO** requieres claves externas.
-   - Para habilitar la inferencia multimodal en vivo con los proveedores reales, abre `.env` en un editor (ej. `notepad .env`) y añade tus claves gratuitas:
+3. **Claves de Inteligencia Artificial (OPCIONALES — Solo requeridas para inferencia multimodal en vivo):**
+   - **NO son necesarias para evaluar el sistema:** La captura con cámara, la subida de fotos, la georreferenciación, la radicación, la persistencia en PostgreSQL 17, el seguimiento, la consulta en mapa y la suite hermética de 147 pruebas automáticas operan al 100% de forma determinista y local sin ninguna clave externa.
+   - Si el profesor desea probar el análisis multimodal de imágenes en vivo conectando con Google Gemini o Groq, puede añadir sus claves opcionales en `.env`:
      ```ini
      GOOGLE_API_KEY_PRIMARY=AIzaSy...
      GOOGLE_API_KEY_SECONDARY=AIzaSy...
@@ -242,7 +239,8 @@ El conteo incluirá los 10 reportes sintéticos iniciales más los reportes nuev
 | **Logs de la API Backend** | `docker compose logs --tail=50 -f api` |
 | **Logs de la Base de Datos** | `docker compose logs --tail=50 db` |
 | **Logs del Servidor Nginx** | `docker compose logs --tail=50 frontend` |
-| **Ejecutar suite de pruebas** | `docker compose exec -T api pytest -v` |
+| **Ejecutar suite hermética de 147 pruebas** | `docker compose exec -T api pytest -m "not live" -v` |
+| **Ejecutar pruebas E2E de navegador (opcional)** | `cd frontend && npm install && npm run test:e2e` |
 | **Ejecutar evaluación formal** | `docker compose exec -T api python eval/evaluar.py --mode deterministic` |
 
 ---
@@ -270,7 +268,7 @@ docker compose down
 | **3** | **Agente con herramientas y 4 límites** | Consultar reportes viales y ambientales en el chat. Realizar pregunta de control GD-06 (sin respuesta). Mostrar que la IA no inventa datos y respeta límites de vueltas, tokens y timeout. | 2.0 min | Tool calling tipado hacia SQL directo (sin RAG); respuesta honesta en GD-06. |
 | **4** | **Aprobación humana para escritura crítica** | Agente propone cambio de estado (`proponer_actualizacion_critica`). Ingresar a `/admin` con `ADMIN_TOKEN` y aprobar manualmente la propuesta. | 1.5 min | Invariante: La IA jamás escribe directamente en la tabla `reports`. |
 | **5** | **Resiliencia y Circuit Breakers** | Activar `FALLA_FORZADA = 429` en la consola administrativa. Realizar una consulta y mostrar la conmutación transparente a Groq (`qwen/qwen3.8-27b`). | 1.0 min | Cero tracebacks o errores HTTP expuestos al ciudadano; observabilidad registrada en `ai_traces`. |
-| **6** | **Evaluación formal y métricas reales** | Mostrar `eval/resultados/reporte_evaluacion.md`: 6 casos dorados SQL (`100%`), 15 consultas P50/P90 (`93.3%` acierto), costo estimado y cero secretos. | 1.0 min | Suite hermética de 134 pruebas automáticas pasando al 100%. |
+| **6** | **Evaluación formal y métricas reales** | Mostrar `eval/resultados/reporte_evaluacion.md`: 6 casos dorados SQL (`100%`), 15 consultas P50/P90 (`93.3%` acierto), costo estimado y cero secretos. | 1.0 min | Suite hermética de 147 pruebas automáticas pasando al 100% (cero fallos). |
 
 ---
 
@@ -295,4 +293,4 @@ Para mantener la máxima transparencia académica:
 ## 17. Declaración de estado de verificación externa
 
 > [!NOTE]
-> Esta guía ha sido construida y validada estáticamente contra el código aprobado en el commit `cf48e71` en el entorno de desarrollo principal. La instalación física desde cero en un segundo computador portátil Windows 11 queda formalmente dispuesta para su ejecución por parte del evaluador o del equipo durante la sesión de sustentación académica, siguiendo exactamente los pasos descritos en este documento.
+> Esta guía ha sido verificada en la rama principal `main`, incluyendo la prueba de clonación limpia en carpeta temporal aislada y validación de 147 pruebas herméticas. La instalación física desde cero en un segundo computador portátil Windows 11 queda formalmente dispuesta para su ejecución por parte del evaluador o del equipo durante la sesión de sustentación académica, siguiendo exactamente los pasos descritos en este documento.

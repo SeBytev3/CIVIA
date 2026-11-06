@@ -391,23 +391,42 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
     Garantías de integridad y resiliencia:
     - Validación de SHA-256 de los bytes reales en disco y decodificación PIL.
     - Detección y reparación de archivos corruptos aunque tengan la misma longitud.
-    - Cero orfandad ante rollback SQL: staging en temporales y publicación atómica con os.replace
-      únicamente tras la confirmación exitosa de la transacción en PostgreSQL.
+    - Publicación atómica y segura mediante Two-Phase Staging con compensación y backup:
+      1. Limpieza de archivos temporales huérfanos (.tmp_* y .bak_*) de sesiones interrumpidas.
+      2. Staging previo de archivos en temporales con validación PIL antes de tocar la base de datos.
+      3. Copia de seguridad atómica (.bak_{uuid}) de los archivos destino existentes.
+      4. Publicación atómica mediante os.replace dentro del bloque transaccional coordinado.
+      5. En caso de error (SQL rollback o fallo de sistema de archivos), reversión completa:
+         los archivos destino se restauran desde los backups y se eliminan los temporales.
+      6. Cero riesgo de referencias SQL persistidas hacia archivos no publicados.
+      7. Eliminado todo fallback inseguro de escritura directa no atómica.
     - Idempotencia estricta: si disco y BD ya coinciden con el activo de referencia, unchanged=10.
     """
-    import os
     import io
+    import os
     from uuid import uuid4
 
     target_upload_dir = upload_dir_path or settings.UPLOAD_DIR
     target_upload_dir.mkdir(parents=True, exist_ok=True)
+
+    # Limpieza preventiva de archivos residuales (.tmp_* o .bak_*) de una interrupción previa
+    for residual in target_upload_dir.glob("*.tmp_*"):
+        try:
+            residual.unlink(missing_ok=True)
+        except Exception:
+            pass
+    for residual in target_upload_dir.glob("*.bak_*"):
+        try:
+            residual.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     updated_count = 0
     unchanged_count = 0
     missing_count = 0
 
     catalog_codes = [item["tracking_code"] for item in SYNTHETIC_REPORTS]
-    staged_transfers: list[tuple[Path, Path]] = []
+    staged_items: list[dict[str, Any]] = []
 
     try:
         with get_conn() as conn:
@@ -454,12 +473,52 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
                         unchanged_count += 1
                         continue
 
-                    # 3. Si requiere actualización o reparación de disco, preparar archivo temporal de staging
+                    # 3. Preparar archivo temporal de staging y verificar su decodificación antes de tocar BD
                     staged_tmp = target_upload_dir / f"{photo_name}.tmp_{uuid4().hex}"
                     staged_tmp.write_bytes(bytes_data)
-                    staged_transfers.append((staged_tmp, dest_file))
+                    with Image.open(io.BytesIO(bytes_data)) as verify_stage:
+                        verify_stage.verify()
 
-                    # 4. Actualizar metadatos en PostgreSQL
+                    staged_items.append({
+                        "rid": rid,
+                        "code": code,
+                        "photo_name": photo_name,
+                        "photo_mime": photo_mime,
+                        "photo_size": len(bytes_data),
+                        "width": width,
+                        "height": height,
+                        "expected_sha": expected_sha256,
+                        "dest_file": dest_file,
+                        "staged_tmp": staged_tmp,
+                        "backup_file": None,
+                        "replaced": False,
+                    })
+
+                # Si no hay nada que actualizar, terminar limpiamente
+                if not staged_items:
+                    return {
+                        "updated": 0,
+                        "unchanged": unchanged_count,
+                        "missing_in_db": missing_count,
+                        "catalog_total": len(catalog_codes),
+                    }
+
+                # Fase 4: Publicación atómica coordinada con respaldo compensatorio
+                for entry in staged_items:
+                    dest = entry["dest_file"]
+                    tmp = entry["staged_tmp"]
+
+                    # Si existe un archivo previo en el destino, moverlo a backup temporal
+                    if dest.exists():
+                        bak = target_upload_dir / f"{dest.name}.bak_{uuid4().hex}"
+                        os.replace(dest, bak)
+                        entry["backup_file"] = bak
+
+                    # Mover archivo de staging a destino definitivo de forma atómica
+                    os.replace(tmp, dest)
+                    entry["replaced"] = True
+
+                    # Actualizar metadatos en PostgreSQL dentro de la misma transacción
                     cur.execute(
                         """
                         UPDATE reports
@@ -473,38 +532,65 @@ def update_synthetic_catalog_photos(upload_dir_path: Path | None = None) -> dict
                         WHERE id = %s AND is_synthetic = TRUE AND tracking_code = %s;
                         """,
                         (
-                            photo_name,
-                            photo_mime,
-                            len(bytes_data),
-                            width,
-                            height,
-                            expected_sha256,
-                            rid,
-                            code,
+                            entry["photo_name"],
+                            entry["photo_mime"],
+                            entry["photo_size"],
+                            entry["width"],
+                            entry["height"],
+                            entry["expected_sha"],
+                            entry["rid"],
+                            entry["code"],
                         ),
                     )
                     updated_count += 1
 
-                # Confirmar la transacción SQL antes de publicar en disco
+                # 5. Confirmar transacción en PostgreSQL
                 conn.commit()
 
-        # Si el commit SQL fue exitoso, publicar atómicamente todos los archivos preparados
-        for staged_tmp, dest_file in staged_transfers:
-            try:
-                os.replace(staged_tmp, dest_file)
-            except Exception:
-                # Fallback de copia/unlink si os.replace fallara entre sistemas de archivos
-                dest_file.write_bytes(staged_tmp.read_bytes())
-                staged_tmp.unlink(missing_ok=True)
+        # Una vez confirmado exitosamente el commit en PostgreSQL, eliminar los backups temporales
+        for entry in staged_items:
+            bak = entry.get("backup_file")
+            if bak and bak.exists():
+                try:
+                    bak.unlink()
+                except Exception:
+                    pass
 
     except Exception:
-        # En caso de error o rollback SQL, limpiar TODOS los archivos temporales de staging
-        for staged_tmp, _ in staged_transfers:
-            try:
-                if staged_tmp.exists():
-                    staged_tmp.unlink()
-            except Exception:
-                pass
+        # En caso de error o rollback SQL (o fallo en os.replace), compensar restaurando backups
+        for entry in staged_items:
+            dest = entry.get("dest_file")
+            bak = entry.get("backup_file")
+            replaced = entry.get("replaced", False)
+            tmp = entry.get("staged_tmp")
+
+            if replaced and dest and dest.exists():
+                if bak and bak.exists():
+                    try:
+                        os.replace(bak, dest)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        dest.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+            elif bak and bak.exists() and dest and not dest.exists():
+                try:
+                    os.replace(bak, dest)
+                except Exception:
+                    pass
+
+            if tmp and tmp.exists():
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            if bak and bak.exists():
+                try:
+                    bak.unlink(missing_ok=True)
+                except Exception:
+                    pass
         raise
 
     return {

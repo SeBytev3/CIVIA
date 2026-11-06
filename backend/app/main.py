@@ -275,9 +275,11 @@ async def create_citizen_report(
                     logger.warning("Fallo no bloqueante en transcripción opcional: %s", type(exc).__name__)
 
         known_synthetic = get_known_synthetic_sha256_set()
+        # Procedencia certificada por servidor: la condición sintética oficial de prueba
+        # se determina estrictamente por la coincidencia criptográfica del contenido con
+        # los activos validados del catálogo CIVIA, impidiendo falsificaciones del cliente.
         eff_is_synthetic = bool(
-            is_synthetic
-            or (raw_photo_sha in known_synthetic)
+            (raw_photo_sha in known_synthetic)
             or (photo_meta["photo_sha256"] in known_synthetic)
         )
 
