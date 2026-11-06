@@ -85,6 +85,13 @@ docker run --rm -v "${PWD}\backend:/app" -v "${PWD}\frontend:/frontend" -v "${PW
 
 ---
 
-## 6. Estado Oficial de Despliegue en la Nube
+## 6. Documentación Canónica de la API REST y Swagger UI
+- **Swagger UI interactivo:** `http://localhost:8000/docs`
+- **Especificación OpenAPI cruda:** `http://localhost:8000/openapi.json`
+- **Documento canónico exhaustivo:** [`docs/API.md`](docs/API.md) detalla los 23 endpoints organizados en 8 tags temáticos, esquemas Pydantic v2, códigos HTTP, flujo React-FastAPI, persistencia PostgreSQL 17 y seguridad por token HMAC.
+
+---
+
+## 7. Estado Oficial de Despliegue en la Nube
 > **DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA**  
 > La aplicación se entrega completamente dockerizada y reproducible en cualquier host Windows 11 o Linux. No se ha desplegado a una URL pública de terceros para no incurrir en costos privados no asignados, ni exponer secretos en infraestructuras gratuitas sin PostgreSQL dedicado y persistente.

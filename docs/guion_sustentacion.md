@@ -79,6 +79,43 @@
 
 ---
 
+---
+
+## Demostración Técnica de la API REST con Swagger UI (`/docs`)
+
+Esta sección guía paso a paso al equipo o al profesor evaluador para auditar la interfaz OpenAPI interactiva de CIVIA en caso de requerir una inspección técnica profunda de los servicios:
+
+1. **Apertura de la interfaz Swagger UI:**
+   - Abrir en el navegador: `http://localhost:8000/docs`.
+   - Señalar el título oficial (*CIVIA — API de Gestión Inteligente y Vigilancia Urbana*), la versión `1.0.0` y la arquitectura general documentada en la cabecera.
+2. **Estructura por Categorías Temáticas (8 Tags y 23 Endpoints):**
+   - Mostrar al evaluador las 8 categorías organizadas lógicamente:
+     * *Salud del sistema* (1 endpoint: `/health`).
+     * *Reportes ciudadanos* (7 endpoints: estadísticas, alta multipart, reanálisis IA, listado paginado, búsqueda por radicado, consulta por UUID y confirmación ciudadana).
+     * *Fotografías y evidencias* (1 endpoint: entrega CAS con ETag, HTTP 304 y CSP).
+     * *Seguimiento y trazabilidad* (2 endpoints: línea de tiempo de eventos por UUID o código radicado).
+     * *Asistente ciudadano e IA* (2 endpoints: consulta agéntica con 4 límites y reconciliación transaccional).
+     * *Administración y gestión operativa* (6 endpoints: estados, resiembra sintética, notificaciones internas y notas de gestión).
+     * *Aprobaciones humanas* (2 endpoints: bandeja de decisiones éticas de un solo uso).
+     * *Observabilidad y resiliencia* (2 endpoints: telemetría de latencias P50/P90, estado de circuit breakers e inyección de fallas).
+3. **Ejecución en vivo de comprobación de salud (`GET /health`):**
+   - Desplegar `GET /health`, pulsar **«Try it out»** y luego **«Execute»**.
+   - Mostrar la respuesta `HTTP 200`: `"status": "ok"`, `"db": {"connected": true, "schema_ready": true}`, verificando conectividad transaccional con PostgreSQL 17.
+4. **Consulta real de reportes de Cali (`GET /api/reports` o `GET /api/reports/stats`):**
+   - Desplegar `GET /api/reports/stats` y pulsar **«Execute»**: mostrar el desglose de incidentes por categoría (`HUECO`, `BASURAS`, `TALA`, `QUEMA`, `OTRO`).
+   - Desplegar `GET /api/reports` y filtrar por `category=HUECO`: comprobar cómo PostgreSQL devuelve los reportes sintéticos oficiales en Cali con sus coordenadas reales y radicados `CIV-2026-DEMO0001`, etc.
+5. **Demostración de seguridad fail-closed y autenticación (`401 Unauthorized`):**
+   - Desplegar `GET /api/admin/observability` y pulsar **«Execute»** sin cabeceras.
+   - Mostrar el rechazo inmediato con código `HTTP 401 Unauthorized` (`detail: Token de administración no configurado o ausente`), demostrando que Swagger UI no da acceso libre a consolas operativas.
+6. **Autorización con `X-Admin-Token` en Swagger UI:**
+   - En el campo de parámetro `X-Admin-Token` de la petición, ingresar el token generado por el bootstrap en `.env` (obtenido mediante `Get-Content .env | Select-String "ADMIN_TOKEN"`).
+   - Reejecutar la llamada: mostrar el código `HTTP 200`, la cadena de 3 niveles de IA, los circuit breakers activos y las métricas P50/P90.
+7. **Relación entre modelos Pydantic y especificación OpenAPI:**
+   - Desplazarse al final de la página a la sección **«Schemas»**.
+   - Mostrar al profesor cómo los modelos Pydantic v2 de Python (`ReportPublicResponse`, `ReportCreateForm`, `AgentQueryRequest`, `AIAnalysisContract`) definen los tipos de datos, rangos numéricos y campos obligatorios/opcionales sin desfase documental.
+8. **Articulación de la interfaz React SPA con la API:**
+   - Explicar al profesor que la aplicación ciudadana (`http://localhost:5173`) no accede a PostgreSQL directamente: consume exactamente estos 23 endpoints a través del proxy inverso Nginx (`/api/*`), preservando desacoplamiento, seguridad e integridad referencial. Para la especificación completa, remitir a [`docs/API.md`](API.md).
+
 ## Banco de respuestas rápidas para los 3 minutos de preguntas (Q&A)
 
 1. **«¿Qué ocurre si el modelo devuelve un JSON malformado o con campos en otro idioma/sinónimo?»**

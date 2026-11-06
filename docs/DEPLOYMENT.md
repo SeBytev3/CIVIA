@@ -57,3 +57,9 @@ Para evaluar la viabilidad de publicar CIVIA en una nube pública, se analizaron
 > 3. **Cero costos y cero credenciales expuestas:** No se comprometen secretos de infraestructura privada ni se incurre en facturación para la entrega del Momento 2.
 > 
 > Si la cátedra o institución universitaria provee una cuenta institucional de AWS, GCP o Railway, el archivo `Dockerfile` y `docker-compose.yml` están preparados para desplegarse de manera inmediata.
+
+
+---
+
+## 4. Documentación de la API REST y Contratos de Servicio
+Para consultar el catálogo exhaustivo de los 23 endpoints REST de CIVIA, sus parámetros, modelos de datos Pydantic v2, códigos de respuesta HTTP y directrices de seguridad, consulte el documento canónico [`docs/API.md`](API.md).

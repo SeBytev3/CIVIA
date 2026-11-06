@@ -90,14 +90,12 @@ git status
 
 ## 5. Preparación del archivo de configuración `.env`
 
-1. Copia la plantilla de configuración oficial:
+1. **Inicialización automática por script de arranque (Recomendado):**
+   Los scripts oficiales de despliegue (`.\scripts\run.ps1` en Windows 11 o `./scripts/run.sh` en Linux/macOS) detectan si `.env` existe; si no existe, lo crean automáticamente a partir de `.env.example` y generan credenciales criptográficas seguras (incluyendo un `ADMIN_TOKEN` aleatorio de alta entropía mediante CSPRNG) sin requerir intervención manual.
+2. **Preparación manual opcional:**
+   Si prefieres preparar el archivo `.env` antes de ejecutar el arranque:
    ```powershell
    Copy-Item .env.example .env
-   ```
-2. **Generación automática de credenciales administrativas:**
-   CIVIA cuenta con un script de arranque que genera automáticamente un `ADMIN_TOKEN` criptográfico único mediante CSPRNG si el campo está vacío.
-   No obstante, si deseas generarlo manualmente antes de arrancar, ejecuta:
-   ```powershell
    python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); p.write_text(re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', p.read_text()))"
    ```
 3. **Claves de Inteligencia Artificial (OPCIONALES — Solo requeridas para inferencia multimodal en vivo):**
@@ -189,7 +187,7 @@ Verás la interfaz ciudadana de CIVIA:
 
 ## 11. Prueba de Administración, Aprobación Humana y Observabilidad
 
-1. En la barra superior de la PWA, ingresa a la pestaña **"Administración"** (o ve a `http://localhost:5173/admin`).
+1. En la barra superior de la PWA, ingresa a la pestaña **"Administración"** (la navegación en CIVIA se gestiona fluidamente como una Single Page Application mediante pestañas).
 2. Ingresa el `ADMIN_TOKEN` generado en tu archivo `.env`. (Puedes obtenerlo con `Get-Content .env | Select-String "ADMIN_TOKEN"`).
 3. **Módulo de Aprobación Humana (`pending_approvals`):**
    - Cuando el agente propone una acción crítica (ej. cambiar el estado de un reporte mediante `proponer_actualizacion_critica`), la IA **NO** escribe directamente en la tabla `reports`.
@@ -214,7 +212,7 @@ docker compose restart
 Invoke-RestMethod -Uri "http://localhost:8000/health"
 
 # 3. Consultar los reportes en la base de datos
-docker compose exec -T api python -c "import psycopg; conn = psycopg.connect('postgresql://civia:local_dev_change_me@db:5432/civia'); print('Total reportes persistidos:', conn.execute('SELECT count(*) FROM reports;').fetchone()[0])"
+docker compose exec -T api python -c "from app.db import get_conn; conn = get_conn(); print('Total reportes persistidos:', conn.execute('SELECT count(*) FROM reports;').fetchone()[0])"
 ```
 
 El conteo incluirá los 10 reportes sintéticos iniciales más los reportes nuevos creados durante tu prueba.
@@ -229,9 +227,10 @@ El conteo incluirá los 10 reportes sintéticos iniciales más los reportes nuev
 | **Logs de la API Backend** | `docker compose logs --tail=50 -f api` |
 | **Logs de la Base de Datos** | `docker compose logs --tail=50 db` |
 | **Logs del Servidor Nginx** | `docker compose logs --tail=50 frontend` |
-| **Ejecutar suite hermética de 154 pruebas** | `docker compose exec -T api pytest -m "not live" -v` |
+| **Ejecutar suite hermética de 155 pruebas** | `docker compose exec -T api pytest -m "not live" -v` |
 | **Ejecutar pruebas E2E de navegador (opcional)** | `cd frontend && npm install && npm run test:e2e` |
 | **Ejecutar evaluación formal** | `docker compose exec -T api python eval/evaluar.py --mode deterministic` |
+| **Explorar API REST interactiva (Swagger UI)** | Navegar a `http://localhost:8000/docs` (especificación en [docs/API.md](API.md)) |
 
 ---
 
@@ -254,11 +253,11 @@ docker compose down
 | # | Criterio de la Rúbrica | Acción en la Demostración | Tiempo estimado | Verificación |
 |---|---|---|---|---|
 | **1** | **Despliegue limpio en un comando** | Ejecutar `.\scripts\run.ps1` desde un checkout limpio. Mostrar `docker compose ps` con los 3 contenedores activos (`healthy`). | 1.5 min | Salud en `/health` responde `true`. |
-| **2** | **Flujo vertical ciudadano** | Crear reporte en la PWA: GPS interactivo en Cali, foto sintética generada en canvas, descripción y obtención de radicado `CIV-2026-XXXX`. | 2.0 min | Reporte visible de inmediato en el mapa de Leaflet y persistido en PostgreSQL. |
+| **2** | **Flujo vertical ciudadano** | Crear reporte en la PWA: GPS interactivo en Cali, muestra oficial del catálogo sintético fotorrealista o captura en vivo de cámara web, descripción y obtención de radicado `CIV-2026-XXXX`. | 2.0 min | Reporte visible de inmediato en el mapa de Leaflet y persistido en PostgreSQL. |
 | **3** | **Agente con herramientas y 4 límites** | Consultar reportes viales y ambientales en el chat. Realizar pregunta de control GD-06 (sin respuesta). Mostrar que la IA no inventa datos y respeta límites de vueltas, tokens y timeout. | 2.0 min | Tool calling tipado hacia SQL directo (sin RAG); respuesta honesta en GD-06. |
-| **4** | **Aprobación humana para escritura crítica** | Agente propone cambio de estado (`proponer_actualizacion_critica`). Ingresar a `/admin` con `ADMIN_TOKEN` y aprobar manualmente la propuesta. | 1.5 min | Invariante: La IA jamás escribe directamente en la tabla `reports`. |
+| **4** | **Aprobación humana para escritura crítica** | Agente propone cambio de estado (`proponer_actualizacion_critica`). Ingresar a la pestaña Administración con `ADMIN_TOKEN` y aprobar manualmente la propuesta. | 1.5 min | Invariante: La IA jamás escribe directamente en la tabla `reports`. |
 | **5** | **Resiliencia y Circuit Breakers** | Activar `FALLA_FORZADA = 429` en la consola administrativa. Realizar una consulta y mostrar la conmutación transparente a Groq (`qwen/qwen3.8-27b`). | 1.0 min | Cero tracebacks o errores HTTP expuestos al ciudadano; observabilidad registrada en `ai_traces`. |
-| **6** | **Evaluación formal y métricas reales** | Mostrar `eval/resultados/reporte_evaluacion.md`: 6 casos dorados SQL (`100%`), 15 consultas P50/P90 (`93.3%` acierto), costo estimado y cero secretos. | 1.0 min | Suite hermética de 147 pruebas automáticas pasando al 100% (cero fallos). |
+| **6** | **Evaluación formal y métricas reales** | Mostrar `eval/resultados/reporte_evaluacion.md`: 6 casos dorados SQL (`100%`), 15 consultas P50/P90 (`93.3%` acierto), costo estimado y cero secretos. | 1.0 min | Suite hermética de 155 pruebas automáticas pasando al 100% (cero fallos). |
 
 ---
 
@@ -268,7 +267,7 @@ Para mantener la máxima transparencia académica:
 
 ### Totalmente implementado y verificable hoy:
 - Flujo vertical completo: captura, georreferenciación en Valle del Cauca, validación de fotos (dimensiones, tipos MIME, remoción EXIF), notas de voz, almacenamiento en PostgreSQL 17.
-- Sistema agéntico resiliente de 3 niveles: Google Gemini (`gemini-3.8-flash`) → Groq Cloud (`qwen/qwen3.8-27b`) → Google Gemini (`gemini-3.6-flash`).
+- Sistema agéntico resiliente de 3 niveles: Google Gemini (`gemini-3.8-flash`) → Groq Cloud (`qwen/qwen3.8-27b`) → Google Gemini (`gemini-3.5-flash-lite`).
 - Arquitectura SQL directa (justificación formal de NO RAG documentada en `docs/decisiones.md`).
 - Los 4 límites estrictos del agente: iteraciones (5), presupuesto de tokens (6000), timeouts granulares y aprobación humana obligatoria para escrituras críticas.
 - Protocolo de recuperación PWA ante desconexión o pérdida de primera respuesta con persistencia de claves de idempotencia y deduplicación.
@@ -283,4 +282,4 @@ Para mantener la máxima transparencia académica:
 ## 17. Declaración de estado de verificación externa
 
 > [!NOTE]
-> Esta guía ha sido verificada en la rama principal `main`, incluyendo la prueba de clonación limpia en carpeta temporal aislada y validación de 147 pruebas herméticas. La instalación física desde cero en un segundo computador portátil Windows 11 queda formalmente dispuesta para su ejecución por parte del evaluador o del equipo durante la sesión de sustentación académica, siguiendo exactamente los pasos descritos en este documento.
+> Esta guía ha sido verificada en la rama principal `main`, incluyendo la prueba de clonación limpia en carpeta temporal aislada y validación de 155 pruebas herméticas. La instalación física desde cero en un segundo computador portátil Windows 11 queda formalmente dispuesta para su ejecución por parte del evaluador o del equipo durante la sesión de sustentación académica, siguiendo exactamente los pasos descritos en este documento.

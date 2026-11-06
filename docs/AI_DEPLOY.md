@@ -43,7 +43,7 @@ El script se encarga de forma completamente autónoma de:
 |---|---|---|
 | Frontend PWA | `http://localhost:5173` | Código HTTP 200, interfaz React con mapa interactivo de Cali |
 | Backend API | `http://localhost:8000/health` | `{"status":"ok","phase":"mvp","db":{"connected":true,"schema_ready":true}}` |
-| Documentación Swagger | `http://localhost:8000/docs` | Código HTTP 200, esquema OpenAPI interactivo |
+| Documentación Swagger | `http://localhost:8000/docs` | Código HTTP 200, esquema OpenAPI interactivo (ver [docs/API.md](API.md)) |
 
 ---
 
@@ -82,6 +82,11 @@ docker run --rm -v "${PWD}\backend:/app" -v "${PWD}\frontend:/frontend" -v "${PW
 
 ---
 
-## 6. Estado Oficial de Despliegue en la Nube
+## 6. Especificación Canónica de la API REST y Swagger
+La documentación exhaustiva de los 23 endpoints clasificados en 8 categorías temáticas, validación Pydantic v2, comunicación React-FastAPI, persistencia PostgreSQL 17 y controles de seguridad se encuentra en [`docs/API.md`](API.md).
+
+---
+
+## 7. Estado Oficial de Despliegue en la Nube
 > **DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA**  
 > Ver justificación detallada en [`docs/DEPLOYMENT.md`](DEPLOYMENT.md).

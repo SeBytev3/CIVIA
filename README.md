@@ -42,7 +42,7 @@ cd CIVIA
   - Puertos de red libres en el host: `8000` (API Backend) y `5173` (Frontend PWA).
 - **Aislamiento absoluto:** **No se requiere** instalar Node.js, npm ni Python globalmente en el computador evaluador. Toda la compilación, dependencias y ejecución ocurren estrictamente dentro de los contenedores Docker oficiales (`node:22-alpine`, `python:3.13-slim`, `postgres:17-alpine`, `nginx:1.27-alpine`).
 - **Claves API de Inteligencia Artificial (OPCIONALES):**
-  - **El sistema funciona 100% en modo local (MVP) sin requerir ninguna clave de API externa.** La captura de cámara, subida de fotos, georreferenciación en Cali, radicación, persistencia en PostgreSQL 17, catálogo de evidencias fotorrealistas y la suite completa de 154 pruebas herméticas no requieren conexión externa.
+  - **El sistema funciona 100% en modo local (MVP) sin requerir ninguna clave de API externa.** La captura de cámara, subida de fotos, georreferenciación en Cali, radicación, persistencia en PostgreSQL 17, catálogo de evidencias fotorrealistas y la suite completa de 155 pruebas herméticas no requieren conexión externa.
   - Si se proporcionan claves en `.env` (`GOOGLE_API_KEY_PRIMARY`, `GOOGLE_API_KEY_SECONDARY`, `GROQ_API_KEY`), el agente multimodal y el análisis automático en vivo se activan automáticamente.
 
 ---
@@ -93,7 +93,7 @@ Si prefieres no usar los scripts automáticos:
 | **PWA Ciudadana** | `http://localhost:5173` | Interfaz React 19 + TypeScript + Vite + Leaflet (mapa interactivo de Cali) servida por Nginx |
 | **API Backend** | `http://localhost:8000` | FastAPI REST API con validación estricta y seguridad por capas |
 | **Salud del Backend** | `http://localhost:8000/health` | Verificación JSON de conectividad a PostgreSQL, migraciones listas y catálogo de modelos |
-| **Documentación OpenAPI** | `http://localhost:8000/docs` | Documentación Swagger interactiva de todos los endpoints REST públicos y administrativos |
+| **Documentación OpenAPI** | `http://localhost:8000/docs` | Documentación Swagger UI interactiva de los 23 endpoints REST (especificación canónica en [`docs/API.md`](docs/API.md)) |
 
 ---
 
@@ -239,6 +239,7 @@ Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injec
 ### Documentación de referencia
 - [`CLAUDE.md`](CLAUDE.md): Guía de ejecución autónoma para Claude Code y agentes de IA.
 - [`GEMINI.md`](GEMINI.md): Guía de ejecución para modelos y agentes Gemini / Antigravity.
+- [`docs/API.md`](docs/API.md): Especificación técnica exhaustiva de la API REST, FastAPI, Swagger/OpenAPI y los 23 endpoints.
 - [`docs/AI_DEPLOY.md`](docs/AI_DEPLOY.md): Protocolo de despliegue y auditoría asistido por IA.
 - [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md): Arquitectura de despliegue local y análisis de opciones cloud.
 - [`docs/guia_instalacion_otro_pc.md`](docs/guia_instalacion_otro_pc.md): Guía de instalación y sustentación para el profesor en otra máquina Windows 11 o Linux.

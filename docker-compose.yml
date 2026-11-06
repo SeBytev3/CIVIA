@@ -37,6 +37,7 @@ services:
     volumes:
       - civia_uploads:/app/data/uploads
       - ./eval:/app/eval
+      - ./frontend:/frontend:ro
     ports:
       - "${API_PORT_BINDING:-127.0.0.1:8000}:8000"
     depends_on:
