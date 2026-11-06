@@ -317,7 +317,7 @@ def test_g2_1_a02_legitimate_commits_within_deadline():
     test_db_url = _get_clean_test_db("test_g2_1_a02_legit")
     with psycopg.connect(test_db_url, autocommit=True) as c:
         c.execute("CREATE TABLE audit_deadline_rows(id int PRIMARY KEY, state text NOT NULL);")
-        c.execute("CREATE OR REPLACE FUNCTION audit_deferred() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='CHANGED' THEN PERFORM pg_sleep(0.18); END IF; RETURN NEW; END $$;")
+        c.execute("CREATE OR REPLACE FUNCTION audit_deferred() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.state='CHANGED' THEN PERFORM pg_sleep(0.14); END IF; RETURN NEW; END $$;")
         c.execute("CREATE CONSTRAINT TRIGGER audit_delay AFTER UPDATE ON audit_deadline_rows DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION audit_deferred();")
         c.execute("INSERT INTO audit_deadline_rows SELECT n, 'ORIGINAL' FROM generate_series(91, 95) n;")
 

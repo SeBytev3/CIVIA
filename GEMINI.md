@@ -32,7 +32,7 @@ Los tres contenedores orquestados se levantarán:
 ## 3. Endpoints de Verificación
 - **Frontend PWA:** `http://localhost:5173`
 - **Health Check API:** `http://localhost:8000/health` (debe devolver `status: ok` y `db: {connected: true, schema_ready: true}`)
-- **Swagger UI:** `http://localhost:8000/docs`
+- **Swagger UI:** `http://localhost:8000/docs` (especificación canónica exhaustiva en [`docs/API.md`](docs/API.md))
 
 ---
 
@@ -51,3 +51,9 @@ Para validar los 155 contratos herméticos:
 docker compose exec -T api pytest -m "not live" -v
 ```
 **Resultado:** `155 passed, 1 deselected, 0 failed`.
+
+
+---
+
+## 6. Documentación Canónica de la API REST y Swagger/OpenAPI
+La especificación técnica de los 23 endpoints clasificados en 8 categorías temáticas, los modelos de datos Pydantic v2, la integración React-FastAPI, las directrices de seguridad y los códigos de respuesta se encuentran detallados en [`docs/API.md`](docs/API.md).

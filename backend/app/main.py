@@ -104,10 +104,63 @@ async def lifespan(app: FastAPI):
     yield
 
 
+TAGS_METADATA = [
+    {
+        "name": "Salud del sistema",
+        "description": "Verificación del estado operativo de la API REST, fase del sistema y conectividad transaccional con la base de datos PostgreSQL 17.",
+    },
+    {
+        "name": "Reportes ciudadanos",
+        "description": "Endpoints públicos para el alta de incidentes viales y ambientales en Santiago de Cali, validación geográfica, estadísticas y consulta ciudadana.",
+    },
+    {
+        "name": "Fotografías y evidencias",
+        "description": "Almacenamiento y entrega inmutable de evidencias fotográficas (Content-Addressed Storage) con soporte ETag, HTTP 304 y cabeceras CSP.",
+    },
+    {
+        "name": "Seguimiento y trazabilidad",
+        "description": "Línea de tiempo cronológica y pública de eventos operativos (`report_events`) generados durante el ciclo de vida del reporte.",
+    },
+    {
+        "name": "Asistente ciudadano e IA",
+        "description": "Interacción conversacional con el agente inteligente de CIVIA mediante SQL directo tipado, 4 límites efectivos y recuperación de operaciones.",
+    },
+    {
+        "name": "Administración y gestión operativa",
+        "description": "Consola administrativa protegida: bandeja de notificaciones internas, asignación de dependencias y actualización controlada de estados.",
+    },
+    {
+        "name": "Aprobaciones humanas",
+        "description": "Guardrail ético #4: gestión y decisión humana sobre solicitudes de escritura crítica propuestas por la IA en la tabla `pending_approvals`.",
+    },
+    {
+        "name": "Observabilidad y resiliencia",
+        "description": "Monitoreo técnico de latencias P50/P90, estado de circuit breakers de proveedores multimodales, trazas sanitizadas y simulación de fallas.",
+    },
+]
+
+APP_DESCRIPTION = """
+**CIVIA (Ciudad Inteligente y Vigilancia Ambiental)** es la plataforma oficial para la captura, diagnóstico asistido por IA, confirmación ciudadana y seguimiento operativo de incidentes urbanos y ambientales en **Santiago de Cali y el Valle del Cauca** (*Huecos, Basuras, Tala arbórea y Quemas*).
+
+### Arquitectura y Principios de Diseño:
+* **API RESTful de Alto Rendimiento:** Construida con FastAPI en Python 3.13 con validación de esquemas mediante Pydantic v2.
+* **Persistencia Transaccional:** Motor PostgreSQL 17 con esquema relacional normalizado e integridad referencial estricta.
+* **Enrutador Multimodal Resiliente de Tres Niveles:** Conmutación automática `Gemini 3.8 Flash` → `Groq Qwen 3.8 27B` → `Gemini 3.5 Flash Lite` con interruptores de circuito (*circuit breakers*).
+* **Agente Genuino con SQL Directo y Cuatro Límites:** Invocación de herramientas tipadas parametrizadas sin intermediarios opacos; la IA jamás escribe directamente en la base de datos de reportes.
+* **Seguridad y Privacidad Estrictas:** Descarte garantizado de metadatos EXIF/GPS en fotografías, sanitización de PII, rate limiting por IP y autenticación administrativa basada en tokens CSPRNG comparados en tiempo constante (`hmac.compare_digest`).
+
+Para la especificación exhaustiva de cada endpoint, guías de desarrollo y códigos de respuesta, consulte la documentación canónica en [`docs/API.md`](https://github.com/SeBytev3/CIVIA/blob/main/docs/API.md).
+"""
+
 app = FastAPI(
-    title=settings.PROJECT_NAME,
-    version=settings.VERSION,
+    title="CIVIA — API de Gestión Inteligente y Vigilancia Urbana",
+    description=APP_DESCRIPTION,
+    version="1.0.0",
+    openapi_tags=TAGS_METADATA,
     lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json",
 )
 
 app.add_middleware(
@@ -165,7 +218,12 @@ def verify_admin_token(x_admin_token: str | None = Header(default=None)) -> None
         )
 
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["Salud del sistema"],
+    summary="Comprobar salud y conectividad de la plataforma",
+    description="Verifica la disponibilidad de la API REST, la versión y fase activa, y el estado de la conexión a la base de datos PostgreSQL 17 junto con la preparación del esquema.",
+)
 def health() -> dict[str, Any]:
     db_info = check_db_health()
     return {
@@ -175,12 +233,24 @@ def health() -> dict[str, Any]:
     }
 
 
-@app.get("/api/reports/stats")
+@app.get(
+    "/api/reports/stats",
+    tags=["Reportes ciudadanos"],
+    summary="Obtener estadísticas generales de reportes",
+    description="Retorna el conteo global de reportes registrados, desgloses por categoría, estado operativo y distribución geográfica en el municipio de Cali.",
+)
 def reports_stats() -> dict[str, Any]:
     return get_reports_summary_stats()
 
 
-@app.post("/api/reports", response_model=ReportPublicResponse, status_code=201)
+@app.post(
+    "/api/reports",
+    response_model=ReportPublicResponse,
+    status_code=201,
+    tags=["Reportes ciudadanos"],
+    summary="Crear nuevo reporte ciudadano con evidencia fotográfica",
+    description="Registra un nuevo incidente vial o ambiental. Valida coordenadas en Cali, remueve metadatos EXIF de la fotografía con Pillow, almacena en PostgreSQL 17 de forma atómica y opcionalmente ejecuta diagnóstico preliminar con IA.",
+)
 async def create_citizen_report(
     request: Request,
     description: str = Form(...),
@@ -362,7 +432,13 @@ async def create_citizen_report(
     return row_to_public_dict(row)
 
 
-@app.post("/api/reports/{report_id}/analyze", response_model=ReportPublicResponse)
+@app.post(
+    "/api/reports/{report_id}/analyze",
+    response_model=ReportPublicResponse,
+    tags=["Reportes ciudadanos"],
+    summary="Ejecutar análisis multimodal sobre reporte existente",
+    description="Reintenta o solicita el diagnóstico de visión computacional con IA para un reporte ya persistido en estado PENDING_ANALYSIS, aplicando el contrato estructurado AIAnalysisContract.",
+)
 def analyze_existing_report(request: Request, report_id: UUID):
     client_ip = get_trusted_client_ip(request)
     rate_limiter.check(f"analyze:{client_ip}")
@@ -402,7 +478,13 @@ def analyze_existing_report(request: Request, report_id: UUID):
     return row_to_public_dict(row)
 
 
-@app.get("/api/reports", response_model=ReportListResponse)
+@app.get(
+    "/api/reports",
+    response_model=ReportListResponse,
+    tags=["Reportes ciudadanos"],
+    summary="Listar reportes ciudadanos con filtros",
+    description="Consulta paginada de reportes almacenados en PostgreSQL. Permite filtrar por categoría, severidad, estado, comuna, búsqueda de texto (q) y distancia radial geográfica (Haversine).",
+)
 def list_citizen_reports(
     category: str | None = Query(default=None),
     severity: str | None = Query(default=None),
@@ -435,7 +517,13 @@ def list_citizen_reports(
     }
 
 
-@app.get("/api/reports/by-code/{tracking_code}", response_model=ReportPublicResponse)
+@app.get(
+    "/api/reports/by-code/{tracking_code}",
+    response_model=ReportPublicResponse,
+    tags=["Reportes ciudadanos"],
+    summary="Consultar reporte por código de radicado",
+    description="Permite a cualquier ciudadano consultar el estado, diagnóstico y datos públicos de su solicitud utilizando el código de radicado oficial (ej. CIV-2026-DEMO0001).",
+)
 def get_citizen_report_by_code(tracking_code: str):
     row = get_report_by_tracking_code(tracking_code)
     if not row:
@@ -447,7 +535,13 @@ def get_citizen_report_by_code(tracking_code: str):
     return row_to_public_dict(row)
 
 
-@app.get("/api/reports/{report_id}", response_model=ReportPublicResponse)
+@app.get(
+    "/api/reports/{report_id}",
+    response_model=ReportPublicResponse,
+    tags=["Reportes ciudadanos"],
+    summary="Obtener detalle de reporte por UUID",
+    description="Retorna la información pública detallada de un reporte específico a partir de su identificador único universal (UUID).",
+)
 def get_citizen_report(report_id: UUID):
     row = get_report_raw(report_id)
     if not row:
@@ -459,7 +553,12 @@ def get_citizen_report(report_id: UUID):
     return row_to_public_dict(row)
 
 
-@app.get("/api/reports/{report_id}/photo")
+@app.get(
+    "/api/reports/{report_id}/photo",
+    tags=["Fotografías y evidencias"],
+    summary="Descargar o visualizar evidencia fotográfica",
+    description="Sirve el archivo fotográfico limpio almacenado en disco. Soporta validación de caché ETag/HTTP 304 y cabeceras de seguridad CSP (Content-Security-Policy) anti-XSS.",
+)
 def get_citizen_report_photo(report_id: UUID, request: Request, v: str | None = None):
     row = get_report_raw(report_id)
     if not row:
@@ -505,7 +604,13 @@ def get_citizen_report_photo(report_id: UUID, request: Request, v: str | None = 
     )
 
 
-@app.patch("/api/reports/{report_id}/confirm", response_model=ReportPublicResponse)
+@app.patch(
+    "/api/reports/{report_id}/confirm",
+    response_model=ReportPublicResponse,
+    tags=["Reportes ciudadanos"],
+    summary="Confirmar o corregir clasificación del reporte",
+    description="Permite al ciudadano confirmar o corregir la categoría y severidad sugeridas por la IA tras el análisis inicial, transitionando el reporte al estado CONFIRMED.",
+)
 def confirm_citizen_report(
     report_id: UUID,
     payload: ReportConfirmRequest,
@@ -552,6 +657,9 @@ def confirm_citizen_report(
     "/api/reports/{report_id}/status",
     response_model=ReportPublicResponse,
     dependencies=[Depends(verify_admin_token)],
+    tags=["Administración y gestión operativa"],
+    summary="Actualizar estado operativo de un reporte (Requiere autorización)",
+    description="Endpoint administrativo protegido. Modifica el estado final de un reporte (CONFIRMED, IN_REVIEW, RESOLVED, REJECTED). Exige cabecera X-Admin-Token válida y human_approved=True.",
 )
 def change_report_status(report_id: UUID, payload: ReportStatusUpdateRequest):
     if not payload.human_approved:
@@ -579,7 +687,13 @@ def change_report_status(report_id: UUID, payload: ReportStatusUpdateRequest):
     return row_to_public_dict(updated)
 
 
-@app.post("/api/agent/query", response_model=AgentQueryResponse)
+@app.post(
+    "/api/agent/query",
+    response_model=AgentQueryResponse,
+    tags=["Asistente ciudadano e IA"],
+    summary="Consultar al asistente inteligente de CIVIA",
+    description="Procesa consultas en lenguaje natural mediante el agente agéntico. Invoca herramientas SQL tipadas con límites de vueltas, tokens, timeout y aprobación humana obligatoria para escrituras críticas.",
+)
 def query_civia_agent(
     request: Request,
     payload: AgentQueryRequest,
@@ -660,7 +774,13 @@ def query_civia_agent(
     }
 
 
-@app.get("/api/operations/{operation_id}", response_model=OperationStatusResponse)
+@app.get(
+    "/api/operations/{operation_id}",
+    response_model=OperationStatusResponse,
+    tags=["Asistente ciudadano e IA"],
+    summary="Consultar estado definitivo de una operación agéntica transaccional",
+    description="Permite verificar y reconciliar operaciones de escritura o consulta agéntica con idempotencia. Acceso autorizado restringido mediante tokens de operación o administración.",
+)
 def get_operation_status(
     operation_id: UUID,
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
@@ -728,7 +848,13 @@ def get_operation_status(
     )
 
 
-@app.get("/api/admin/observability", dependencies=[Depends(verify_admin_token)])
+@app.get(
+    "/api/admin/observability",
+    dependencies=[Depends(verify_admin_token)],
+    tags=["Observabilidad y resiliencia"],
+    summary="Consultar métricas de observabilidad y circuit breakers (Requiere autorización)",
+    description="Consola de telemetría protegida. Retorna la cadena activa de proveedores de IA, estado de los interruptores de circuito, métricas P50/P90 de latencia y trazas técnicas sanitizadas sin secretos.",
+)
 def admin_get_observability(limit: int = Query(default=60, ge=1, le=300)) -> dict[str, Any]:
     summary = get_observability_summary(limit=limit)
     chain_public = [
@@ -743,7 +869,13 @@ def admin_get_observability(limit: int = Query(default=60, ge=1, le=300)) -> dic
     }
 
 
-@app.post("/api/admin/fault-injection", dependencies=[Depends(verify_admin_token)])
+@app.post(
+    "/api/admin/fault-injection",
+    dependencies=[Depends(verify_admin_token)],
+    tags=["Observabilidad y resiliencia"],
+    summary="Simular fallas en caliente para pruebas de resiliencia (Requiere autorización)",
+    description="Inyecta fallos sintéticos controlados (429, 503, TIMEOUT, INVALID_JSON, TOTAL) para auditar y verificar los mecanismos de fallback y conmutación automática entre proveedores.",
+)
 def admin_set_fault_injection(payload: FaultInjectionRequest) -> dict[str, Any]:
     active = set_runtime_fault_override(payload.mode)
     if payload.reset_circuits:
@@ -755,13 +887,25 @@ def admin_set_fault_injection(payload: FaultInjectionRequest) -> dict[str, Any]:
     }
 
 
-@app.get("/api/admin/approvals", dependencies=[Depends(verify_admin_token)])
+@app.get(
+    "/api/admin/approvals",
+    dependencies=[Depends(verify_admin_token)],
+    tags=["Aprobaciones humanas"],
+    summary="Listar solicitudes de escritura crítica pendientes (Requiere autorización)",
+    description="Retorna la lista de propuestas de modificación de estado generadas por el agente de IA que requieren aprobación humana obligatoria por un operador calificado.",
+)
 def admin_list_approvals(status: str | None = Query(default=None)) -> dict[str, Any]:
     items = list_pending_approvals(status=status)
     return {"total": len(items), "items": items}
 
 
-@app.post("/api/admin/approvals/{approval_id}/decide", dependencies=[Depends(verify_admin_token)])
+@app.post(
+    "/api/admin/approvals/{approval_id}/decide",
+    dependencies=[Depends(verify_admin_token)],
+    tags=["Aprobaciones humanas"],
+    summary="Aprobar o rechazar solicitud de modificación crítica (Requiere autorización)",
+    description="Aplica de forma atómica y de un solo uso la decisión humana sobre una propuesta de cambio de estado. Si se aprueba, actualiza el reporte en PostgreSQL; si se rechaza, cancela la propuesta.",
+)
 def admin_decide_approval(approval_id: UUID, payload: ApprovalDecisionRequest) -> dict[str, Any]:
     updated = decide_pending_approval(
         approval_id,
@@ -783,12 +927,24 @@ def admin_decide_approval(approval_id: UUID, payload: ApprovalDecisionRequest) -
     return {"status": "ok", "approval": updated}
 
 
-@app.post("/api/admin/seed", dependencies=[Depends(verify_admin_token)])
+@app.post(
+    "/api/admin/seed",
+    dependencies=[Depends(verify_admin_token)],
+    tags=["Administración y gestión operativa"],
+    summary="Sembrar o reiniciar catálogo sintético de prueba (Requiere autorización)",
+    description="Inicializa o actualiza los 10 reportes sintéticos de demostración con evidencias fotorrealistas en Cali bajo almacenamiento inmutable Content-Addressed.",
+)
 def admin_seed_reports(force_reset: bool = Query(default=False)) -> dict[str, Any]:
     return seed_synthetic_reports(force_reset=force_reset)
 
 
-@app.get("/api/reports/{report_id}/events", response_model=list[ReportEventPublic])
+@app.get(
+    "/api/reports/{report_id}/events",
+    response_model=list[ReportEventPublic],
+    tags=["Seguimiento y trazabilidad"],
+    summary="Obtener historial de eventos de un reporte por UUID",
+    description="Retorna la cronología pública y transparente de actuaciones (registro, análisis IA, confirmación, cambios de estado y notas públicas) asociadas al reporte.",
+)
 def get_report_events_by_id(report_id: UUID):
     raw = get_report_raw(report_id, include_events=False)
     if not raw:
@@ -800,7 +956,13 @@ def get_report_events_by_id(report_id: UUID):
     return get_report_events(report_id)
 
 
-@app.get("/api/reports/by-code/{tracking_code}/events", response_model=list[ReportEventPublic])
+@app.get(
+    "/api/reports/by-code/{tracking_code}/events",
+    response_model=list[ReportEventPublic],
+    tags=["Seguimiento y trazabilidad"],
+    summary="Obtener historial de eventos de un reporte por código de radicado",
+    description="Permite al ciudadano visualizar la línea de tiempo completa de su solicitud ingresando su número de radicado oficial.",
+)
 def get_report_events_by_tracking_code(tracking_code: str):
     raw = get_report_by_tracking_code(tracking_code, include_events=False)
     if not raw:
@@ -816,6 +978,9 @@ def get_report_events_by_tracking_code(tracking_code: str):
     "/api/admin/notifications",
     response_model=AdminNotificationsResponse,
     dependencies=[Depends(verify_admin_token)],
+    tags=["Administración y gestión operativa"],
+    summary="Listar notificaciones internas para operadores (Requiere autorización)",
+    description="Bandeja de alertas internas generadas automáticamente al registrarse reportes ciudadanos. Permite filtrar por leídas/no leídas y por tipo de reporte (ciudadano o sintético).",
 )
 def admin_get_notifications(
     limit: int = Query(default=50, ge=1, le=200),
@@ -828,6 +993,9 @@ def admin_get_notifications(
 @app.patch(
     "/api/admin/notifications/{notification_id}/read",
     dependencies=[Depends(verify_admin_token)],
+    tags=["Administración y gestión operativa"],
+    summary="Marcar notificación interna como leída (Requiere autorización)",
+    description="Actualiza el estado de lectura de una notificación interna en la bandeja de administración.",
 )
 def admin_mark_notification_as_read(notification_id: UUID) -> dict[str, Any]:
     ok = mark_admin_notification_read(notification_id)
@@ -843,6 +1011,9 @@ def admin_mark_notification_as_read(notification_id: UUID) -> dict[str, Any]:
 @app.post(
     "/api/admin/notifications/mark-all-read",
     dependencies=[Depends(verify_admin_token)],
+    tags=["Administración y gestión operativa"],
+    summary="Marcar todas las notificaciones internas como leídas (Requiere autorización)",
+    description="Marca simultáneamente como leídas todas las notificaciones pendientes en la bandeja de administración.",
 )
 def admin_mark_all_notifications_as_read() -> dict[str, Any]:
     count = mark_all_admin_notifications_read()
@@ -853,6 +1024,9 @@ def admin_mark_all_notifications_as_read() -> dict[str, Any]:
     "/api/admin/reports/{report_id}/management",
     response_model=ReportPublicResponse,
     dependencies=[Depends(verify_admin_token)],
+    tags=["Administración y gestión operativa"],
+    summary="Asignar dependencia municipal y gestionar notas (Requiere autorización)",
+    description="Permite a los operadores administrativos asignar una dependencia responsable (ej. Secretaría de Infraestructura, Dagma), registrar notas públicas de seguimiento y notas internas confidenciales.",
 )
 def admin_update_report_management(
     report_id: UUID,

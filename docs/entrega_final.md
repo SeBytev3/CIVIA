@@ -53,7 +53,7 @@ chmod +x ./scripts/run.sh && ./scripts/run.sh
 ### 3. Endpoints de Verificación Inmediata:
 - **PWA Ciudadana:** `http://localhost:5173` (HTTP 200)
 - **Salud del Backend:** `http://localhost:8000/health` (`{"status":"ok","phase":"mvp","db":{"connected":true,"schema_ready":true}}`)
-- **Documentación Swagger:** `http://localhost:8000/docs`
+- **Documentación Swagger:** `http://localhost:8000/docs` (especificación canónica en [`docs/API.md`](API.md))
 
 ---
 

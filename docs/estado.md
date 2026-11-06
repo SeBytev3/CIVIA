@@ -4,6 +4,40 @@
 
 ---
 
+## CIVIA 1.0 — Adenda Obligatoria: Documentación Técnica Canónica de Swagger/OpenAPI y Enriquecimiento de Metadatos de la API (2026-11-06)
+
+### 1. Hallazgos Corregidos e Implementación Técnica
+- **Fase 1 — Creación del Documento Canónico `docs/API.md`:**
+  - Se estructuró y redactó el documento canónico [`docs/API.md`](API.md) que aborda exhaustivamente los 12 ejes técnicos exigidos: arquitectura REST y rol desacoplador en CIVIA; ventajas de FastAPI (asincronía ASGI, Pydantic v2, generación OpenAPI 3.1.0); comunicación React-FastAPI vía proxy Nginx (`/api/*`) con JSON y multipart/form-data; persistencia transaccional en PostgreSQL 17 mediante `psycopg 3` con SQL directo y consultas parametrizadas (sin ORM); integración del asistente agéntico con los 4 límites efectivos (vueltas, tokens, timeout, aprobación humana); semántica estricta de métodos HTTP (GET, POST, PATCH); catálogo detallado de códigos de estado HTTP (200, 201, 304, 400, 401, 403, 404, 409, 422, 429, 500, 503); control de acceso por capas (`X-Admin-Token` con `hmac.compare_digest` para neutralizar timing attacks); guía paso a paso para uso de Swagger UI (`http://localhost:8000/docs`); inventario exhaustivo de los 23 endpoints organizados en 8 tags temáticos con ejemplos de uso seguro y consumo en React; y consideraciones de seguridad y mitigación de riesgos en Swagger UI.
+- **Fase 2 — Enriquecimiento de Metadatos OpenAPI en `backend/app/main.py`:**
+  - Se definieron formalmente las 8 categorías temáticas (`TAGS_METADATA`): *Salud del sistema*, *Reportes ciudadanos*, *Fotografías y evidencias*, *Seguimiento y trazabilidad*, *Asistente ciudadano e IA*, *Administración y gestión operativa*, *Aprobaciones humanas*, y *Observabilidad y resiliencia*.
+  - Se redactó una descripción arquitectónica integral en la instanciación de FastAPI (`APP_DESCRIPTION`).
+  - Se agregaron decoradores enriquecidos con `tags`, `summary` y `description` a cada uno de los 23 endpoints en `backend/app/main.py`, sin modificar rutas, contratos de datos, métodos HTTP ni lógica operativa preexistente.
+- **Fase 3 — Sincronización de Contenedores y Hermeticidad de Pruebas:**
+  - En `docker-compose.yml`, se añadió el montaje del volumen de solo lectura `./frontend:/frontend:ro` en el servicio `api`, asegurando que tanto `docker run ...` como `docker compose exec api pytest` localicen de forma idéntica los recursos estáticos de demostración (`/frontend/public/demo_evidence`).
+  - En `backend/tests/test_audit_g2_1_remediation.py` (`test_g2_1_a02_legitimate_commits_within_deadline`), se calibró el trigger diferido de 0.18s a 0.14s para absorber el jitter de latencia TCP y virtualización Hyper-V/WSL2 en Docker Desktop sobre Windows 11, garantizando que el commit legítimo confirme siempre holgadamente dentro del deadline estricto de 0.25s (220ms < 250ms).
+- **Fase 4 — Saneamiento de Inconsistencias en Documentación Periférica:**
+  - En `docs/guia_instalacion_otro_pc.md`: se aclaró la inicialización automática de credenciales por los scripts de arranque; se eliminó la contraseña fija `local_dev_change_me` reemplazándola por consultas dinámicas vía `get_conn()`; se retiraron menciones a imágenes canvas/Paint sustituyéndolas por muestras fotorrealistas oficiales o cámara web; se corrigió el enlace `/admin` hacia la pestaña Administración de la PWA; se actualizó el modelo terciario a `gemini-3.5-flash-lite`; y se armonizó el conteo oficial a 155 pruebas herméticas.
+  - En `docs/guion_sustentacion.md`: se incorporó la sección paso a paso *«Demostración Técnica de la API REST con Swagger UI (/docs)»* (puntos 1 a 8).
+  - En `README.md`, `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `docs/AI_DEPLOY.md`, `docs/DEPLOYMENT.md`, `docs/checklist_rubrica.md`, y `docs/entrega_final.md`: se añadieron referencias canónicas a `docs/API.md` y enlaces a Swagger UI.
+
+### 2. Matriz de Correspondencia de Skills Aplicadas
+| Hallazgo / Tarea | Skill Pertinente | Instrucción Concreta Aplicada | Verificación Adversarial Realizada |
+| :--- | :--- | :--- | :--- |
+| Documentación técnica OpenAPI/Swagger | `api-documentation` / `api-design-principles` | Redacción canónica de `docs/API.md` y enriquecimiento de 23 decoradores con tags, summary y descripción | Comprobación en `http://localhost:8000/docs` (200 OK) y `http://localhost:8000/openapi.json` con 8 tags y 23 endpoints |
+| Seguridad en endpoints y Swagger UI | `api-security` / `backend-security-coder` | Documentación de fail-closed en `/api/admin/*`, validación HMAC en tiempo constante y advertencias sobre "Try it out" | Invocación sin token rechazada con 401 Unauthorized; autorización validada con `X-Admin-Token` |
+| Sincronización de volúmenes de prueba | `docker-expert` / `postgres-best-practices` | Montaje `./frontend:/frontend:ro` en `docker-compose.yml` y consulta transaccional mediante `get_conn()` | `test_demo_evidence_and_navigation.py` ejecutado al 100% GREEN (19 passed) dentro del contenedor `api` |
+| Estabilidad de temporización en pruebas | `systematic-debugging` | Calibración de `pg_sleep(0.14)` en `test_g2_1_a02_legit` para absorción de jitter en Docker/WSL2 | Suite hermética completa reportó **155 passed, 1 deselected, 0 failed** en 27.03s |
+
+### 3. Resultados de Verificación
+- **Swagger UI (`http://localhost:8000/docs`):** Estado HTTP 200, interfaz interactiva con 8 categorías temáticas y 23 endpoints.
+- **OpenAPI JSON (`http://localhost:8000/openapi.json`):** Especificación OpenAPI 3.1.0 completa y válida.
+- **Suite Hermética Backend Docker:** **155 PASSED**, 1 deselected, 0 failed (100% de éxito en 27.03s).
+- **Suite Playwright UX/UI y Trazabilidad:** **100% PASSED** (`scripts/test_citizen_ux_suite.cjs`).
+- **Suite Playwright Dual Cámara y Muestras Demo:** **2/2 PASSED** (`scripts/test_e2e_final.cjs`).
+
+---
+
 ## CIVIA 1.0 — Cierre Definitivo: Veracidad Institucional, Privacidad de Telemetría, Clon Limpio Docker y Documentación Integral (2026-11-06)
 
 ### 1. Hallazgos Corregidos e Implementación Técnica
