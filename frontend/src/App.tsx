@@ -19,6 +19,7 @@ import {
   updateReportManagement,
 } from './api';
 import { CaliMap } from './components/CaliMap';
+import { SafeMarkdown } from './components/SafeMarkdown';
 import type {
   AdminNotificationItem,
   AdminNotificationsResponse,
@@ -271,6 +272,12 @@ export function App() {
     }, 50);
   };
 
+  const handleTabChange = (tab: ActiveTab) => {
+    setActiveTab(tab);
+    setGlobalError(null);
+    setGlobalSuccess(null);
+  };
+
   const renderExternalDeliveryNotice = () => (
     <div className="civia-notice-card" role="region" aria-label="Información sobre notificaciones">
       <div className="civia-notice-title">
@@ -312,6 +319,26 @@ export function App() {
       return 'Sistema IA';
     };
 
+    const getEventTypeLabel = (type: string) => {
+      switch (type) {
+        case 'ASSIGNED_TO_DEPARTMENT':
+          return 'Asignado a una dependencia';
+        case 'STATUS_UPDATED':
+          return 'Se actualizó el estado del reporte';
+        case 'REPORT_REGISTERED':
+          return 'Reporte registrado en la plataforma';
+        case 'AI_ANALYSIS_COMPLETED':
+          return 'Diagnóstico inicial procesado';
+        case 'CITIZEN_CONFIRMED':
+          return 'Confirmación por la ciudadanía';
+        case 'PUBLIC_NOTE_ADDED':
+          return 'Observación ciudadana de seguimiento';
+        default:
+          return type.replace(/_/g, ' ').toLowerCase();
+      }
+    };
+
+
     return (
       <div className="civia-events-timeline" role="list" aria-label="Historial de eventos del reporte">
         {events.map((ev) => (
@@ -322,7 +349,11 @@ export function App() {
             />
             <div className="civia-event-content">
               <div className="civia-event-meta">
-                <strong>{getActorLabel(ev.actor_type)}</strong>
+                <span>
+                  <strong className="civia-event-badge">{getEventTypeLabel(ev.event_type)}</strong>
+                  <span style={{ margin: '0 0.35rem', opacity: 0.6 }}>·</span>
+                  <span>{getActorLabel(ev.actor_type)}</span>
+                </span>
                 <time dateTime={ev.created_at}>{formatEventDate(ev.created_at)}</time>
               </div>
               <p className="civia-event-msg">{ev.public_message}</p>
@@ -573,7 +604,7 @@ export function App() {
     setGlobalSuccess(null);
 
     if (!formPhoto) {
-      setGlobalError('Por favor adjunte una fotografía de evidencia (o genere una imagen sintética de prueba).');
+      setGlobalError('Por favor adjunte una fotografía de evidencia.');
       return;
     }
     if (formDescription.trim().length < 10) {
@@ -1077,7 +1108,7 @@ export function App() {
             </div>
           ) : (
             <div className="civia-alert info">
-              El análisis automático de IA está pendiente (`PENDING_ANALYSIS`). El reporte ya se encuentra guardado de forma segura en PostgreSQL; puede confirmar la categoría manualmente o solicitar el análisis ahora.
+              El diagnóstico automático está pendiente de procesamiento. El reporte ya se encuentra registrado y guardado de forma segura; puedes confirmar la categoría manualmente o solicitar el diagnóstico ahora.
               <div style={{ marginTop: '0.5rem' }}>
                 <button
                   type="button"
@@ -1244,37 +1275,37 @@ export function App() {
             <button
               type="button"
               className={`civia-nav-btn ${activeTab === 'explorar' ? 'active' : ''}`}
-              onClick={() => setActiveTab('explorar')}
+              onClick={() => handleTabChange('explorar')}
             >
               Mapa y Reportes
             </button>
             <button
               type="button"
               className={`civia-nav-btn ${activeTab === 'reportar' ? 'active' : ''}`}
-              onClick={() => setActiveTab('reportar')}
+              onClick={() => handleTabChange('reportar')}
             >
               + Nuevo Reporte
             </button>
             <button
               type="button"
               className={`civia-nav-btn ${activeTab === 'seguimiento' ? 'active' : ''}`}
-              onClick={() => setActiveTab('seguimiento')}
+              onClick={() => handleTabChange('seguimiento')}
             >
               Seguimiento Radicado
             </button>
             <button
               type="button"
               className={`civia-nav-btn ${activeTab === 'asistente' ? 'active' : ''}`}
-              onClick={() => setActiveTab('asistente')}
+              onClick={() => handleTabChange('asistente')}
             >
               Asistente Ciudadano
             </button>
             <button
               type="button"
               className={`civia-nav-btn ${activeTab === 'admin' ? 'active' : ''}`}
-              onClick={() => setActiveTab('admin')}
+              onClick={() => handleTabChange('admin')}
             >
-              Observabilidad Admin
+              Administración (Observabilidad Admin)
               {adminNotifs && adminNotifs.unread_total > 0 && (
                 <span className="civia-notif-count-badge">
                   {adminNotifs.unread_total}
@@ -1301,9 +1332,9 @@ export function App() {
         {stats && (
           <section className="civia-stats-grid" aria-label="Estadísticas de reportes ciudadanos">
             <div className="civia-stat-card">
-              <div className="civia-stat-label">Total Reportes BD</div>
+              <div className="civia-stat-label">Reportes registrados</div>
               <div className="civia-stat-value">{stats.total_reports}</div>
-              <div className="civia-stat-sub">Reportes guardados</div>
+              <div className="civia-stat-sub">En Santiago de Cali</div>
             </div>
             <div className="civia-stat-card">
               <div className="civia-stat-label">Huecos Viales</div>
@@ -1439,7 +1470,7 @@ export function App() {
                     checked={useRadiusFilter}
                     onChange={(e) => setUseRadiusFilter(e.target.checked)}
                   />
-                  Filtrar por radio geográfico Haversine desde ({formLat}, {formLon})
+                  Filtrar por distancia desde el punto de referencia ({formLat}, {formLon})
                 </label>
                 {useRadiusFilter && (
                   <label style={{ display: 'inline-flex', alignItems: 'center', gap: '0.4rem' }}>
@@ -1471,49 +1502,71 @@ export function App() {
             </section>
 
             <section aria-label="Listado de reportes ciudadanos">
-              <div className="civia-reports-grid">
-                {reports.map((rep) => (
-                  <article key={rep.id} className="civia-report-card">
-                    <img
-                      className="civia-report-thumb"
-                      src={rep.photo_url}
-                      alt={rep.title}
-                      loading="lazy"
-                    />
-                    <div className="civia-report-body">
-                      <div className="civia-badge-row">
-                        <span className="civia-badge status">{rep.tracking_code}</span>
-                        {rep.effective_category && (
-                          <span className={`civia-badge cat-${rep.effective_category}`}>
-                            {rep.effective_category}
-                          </span>
-                        )}
-                        {rep.is_synthetic && (
-                          <span className="civia-badge synthetic">DEMO SINTÉTICO</span>
-                        )}
+              {reports.length === 0 ? (
+                <div className="civia-empty-state">
+                  <div className="civia-empty-state-icon">🔍</div>
+                  <h3>No se encontraron reportes</h3>
+                  <p>No hay incidentes registrados que coincidan con los filtros seleccionados.</p>
+                  <button
+                    type="button"
+                    className="civia-btn secondary"
+                    onClick={() => {
+                      setFilterCategory('');
+                      setFilterSeverity('');
+                      setFilterStatus('');
+                      setFilterComuna('');
+                      setFilterQuery('');
+                      setUseRadiusFilter(false);
+                    }}
+                  >
+                    Limpiar filtros
+                  </button>
+                </div>
+              ) : (
+                <div className="civia-reports-grid">
+                  {reports.map((rep) => (
+                    <article key={rep.id} className="civia-report-card">
+                      <img
+                        className="civia-report-thumb"
+                        src={rep.photo_url}
+                        alt={rep.title}
+                        loading="lazy"
+                      />
+                      <div className="civia-report-body">
+                        <div className="civia-badge-row">
+                          <span className="civia-badge status">{rep.tracking_code}</span>
+                          {rep.effective_category && (
+                            <span className={`civia-badge cat-${rep.effective_category}`}>
+                              {rep.effective_category}
+                            </span>
+                          )}
+                          {rep.is_synthetic && (
+                            <span className="civia-badge synthetic">DEMO SINTÉTICO</span>
+                          )}
+                        </div>
+                        <h3 style={{ margin: '0.2rem 0', fontSize: '1.02rem' }}>{rep.title}</h3>
+                        <p style={{ margin: 0, fontSize: '0.86rem', color: 'var(--civia-muted)', flex: 1 }}>
+                          {rep.description.slice(0, 125)}
+                          {rep.description.length > 125 ? '...' : ''}
+                        </p>
+                        <div style={{ fontSize: '0.8rem', color: 'var(--civia-muted)' }}>
+                          <strong>Estado:</strong> {STATUS_LABELS[rep.status] || rep.status} ·{' '}
+                          <strong>{rep.comuna || 'Cali'}</strong>
+                          {rep.distance_km !== null ? ` · a ${rep.distance_km} km` : ''}
+                        </div>
+                        <button
+                          type="button"
+                          className="civia-btn secondary"
+                          style={{ marginTop: '0.4rem' }}
+                          onClick={() => openReportInspection(rep)}
+                        >
+                          Ver detalle del reporte
+                        </button>
                       </div>
-                      <h3 style={{ margin: '0.2rem 0', fontSize: '1.02rem' }}>{rep.title}</h3>
-                      <p style={{ margin: 0, fontSize: '0.86rem', color: 'var(--civia-muted)', flex: 1 }}>
-                        {rep.description.slice(0, 125)}
-                        {rep.description.length > 125 ? '...' : ''}
-                      </p>
-                      <div style={{ fontSize: '0.8rem', color: 'var(--civia-muted)' }}>
-                        <strong>Estado:</strong> {STATUS_LABELS[rep.status] || rep.status} ·{' '}
-                        <strong>{rep.comuna || 'Cali'}</strong>
-                        {rep.distance_km !== null ? ` · a ${rep.distance_km} km` : ''}
-                      </div>
-                      <button
-                        type="button"
-                        className="civia-btn secondary"
-                        style={{ marginTop: '0.4rem' }}
-                        onClick={() => openReportInspection(rep)}
-                      >
-                        Ver detalle del reporte
-                      </button>
-                    </div>
-                  </article>
-                ))}
-              </div>
+                    </article>
+                  ))}
+                </div>
+              )}
             </section>
           </>
         )}
@@ -1981,8 +2034,8 @@ export function App() {
               <div style={{ marginTop: '1.1rem', display: 'flex', gap: '0.8rem' }}>
                 <button type="submit" className="civia-btn accent" disabled={submittingReport}>
                   {submittingReport
-                    ? 'Procesando reporte y evidencia...'
-                    : 'Enviar Reporte y Analizar Evidencia con IA'}
+                    ? 'Enviando tu reporte...'
+                    : 'Enviar reporte'}
                 </button>
               </div>
             </form>
@@ -2135,20 +2188,20 @@ export function App() {
           </section>
         )}
 
-        {/* PESTAÑA 4: ASISTENTE AGÉNTICO CON HERRAMIENTAS Y 4 LÍMITES */}
+        {/* PESTAÑA 4: ASISTENTE CIUDADANO (CONSULTAS Y GESTIÓN) */}
         {activeTab === 'asistente' && (
           <section className="civia-panel">
-            <h2>Asistente Ciudadano de Consulta y Gestión</h2>
+            <h2>Asistente Ciudadano</h2>
             <p style={{ color: 'var(--civia-muted)', marginTop: 0 }}>
-              El asistente ciudadano te ayuda a consultar información sobre reportes en Santiago de Cali, conocer el estado de incidentes y registrar observaciones de forma guiada y segura. Cualquier actualización crítica es supervisada por operadores calificados.
+              Consulta información sobre reportes e incidentes en Santiago de Cali, su estado y avance en la atención ciudadana.
             </p>
 
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', marginBottom: '0.85rem' }}>
               {[
-                '¿Cuántos reportes de HUECO y QUEMA hay registrados en la Comuna 2 de Cali?',
-                'Dame el detalle completo del radicado CIV-2026-DEMO0004 en el Cerro de las Tres Cruces.',
-                '¿Cuántos reportes de radiación nuclear o cruce satelital NDVI hay en la Comuna 99?',
-                'Propón cambiar el estado del reporte CIV-2026-DEMO0002 a RESOLVED porque ya se recolectó la basura.',
+                '¿Qué reportes de huecos hay en mi comuna?',
+                '¿Cómo puedo consultar el estado de mi reporte?',
+                '¿Qué reportes de basuras se han registrado recientemente?',
+                '¿Qué significa que mi reporte esté pendiente de revisión?',
               ].map((q) => (
                 <button
                   key={q}
@@ -2169,157 +2222,65 @@ export function App() {
               <input
                 type="text"
                 aria-label="Consulta para el agente de CIVIA"
+                placeholder="Ej. ¿Qué reportes hay en la Comuna 2? o ¿Cómo va mi reporte CIV-2026-DEMO0001?"
                 value={agentInput}
                 onChange={(e) => setAgentInput(e.target.value)}
                 style={{ flex: 1, minWidth: '260px', padding: '0.65rem 0.85rem', borderRadius: '8px', border: '1px solid #bfd0cd' }}
               />
               <button type="submit" className="civia-btn" disabled={agentBusy}>
-                {agentBusy ? 'Ejecutando agente y herramientas...' : 'Consultar al Agente'}
+                {agentBusy ? 'Consultando al asistente...' : 'Preguntar al Asistente'}
               </button>
             </form>
 
-            {(() => {
-              const effectiveOpId = agentResponse?.operation_id || activeAttempt?.operationId;
-              const effectiveOpToken = agentResponse?.query_token || activeAttempt?.operationToken;
-              const effectiveOpStatus = agentResponse?.operation_status || activeAttempt?.operationStatus;
-
-              if (!agentResponse && !effectiveOpId) {
-                return null;
-              }
-
-              return (
-                <div style={{ background: '#f5f9f8', padding: '1.1rem', borderRadius: '10px', border: '1px solid var(--civia-border)' }}>
-                  {agentResponse && (
-                    <>
-                      <div className="civia-badge-row" style={{ marginBottom: '0.65rem' }}>
-                        <span className="civia-badge status">
-                          Vueltas: {agentResponse.iterations_used} / {agentResponse.max_iterations}
-                        </span>
-                        <span className="civia-badge status">
-                          Tokens: {agentResponse.total_tokens_used} / {agentResponse.max_tokens_budget}
-                        </span>
-                        <span className="civia-badge status">Latencia: {agentResponse.latency_ms} ms</span>
-                        {agentResponse.guardrail_triggered && (
-                          <span className="civia-badge synthetic">
-                            Límite activado: {agentResponse.guardrail_triggered}
-                          </span>
-                        )}
-                      </div>
-
-                      <div style={{ background: '#ffffff', padding: '0.9rem', borderRadius: '8px', border: '1px solid #dce4e2', marginBottom: '0.85rem', whiteSpace: 'pre-wrap' }}>
-                        <strong>Respuesta del Agente:</strong>
-                        <p style={{ margin: '0.4rem 0 0' }}>{agentResponse.answer}</p>
-                      </div>
-
-                      {agentResponse.requires_human_approval && (
-                        <div className="civia-alert info">
-                          <strong>Guardrail #4 activo (Aprobación Humana Obligatoria):</strong> La IA no modificó directamente la tabla de reportes. Se registró la solicitud pendiente #{agentResponse.pending_approval_id?.slice(0, 8)} en la bandeja de Observabilidad Admin.
-                        </div>
-                      )}
-
-                      {agentResponse.tools_invoked && agentResponse.tools_invoked.length > 0 && (
-                        <div>
-                          <strong style={{ fontSize: '0.88rem' }}>
-                            Acciones de consulta realizadas ({agentResponse.tools_invoked.length}):
-                          </strong>
-                          {agentResponse.tools_invoked.map((t, idx) => (
-                            <pre
-                              key={`${t.tool}-${idx}`}
-                              style={{
-                                background: '#14242b',
-                                color: '#e2f1ef',
-                                padding: '0.65rem',
-                                borderRadius: '8px',
-                                fontSize: '0.78rem',
-                                overflowX: 'auto',
-                                marginTop: '0.4rem',
-                              }}
-                            >
-                              {`Herramienta: ${t.tool}(${JSON.stringify(t.args)})\nResultado SQL/Acción: ${JSON.stringify(t.result, null, 2)}`}
-                            </pre>
-                          ))}
-                        </div>
-                      )}
-                    </>
-                  )}
-
-                  {effectiveOpId && (
-                    <div style={{ marginTop: '0.8rem', padding: '0.8rem', background: '#eef6f5', borderRadius: '8px', border: '1px solid #c8deda' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem' }}>
-                        <span style={{ fontSize: '0.85rem' }}>
-                          <strong>ID Operación:</strong> <code>{effectiveOpId}</code>
-                          {effectiveOpStatus && (
-                            <span className="civia-badge status" style={{ marginLeft: '0.5rem' }}>
-                              {effectiveOpStatus}
-                            </span>
-                          )}
-                        </span>
-                        <button
-                          type="button"
-                          className="civia-btn secondary"
-                          style={{ padding: '0.3rem 0.7rem', fontSize: '0.8rem' }}
-                          disabled={checkingOperation}
-                          onClick={() => handleCheckOperationStatus(effectiveOpId, effectiveOpToken ?? undefined)}
-                        >
-                          {checkingOperation ? 'Consultando...' : 'Verificar estado definitivo'}
-                        </button>
-                      </div>
-
-                      {operationStatus && (
-                        <div style={{ marginTop: '0.6rem', padding: '0.6rem', background: '#ffffff', borderRadius: '6px', fontSize: '0.82rem' }}>
-                          <div><strong>Estado persistido:</strong> {operationStatus.status}</div>
-                          {operationStatus.target_id && <div><strong>Reporte objetivo:</strong> {operationStatus.target_id}</div>}
-                          {operationStatus.operation_type && <div><strong>Tipo de operación:</strong> {operationStatus.operation_type}</div>}
-                          {operationStatus.result_payload && (
-                            <pre style={{ margin: '0.4rem 0 0', padding: '0.4rem', background: '#f5f5f5', borderRadius: '4px', maxHeight: '120px', overflow: 'auto' }}>
-                              {JSON.stringify(operationStatus.result_payload, null, 2)}
-                            </pre>
-                          )}
-                          {operationStatus.error_message && (
-                            <div style={{ color: '#d32f2f', marginTop: '0.3rem' }}>
-                              <strong>Fallo:</strong> {operationStatus.error_message}
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-
-                  <div style={{ marginTop: '0.85rem', display: 'flex', justifyContent: 'flex-end' }}>
-                    <button
-                      type="button"
-                      className="civia-btn secondary"
-                      style={{ fontSize: '0.78rem', padding: '0.3rem 0.65rem' }}
-                      onClick={handleClearAgentSession}
-                    >
-                      Nueva consulta / Limpiar sesión
-                    </button>
-                  </div>
+            {agentResponse && (
+              <div className="civia-agent-response-card">
+                <div className="civia-agent-response-header">
+                  <span className="civia-agent-icon" aria-hidden="true">🤖</span>
+                  <strong>Respuesta del Asistente:</strong>
                 </div>
-              );
-            })()}
+                <div className="civia-agent-markdown-body">
+                  <SafeMarkdown content={agentResponse.answer} />
+                </div>
+
+                {agentResponse.requires_human_approval && (
+                  <div className="civia-alert info" role="status" style={{ marginTop: '0.85rem' }}>
+                    <strong>Solicitud registrada para revisión:</strong> Tu solicitud fue registrada y está pendiente de aprobación. El estado del reporte no cambiará hasta que un administrador autorice la modificación.
+                  </div>
+                )}
+
+                <div style={{ marginTop: '0.85rem', display: 'flex', justifyContent: 'flex-end' }}>
+                  <button
+                    type="button"
+                    className="civia-btn secondary sm"
+                    onClick={handleClearAgentSession}
+                  >
+                    Nueva consulta
+                  </button>
+                </div>
+              </div>
+            )}
           </section>
         )}
 
         {/* PESTAÑA 5: ZONA ADMIN Y OBSERVABILIDAD PROTEGIDA */}
         {activeTab === 'admin' && (
           <section className="civia-panel">
-            <h2>Zona Protegida de Observabilidad Técnica, Resiliencia y Aprobaciones Humanas</h2>
+            <h2>Zona de Administración y Observabilidad</h2>
             <p style={{ color: 'var(--civia-muted)', marginTop: 0 }}>
-              Exclusivo para evaluación técnica y operadores autorizados. Las trazas internas, nombres de proveedores, latencias P50/P90 y fallos jamás se exponen en la vista ciudadana.
+              Panel de gestión integral para operadores y supervisores. Las trazas técnicas, métricas de proveedores y solicitudes de escritura crítica se administran desde esta consola centralizada.
             </p>
 
             <div style={{ display: 'flex', gap: '0.6rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '1rem' }}>
               <label htmlFor="admin-token-input" style={{ fontWeight: 600, fontSize: '0.86rem' }}>
-                X-Admin-Token:
+                Clave de acceso administrativo:
               </label>
               <input
                 id="admin-token-input"
                 type="password"
-                placeholder="Ingrese ADMIN_TOKEN de .env"
+                placeholder="Ingrese la clave de acceso de administrador"
                 value={adminToken}
                 onChange={(e) => setAdminToken(e.target.value)}
-                style={{ padding: '0.5rem 0.75rem', borderRadius: '8px', border: '1px solid #bfd0cd' }}
+                style={{ padding: '0.5rem 0.75rem', borderRadius: '8px', border: '1px solid #bfd0cd', minWidth: '240px' }}
               />
               <button
                 type="button"
@@ -2327,9 +2288,101 @@ export function App() {
                 onClick={() => void loadAdminPanel()}
                 disabled={adminBusy}
               >
-                {adminBusy ? 'Cargando...' : 'Refrescar Observabilidad'}
+                {adminBusy ? 'Cargando...' : 'Acceder / Refrescar Observabilidad'}
               </button>
             </div>
+
+            {/* AUDITORÍA TÉCNICA DEL ASISTENTE CIUDADANO (IDEMPOTENCIA Y LÍMITES F4) */}
+            {(() => {
+              const effectiveOpId = agentResponse?.operation_id || activeAttempt?.operationId;
+              const effectiveOpToken = agentResponse?.query_token || activeAttempt?.operationToken;
+              const effectiveOpStatus = agentResponse?.operation_status || activeAttempt?.operationStatus;
+
+              if (!agentResponse && !effectiveOpId) return null;
+
+              return (
+                <details className="civia-demo-details" style={{ marginBottom: '1.25rem', background: '#f8fafc', padding: '0.85rem 1rem' }}>
+                  <summary style={{ fontWeight: 700, color: 'var(--civia-teal-dark)' }}>
+                    🛠️ Telemetría y Auditoría de Consulta del Asistente (Idempotencia y Límites F4)
+                  </summary>
+                  <div style={{ marginTop: '0.75rem' }}>
+                    <div className="civia-badge-row" style={{ marginBottom: '0.65rem' }}>
+                      {agentResponse && (
+                        <>
+                          <span className="civia-badge status">
+                            Vueltas: {agentResponse.iterations_used} / {agentResponse.max_iterations}
+                          </span>
+                          <span className="civia-badge status">
+                            Tokens: {agentResponse.total_tokens_used} / {agentResponse.max_tokens_budget}
+                          </span>
+                          <span className="civia-badge status">Latencia: {agentResponse.latency_ms} ms</span>
+                          {agentResponse.guardrail_triggered && (
+                            <span className="civia-badge synthetic">
+                              Límite activado: {agentResponse.guardrail_triggered}
+                            </span>
+                          )}
+                        </>
+                      )}
+                      {effectiveOpId && (
+                        <span className="civia-badge status">
+                          ID Operación: <code>{effectiveOpId}</code>
+                          {effectiveOpStatus && ` (${effectiveOpStatus})`}
+                        </span>
+                      )}
+                    </div>
+
+                    {effectiveOpId && (
+                      <div style={{ marginBottom: '0.75rem' }}>
+                        <button
+                          type="button"
+                          className="civia-btn secondary sm"
+                          disabled={checkingOperation}
+                          onClick={() => handleCheckOperationStatus(effectiveOpId, effectiveOpToken ?? undefined)}
+                        >
+                          {checkingOperation ? 'Consultando...' : 'Verificar estado definitivo de operación'}
+                        </button>
+                        {operationStatus && (
+                          <div style={{ marginTop: '0.5rem', padding: '0.6rem', background: '#ffffff', borderRadius: '6px', fontSize: '0.82rem', border: '1px solid #dce4e2' }}>
+                            <div><strong>Estado persistido:</strong> {operationStatus.status}</div>
+                            {operationStatus.target_id && <div><strong>Reporte objetivo:</strong> {operationStatus.target_id}</div>}
+                            {operationStatus.operation_type && <div><strong>Tipo de operación:</strong> {operationStatus.operation_type}</div>}
+                            {operationStatus.result_payload && (
+                              <pre style={{ margin: '0.4rem 0 0', padding: '0.4rem', background: '#f5f5f5', borderRadius: '4px', maxHeight: '120px', overflow: 'auto' }}>
+                                {JSON.stringify(operationStatus.result_payload, null, 2)}
+                              </pre>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {agentResponse?.tools_invoked && agentResponse.tools_invoked.length > 0 && (
+                      <div>
+                        <strong style={{ fontSize: '0.84rem' }}>
+                          Herramientas tipadas invocadas ({agentResponse.tools_invoked.length}):
+                        </strong>
+                        {agentResponse.tools_invoked.map((t, idx) => (
+                          <pre
+                            key={`${t.tool}-${idx}`}
+                            style={{
+                              background: '#14242b',
+                              color: '#e2f1ef',
+                              padding: '0.65rem',
+                              borderRadius: '8px',
+                              fontSize: '0.78rem',
+                              overflowX: 'auto',
+                              marginTop: '0.4rem',
+                            }}
+                          >
+                            {`Herramienta: ${t.tool}(${JSON.stringify(t.args)})\nResultado SQL: ${JSON.stringify(t.result, null, 2)}`}
+                          </pre>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </details>
+              );
+            })()}
 
             {obsData && (
               <>

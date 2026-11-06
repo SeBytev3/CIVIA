@@ -4,6 +4,41 @@
 
 ---
 
+## CIVIA 1.0 — Pulido Integral de Producto, Markdown Seguro y Experiencia Ciudadana (2026-11-06)
+
+### 1. Hallazgos Corregidos e Implementación Técnica
+- **Fase 1 — Renderizado Markdown seguro (`SafeMarkdown`):** Se integró `react-markdown` (v10) y `remark-gfm` (v4) plenamente compatibles con React 19 en `frontend/src/components/SafeMarkdown.tsx`. Soporta encabezados acotados (H1-H3 proporcionales), negritas, cursivas, listas ordenadas/desordenadas, tablas con scroll horizontal adaptativo y bloques de código inline/preformateados. Garantiza seguridad absoluta: sin `dangerouslySetInnerHTML`, sin `rehype-raw`, neutralización de esquemas `javascript:`, `data:` o scripts, y sustitución de imágenes remotas no autorizadas por descripciones seguras para evitar rastreo.
+- **Fase 2 — Eliminación de telemetría de la vista ciudadana:** Se retiraron completamente de la pestaña *Asistente Ciudadano* los indicadores de vueltas (`Vueltas: X / 5`), consumo de tokens (`Tokens: X / 6000`), latencias de red, límites técnicos internos y volcados JSON crudos de herramientas ejecutadas. Se preservó el contrato F4 en backend y la visualización técnica y auditoría se trasladó íntegra y exclusivamente a la pestaña *Administración*.
+- **Fase 2.1 — Notificación empática de aprobación humana:** Cuando una solicitud requiere aprobación humana (Guardrail #4), la vista ciudadana muestra una tarjeta clara y amable: *"Tu solicitud fue registrada y está pendiente de aprobación. El estado del reporte no cambiará hasta que un administrador autorice la modificación."*
+- **Fase 3 — Revisión integral de las 5 pantallas:**
+  - *Mapa y Reportes:* Se cambió "Total Reportes BD" por *"Reportes registrados"* y "Reportes guardados" por *"En Santiago de Cali"*. Se eliminó la mención de "radio geográfico Haversine" cambiándola por *"distancia desde el punto de referencia"*. Se implementó un estado vacío amigable con botón de *"Limpiar filtros"* cuando no hay resultados.
+  - *Nuevo Reporte:* El botón principal ahora muestra *"Enviar reporte"* y el estado de procesamiento indica *"Enviando tu reporte..."*, sin menciones a "multimodal" ni modelos de IA.
+  - *Seguimiento Radicado:* Historial de eventos cronológicos con insignias claras en español (`ASSIGNED_TO_DEPARTMENT` → *"Asignado a una dependencia"*, `STATUS_UPDATED` → *"Se actualizó el estado del reporte"*, `REPORT_REGISTERED` → *"Reporte registrado en la plataforma"*, `AI_ANALYSIS_COMPLETED` → *"Diagnóstico inicial procesado"*). Se mantiene visible la advertencia institucional sobre correo electrónico a entidades externas deshabilitado.
+  - *Asistente Ciudadano:* Encabezado simplificado, ejemplos cotidianos prácticos (huecos por comuna, consulta de radicado, puntos de basura y significado del estado pendiente de revisión). En el backend (`agent.py`), se perfeccionó el fallback determinista SQL multicategoría para consultas combinadas (ej. huecos y quemas) y preguntas informativas ciudadanas.
+  - *Administración (UNA SOLA PESTAÑA):* Se unificó en un único panel con secciones ordenadas: bandeja de reportes recibidos (notificaciones internas), gestión de dependencias y notas, solicitudes de aprobación humana pendientes, observabilidad del router multimodal, métricas agregadas, trazas sanitizadas, simulador de fallas de resiliencia y la auditoría técnica de consultas del asistente. Se sustituyó la etiqueta "X-Admin-Token" por *"Clave de acceso administrativo"*.
+- **Fase 4 — Desacoplamiento de notificaciones:** Se implementó `handleTabChange` para limpiar alertas globales de éxito y error al navegar entre pestañas, impidiendo que mensajes obsoletos persistan o colisionen.
+- **Fase 5 — Identidad visual 1.0 y responsividad:** Contraste WCAG AA validado en botones secundarios y primarios, adaptabilidad comprobada en 1366x768 (desktop), 390x844 (mobile) y 320x568 (ultra-compacto) sin desbordamiento horizontal.
+
+### 2. Matriz de Correspondencia de Skills Aplicadas
+| Hallazgo / Tarea | Skill Pertinente | Instrucción Concreta Aplicada | Verificación Adversarial Realizada |
+| :--- | :--- | :--- | :--- |
+| Renderizado de Markdown en React 19 | `react-patterns` | Integración de `react-markdown` y `remark-gfm` mediante componentes funcionales puros | `npm run build` sin errores; validación DOM de tablas, listas y texto formateado |
+| Seguridad en salida generativa de IA | `backend-security-coder` / `api-security` | Sanitización estricta de enlaces (`javascript:` bloqueado) y supresión de imágenes remotas no confiables | SafeMarkdown procesa entradas adversariales sin inyección de scripts ni carga de beacons |
+| Telemetría técnica expuesta al ciudadano | `uxui-principles` / `systematic-debugging` | Eliminación de badges de vueltas, tokens, latencias y JSON crudo en Asistente; traslado a Admin | Test Playwright confirmó 0 ocurrencias de telemetría en DOM de Asistente Ciudadano |
+| Mensajería de aprobación humana | `frontend-api-integration-patterns` | Reemplazo de alerta cruda Guardrail #4 por tarjeta empática ciudadana | Playwright verificó texto exacto tras solicitar cambio de estado |
+| Consultas agénticas multicategoría | `postgres-best-practices` | Fallback SQL con agregación multiconsulta y desglose honesto por categoría | Test funcional verificó conteos combinados exactos en PostgreSQL 17 |
+| Persistencia de alertas entre vistas | `react-patterns` | `handleTabChange` centralizado que resetea `globalError` y `globalSuccess` al cambiar pestaña | Cambio de pestaña comprobó limpieza inmediata de alertas residuales |
+| Responsividad en pantallas pequeñas | `ui-a11y` / `ui-review` | Verificación de cajas flexibles y prevención de scroll horizontal | Playwright evaluó `scrollWidth <= innerWidth + 2` en viewport 320x568 |
+
+### 3. Resultados de Verificación
+- **Suite Hermética Backend Docker:** **154 PASSED**, 1 deselected, 0 failed (100% GREEN en 29.24s).
+- **Suite E2E UX/UI, Markdown y Trazabilidad (Playwright):** **100% PASSED** (`scripts/test_citizen_ux_suite.cjs`) en Desktop (1366x768), Móvil (390x844) y Ultra-Compacto (320x568).
+- **Suite E2E Dual Cámara / Sintéticos:** **2/2 PASSED** (`scripts/test_e2e_final.cjs`).
+- **Frontend Build (Vite + TypeScript):** `tsc -b && vite build` completado exitosamente sin errores en 2.68s.
+- **Veredicto Oficial:** `CIVIA 1.0 LISTO PARA DEMOSTRACIÓN Y ENTREGA ACADÉMICA`.
+
+---
+
 ## Hotfix de Aceptación UX, Trazabilidad y Eliminación Definitiva de Paint (2026-11-05)
 
 ### 1. Hallazgos Corregidos e Implementación Técnica

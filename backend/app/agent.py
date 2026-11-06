@@ -1293,12 +1293,33 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
             elif code_match:
                 res = tool_obtener_reporte({"identificador": code_match.group(0)})
                 tool_history.append({"tool": "obtener_reporte", "args": {"identificador": code_match.group(0)}, "result": res})
+            elif any(w in q_up for w in ("COMO PUEDO CONSULTAR", "CÓMO PUEDO CONSULTAR", "COMO CONSULTAR", "CÓMO CONSULTAR", "CONSULTAR EL ESTADO", "HACER SEGUIMIENTO")):
+                return (
+                    "Para consultar el estado de tu reporte en CIVIA, sigue estos pasos:\n\n"
+                    "1. Ingresa a la pestaña **Seguimiento Radicado** en el menú superior.\n"
+                    "2. Escribe tu número de radicado (por ejemplo `CIV-2026-DEMO0001`).\n"
+                    "3. Haz clic en **Consultar Radicado**.\n\n"
+                    "Allí podrás verificar la categoría confirmada, la evidencia fotográfica y la cronología completa de actuaciones operativas."
+                )
+            elif any(w in q_up for w in ("QUE SIGNIFICA", "QUÉ SIGNIFICA")) and any(w in q_up for w in ("PENDIENTE DE REVIS", "PENDIENTE DE CONFIRM", "PENDIENTE DE ANÁLISIS", "PENDIENTE DE ANALISIS")):
+                return (
+                    "Cuando un reporte figura como **Pendiente de revisión** o **Pendiente de confirmación**, "
+                    "significa que tu solicitud y su fotografía fueron registradas exitosamente en la plataforma. "
+                    "El equipo técnico y los supervisores de la Alcaldía de Cali están validando el diagnóstico preliminar "
+                    "y programando la asignación a la dependencia encargada para su intervención."
+                )
             else:
                 args: dict[str, Any] = {}
-                for cat in ("HUECO", "BASURAS", "TALA", "QUEMA"):
-                    if cat in q_up:
-                        args["category"] = cat
-                        break
+                detected_categories = []
+                for cat, keywords in [
+                    ("HUECO", ["HUECO", "HUECOS", "BACHE", "BACHES"]),
+                    ("BASURAS", ["BASURA", "BASURAS", "RESIDUO", "RESIDUOS", "ESCOMBRO", "ESCOMBROS"]),
+                    ("TALA", ["TALA", "TALAS", "ARBOL", "ÁRBOL", "RAMAS", "PODA"]),
+                    ("QUEMA", ["QUEMA", "QUEMAS", "INCENDIO", "INCENDIOS", "FUEGO"]),
+                ]:
+                    if any(kw in q_up for kw in keywords):
+                        detected_categories.append(cat)
+
                 if "ANALYZED_PENDING_CONFIRMATION" in q_up or "PENDIENTES DE CONFIRMACIÓN" in q_up or "PENDIENTE DE CONFIRMACIÓN" in q_up:
                     args["status"] = "ANALYZED_PENDING_CONFIRMATION"
                 elif "PENDING_ANALYSIS" in q_up:
@@ -1319,8 +1340,31 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
                     args["radius_km"] = float(rad_match.group(1)) if rad_match else 2.5
                 if any(w in q_up for w in ("SATELITAL", "NDVI", "RADIACION", "RADIACIÓN", "NUCLEAR")):
                     args["q"] = "NDVI_INEXISTENTE_999"
-                res = tool_consultar_reportes(args)
-                tool_history.append({"tool": "consultar_reportes", "args": args, "result": res})
+
+                if len(detected_categories) > 1:
+                    breakdown = {}
+                    total_multi = 0
+                    all_items = []
+                    for c in detected_categories:
+                        c_args = dict(args)
+                        c_args["category"] = c
+                        c_res = tool_consultar_reportes(c_args)
+                        c_cnt = c_res.get("total_encontrados", 0)
+                        breakdown[c] = c_cnt
+                        total_multi += c_cnt
+                        all_items.extend(c_res.get("items", []))
+                    multi_res = {
+                        "total_encontrados": total_multi,
+                        "evidencia_disponible": total_multi > 0,
+                        "por_categoria": breakdown,
+                        "items": all_items,
+                    }
+                    tool_history.append({"tool": "consultar_reportes", "args": {"categories": detected_categories, **args}, "result": multi_res})
+                else:
+                    if len(detected_categories) == 1:
+                        args["category"] = detected_categories[0]
+                    res = tool_consultar_reportes(args)
+                    tool_history.append({"tool": "consultar_reportes", "args": args, "result": res})
         except Exception as exc:
             logger.warning("Fallo en fallback SQL determinista: %s", exc)
             return "El agente no pudo completar el procesamiento dentro del límite de tiempo asignado."
@@ -1343,6 +1387,14 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
         total = last["total_encontrados"]
         if total == 0:
             return "No existe evidencia ni reportes registrados en la base de datos de CIVIA para los criterios consultados (0 encontrados)."
+        if "por_categoria" in last:
+            det = ", ".join(f"{c}: {cnt}" for c, cnt in last["por_categoria"].items())
+            items = last.get("items") or []
+            codigos = ", ".join(
+                f"{it['tracking_code']} ({it['effective_category']})"
+                for it in items[:5]
+            )
+            return f"Se encontraron {total} reporte(s) registrados en total ({det}) para los criterios consultados: {codigos}."
         items = last.get("items") or []
         codigos = ", ".join(
             f"{it['tracking_code']} ({it['effective_category']}, {it.get('effective_severity')}, {it.get('comuna') or 'Cali'}, {it.get('neighborhood') or ''}, estado {it.get('status')})"

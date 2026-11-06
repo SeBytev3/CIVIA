@@ -389,6 +389,55 @@ async function launchBrowser() {
       console.log(`✓ Pestaña "${tab.name}" libre de jerga técnica interna.`);
     }
 
+    // 1.11 Verificación de Asistente Ciudadano: Markdown Seguro y Cero Telemetría
+    console.log('\n--- Verificación de Asistente: Markdown Seguro y Cero Telemetría Pública ---');
+    await page.locator('button.civia-nav-btn:has-text("Asistente")').click();
+    await page.waitForTimeout(300);
+
+    // Ejecutar consulta cotidiana
+    const presetBtn = page.locator('button:has-text("¿Cómo puedo consultar el estado de mi reporte?")');
+    await presetBtn.waitFor({ state: 'visible' });
+    await presetBtn.click();
+
+    // Esperar renderizado de respuesta con SafeMarkdown
+    const markdownRoot = page.locator('.civia-agent-response-card .safe-markdown-root');
+    await markdownRoot.waitFor({ state: 'visible', timeout: 35000 });
+    const renderedHtml = await markdownRoot.innerHTML();
+    console.log('✓ Respuesta del asistente renderizada exitosamente con SafeMarkdown.');
+
+    // Comprobar elementos estructurados de Markdown (listas o negritas)
+    const hasMarkdownStructure = renderedHtml.includes('<strong') || renderedHtml.includes('<ol') || renderedHtml.includes('<ul') || renderedHtml.includes('<p');
+    if (!hasMarkdownStructure) {
+      throw new Error('La respuesta del asistente no contiene estructura HTML segura de Markdown.');
+    }
+    console.log('✓ Elementos semánticos de Markdown (párrafos/listas/énfasis) confirmados en DOM.');
+
+    // Comprobar ausencia absoluta de telemetría agéntica en la vista ciudadana
+    const assistantAreaText = await page.locator('section.civia-panel').innerText();
+    const telemetryTerms = ['Vueltas:', 'Tokens:', 'Latencia:', 'Límite activado:', 'Herramienta:', 'ID Operación:'];
+    for (const tTerm of telemetryTerms) {
+      if (assistantAreaText.includes(tTerm)) {
+        throw new Error(`Telemetría técnica no autorizada "${tTerm}" encontrada en la vista ciudadana del Asistente.`);
+      }
+    }
+    console.log('✓ Confirmado: Vista ciudadana del asistente 100% libre de vueltas, tokens, latencia e ID de operación.');
+
+    // 1.12 Verificación de Notificación Humana para Solicitudes Críticas
+    console.log('\n--- Verificación de Notificación Amigable de Aprobación Humana ---');
+    const agentInputEl = page.locator('input[aria-label="Consulta para el agente de CIVIA"]');
+    await agentInputEl.fill('Propón cambiar el estado del reporte CIV-2026-DEMO0002 a IN_REVIEW porque hay cuadrilla inspeccionando.');
+    const submitAgentBtn = page.locator('button[type="submit"]:has-text("Preguntar al Asistente")');
+    await submitAgentBtn.click();
+
+    const approvalNotice = page.locator('.civia-alert.info');
+    await approvalNotice.waitFor({ state: 'visible', timeout: 35000 });
+    const noticeTxt = await approvalNotice.innerText();
+    console.log(`✓ Mensaje de aprobación capturado: "${noticeTxt}"`);
+    if (!noticeTxt.toLowerCase().includes('tu solicitud fue registrada y está pendiente de aprobación') || !noticeTxt.toLowerCase().includes('el estado del reporte no cambiará')) {
+      throw new Error(`El mensaje de aprobación no es empático o no corresponde con la especificación: "${noticeTxt}".`);
+    }
+    console.log('✓ Mensaje empático de aprobación humana validado correctamente.');
+
     await contextDesktop.close();
 
     // TEST 2: MOBILE (390 x 844)
@@ -437,6 +486,26 @@ async function launchBrowser() {
     console.log('✓ Cierre de detalle verificado exitosamente en móvil.');
 
     await contextMobile.close();
+
+    // TEST 3: ULTRA COMPACTO / NARROW SCREEN (320 x 568)
+    console.log('\n--- TEST 3: Responsividad en Pantalla Estrecha (320 x 568) ---');
+    const contextNarrow = await browser.newContext({
+      viewport: { width: 320, height: 568 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const pageNarrow = await contextNarrow.newPage();
+    await pageNarrow.goto('http://localhost:5173', { waitUntil: 'networkidle' });
+
+    const hasOverflow = await pageNarrow.evaluate(() => {
+      return document.documentElement.scrollWidth > window.innerWidth + 2;
+    });
+    console.log(`✓ Desbordamiento horizontal en 320px: ${hasOverflow ? 'DETECTADO (FALLO)' : 'NINGUNO (CORRECTO)'}`);
+    if (hasOverflow) {
+      throw new Error('Fallo de responsividad: La página presenta desbordamiento horizontal en 320px de ancho.');
+    }
+    console.log('✓ Adaptabilidad en 320px de ancho superada exitosamente.');
+    await contextNarrow.close();
 
     console.log('\n========================================================================');
     console.log(' ¡TODAS LAS PRUEBAS E2E DE REFINAMIENTO UX/UI Y TRAZABILIDAD PASARON!');
