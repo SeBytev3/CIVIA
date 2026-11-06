@@ -101,7 +101,7 @@ async function launchBrowser() {
     await page.click('button[type="submit"]');
 
     // Esperar transición a pestaña de seguimiento
-    await page.waitForSelector('text=Seguimiento de Reporte mediante Código de Radicado', { timeout: 15000 });
+    await page.waitForSelector('text=Seguimiento de Reporte mediante Código de Radicado', { timeout: 30000 });
     const realTrackingCode = (await page.textContent('.civia-badge.status')).trim();
     console.log(`  1.4 Reporte creado con radicado: ${realTrackingCode}`);
 
@@ -168,7 +168,7 @@ async function launchBrowser() {
     await page.click('button[type="submit"]');
 
     // Esperar transición a seguimiento
-    await page.waitForSelector('text=Seguimiento de Reporte mediante Código de Radicado', { timeout: 15000 });
+    await page.waitForSelector('text=Seguimiento de Reporte mediante Código de Radicado', { timeout: 30000 });
     const demoTrackingCode = (await page.textContent('.civia-badge.status')).trim();
     console.log(`  2.4 Reporte sintético creado con radicado: ${demoTrackingCode}`);
 

@@ -1,6 +1,7 @@
 # Guion de Sustentación en Vivo — CIVIA (6 minutos + 3 minutos de preguntas)
 
-**Equipo:** Stefania Córdoba y Sebastian Espinosa  
+**Proyecto Académico de Ingeniería de Aplicaciones con IA — Universidad Cooperativa de Colombia**  
+**Equipo:** Stefania Córdoba y Sebastian Espinosa (Momento Evaluativo 2)  
 **Curso:** Ingeniería de Aplicaciones con IA — Momento Evaluativo 2  
 **Regla de oro de la sustentación:** **Iniciar directamente con la aplicación CIVIA funcionando en pantalla (`http://localhost:5173`)**. Sin diapositivas teóricas introductorias.
 
@@ -46,13 +47,16 @@
 ### Minuto 2:15 – 3:30 | Estrategia de datos (SQL directo vs. NO RAG) y agente con 4 límites (Sebastian)
 
 - **Acción en pantalla:**
-  1. Ir a la sección **«3. Agente de Consulta y Gestión (SQL Directo)»**.
-  2. Ejecutar una consulta verificable: `¿Cuáles son los reportes de HUECO en la Comuna 2?` → mostrar las herramientas invocadas (`consultar_reportes`) y los radicados exactos `CIV-2026-DEMO0001` y `CIV-2026-DEMO0007`.
-  3. Ejecutar una consulta sin evidencia en BD: `¿Cuál es el índice satelital NDVI en la Comuna 99?` → mostrar que responde honestamente que **no existe evidencia registrada** sin alucinar.
-  4. Ejecutar una solicitud de escritura crítica: `Cambia el estado del reporte CIV-2026-DEMO0001 a RESOLVED por reparación vial` → mostrar el badge de guardrail `HUMAN_APPROVAL_REQUIRED` y la solicitud creada en `pending_approvals`.
+  1. Ir a la pestaña **«Asistente Ciudadano»**:
+     - Ejecutar una consulta ciudadana: `¿Cuáles son los reportes de HUECO en la Comuna 2?` → mostrar cómo el asistente responde con empatía y claridad formateado en Markdown, citando los radicados exactos `CIV-2026-DEMO0001` y `CIV-2026-DEMO0007`. Resaltar que el ciudadano recibe una respuesta amigable sin tecnicismos ni SQL crudo expuesto.
+     - Ejecutar una consulta sin evidencia en BD: `¿Cuál es el índice satelital NDVI en la Comuna 99?` → mostrar que responde verazmente que no dispone de evidencia registrada, sin inventar ni alucinar.
+     - Ejecutar una solicitud de modificación: `Cambia el estado del reporte CIV-2026-DEMO0001 a RESOLVED` → mostrar el aviso ciudadano informando que la solicitud fue registrada para revisión administrativa y que ningún cambio se aplica sin autorización humana.
+  2. Ir a la pestaña **«Administración»** (ingresando el `ADMIN_TOKEN`):
+     - Desplegar la sección de telemetría técnica agéntica: mostrar al evaluador la herramienta tipada invocada (`consultar_reportes`), la consulta SQL parametrizada a PostgreSQL, las iteraciones y el uso de tokens.
+     - Mostrar la bandeja de **Aprobaciones Humanas**: verificar la solicitud pendiente de cambio de estado y los controles de decisión de un solo uso.
 - **Guion (Sebastian):**
   > «¿Por qué elegimos **PostgreSQL y SQL directo** en lugar de RAG o una base vectorial? Porque las consultas operativas de CIVIA exigen conteos exactos por comuna, búsquedas por código de radicado y filtros geográficos deterministas por radio en kilómetros. Un pipeline de *embeddings* introduciría costo extra, latencia y riesgo de falsos positivos semánticos sobre registros tabulares cortos.  
-  > El agente no tiene acceso libre a la base de datos: opera mediante **cuatro herramientas tipadas** (`consultar_reportes`, `obtener_reporte`, `clasificar_evidencia` y `proponer_actualizacion_critica`) y **cuatro límites obligatorios en código**: máximo de iteraciones (`MAX_ITERATIONS`), presupuesto de tokens (`MAX_TOKENS`), timeout por herramienta y global (`TIMEOUT`), y **aprobación humana obligatoria** (`HUMAN_APPROVAL_REQUIRED`). Como acaban de ver, cuando pedimos pasar un reporte a `RESOLVED`, la IA **no escribe en la tabla `reports`**: registra una solicitud en `pending_approvals` que un operador humano debe aprobar o rechazar.»
+  > En la interfaz ciudadana, la IA dialoga con respuestas limpias y empáticas en Markdown, protegiendo al usuario de detalles técnicos. En la consola administrativa, auditamos la ejecución bajo **cuatro límites obligatorios en código**: máximo de iteraciones (`MAX_ITERATIONS`), presupuesto de tokens (`MAX_TOKENS`), timeout estricto (`TIMEOUT`), y **aprobación humana obligatoria** (`HUMAN_APPROVAL_REQUIRED`). La IA **no escribe en la tabla `reports`**: registra una propuesta en `pending_approvals` que solo un operador humano con credencial administrativa puede aprobar o rechazar.»
 
 ---
 

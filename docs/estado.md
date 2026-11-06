@@ -4,6 +4,56 @@
 
 ---
 
+## CIVIA 1.0 — Validación Final de Exactitud Documental y Swagger (2026-11-06)
+
+### 1. Hallazgos Corregidos e Implementación Técnica
+- **Fase 1 — Exactitud Exhaustiva de `docs/API.md` contra OpenAPI Real (`/openapi.json`):**
+  - Se compararon automáticamente los 23 endpoints, sus 16 esquemas Pydantic v2 y respuestas contra la especificación canónica generada por FastAPI.
+  - En `GET /api/reports`: se sustituyó el parámetro ficticio `skip` por `offset: int = Query(default=0, ge=0)`; se corrigió el límite máximo a 200 (`limit: int = Query(default=50, ge=1, le=200)`); y se eliminó el campo ficticio `"page"` del payload JSON de respuesta, alineándolo con el modelo real `ReportListResponse`.
+  - En `PATCH /api/reports/{id}/confirm`: se corrigieron los nombres de los campos de entrada a `final_category` (obligatorio), `final_severity`, `human_override_note` y `edit_token` (modelo `ReportConfirmRequest`); y se documentó el soporte de credencial ciudadana tanto en el cuerpo como mediante la cabecera `X-Citizen-Edit-Token` o anulación de operador con `X-Admin-Token`.
+  - En `GET /api/reports/{id}/photo`: se especificaron las cabeceras HTTP reales: `ETag` delimitado por comillas dobles (`"{sha[:32]}"`); directiva de caché estricta (`public, max-age=31536000, immutable` si `v={sha[:16]}` coincide con el hash del archivo, o `public, max-age=0, must-revalidate` en caso contrario); y Content-Security-Policy anti-XSS (`default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'`).
+  - En `GET /api/reports/{id}/events` y `GET /api/reports/by-code/{code}/events`: se sustituyó el campo ficticio `summary` por `public_message`, incorporando los campos reales `previous_status` y `new_status` de `ReportEventPublic`.
+  - En `POST /api/agent/query`: se eliminó el campo ficticio `history` de la solicitud; se documentaron las cabeceras `Idempotency-Key` y `X-Operation-Token`; y se sincronizó la respuesta con los campos reales de `AgentQueryResponse` (`answer`, `trace_group_id`, `tools_invoked`, `iterations_used`, `max_iterations`, `total_tokens_used`, `max_tokens_budget`, `latency_ms`, `guardrail_triggered`, `requires_human_approval`, `pending_approval_id`, `tokens_estimated`, `unknown_consumption`, `operation_id`, `operation_status`, `query_token`).
+  - En `GET /api/operations/{id}`: se sincronizó la respuesta con `OperationStatusResponse` (`operation_id`, `operation_type`, `status`, `target_id`, `result_payload`, `error_message`, `created_at`, `updated_at`, `reconciled`).
+  - En `PATCH /api/reports/{id}/status`: se sustituyó el campo ficticio `resolution_notes` por `note`, haciendo explícito el requerimiento obligatorio de `human_approved: true`.
+  - En `POST /api/admin/seed`: se documentó que `force_reset` es un parámetro de consulta (`query`) y que el cuerpo de la petición es vacío.
+  - En `GET /api/admin/notifications`: se corrigió el parámetro de filtro de `scope` a `filter_type` (`ALL`, `CITIZEN`, `SYNTHETIC`) con límite hasta 200; y la respuesta se alineó con `AdminNotificationsResponse` (`total`, `unread_total`, `unread_citizen`, `unread_synthetic`, `items`).
+  - En `POST /api/admin/notifications/mark-all-read`: se corrigió el campo de respuesta de `marked_count` a `updated_count`.
+  - En `POST /api/admin/reports/{id}/management`: se corrigieron los campos del cuerpo a `assigned_to`, `admin_review_status`, `public_note` e `internal_note` (modelo `ReportManagementUpdateRequest`).
+  - En `GET /api/admin/approvals`: se corrigió la respuesta para envolver la lista en el objeto `{ "total": ..., "items": [...] }`.
+  - En `POST /api/admin/approvals/{id}/decide`: se corrigió el cuerpo a `approve: bool` y `decided_by: str` (modelo `ApprovalDecisionRequest`), y la respuesta devuelve el objeto de la fila `{ "status": "ok", "approval": {...} }`.
+  - En `GET /api/admin/observability`: se documentó el parámetro `limit` (hasta 300) y la estructura real de respuesta con `provider_chain`, `circuit_breakers`, `effective_fault_mode` y `observability`.
+  - En `POST /api/admin/fault-injection`: se corrigió el cuerpo a `mode: str` y `reset_circuits: bool` (modelo `FaultInjectionRequest`), documentando la respuesta real con `effective_fault_mode`, `runtime_override` y `circuit_breakers`.
+- **Fase 2 — Seguridad y Portabilidad Documental:**
+  - En `docs/AI_DEPLOY.md`: se retiró el comando `docker run` que contenía la contraseña fija `local_dev_change_me` y red estática, sustituyéndolo por el comando canónico sin secretos `docker compose exec -T api pytest -m "not live" -v`.
+  - En `AGENTS.md`: se actualizó el punto 4 del Protocolo de Evaluación Autónoma sustituyendo el comando heredado con secretos por el comando canónico de Compose.
+  - En `.env.example`: se armonizó la contraseña de PostgreSQL explicando que `run.ps1` y `run.sh` la generan aleatoriamente con CSPRNG para nuevas instalaciones; y se sincronizó el modelo terciario a `gemini-3.5-flash-lite`.
+  - En `docs/guia_instalacion_otro_pc.md`: se actualizó el procedimiento de inicialización manual opcional para generar contraseñas seguras y `ADMIN_TOKEN` mediante CSPRNG (`secrets.token_hex(16)` y `secrets.token_urlsafe(32)`).
+- **Fase 3 — Sincronización Arquitectónica y Sustentación:**
+  - En `docs/DEPLOYMENT.md`: se actualizó la descripción del almacenamiento inmutable para detallar el Content-Addressed Storage vigente (`synthetic_{code}_{sha[:16]}.jpg`), la re-serialización limpia sin EXIF con Pillow y la política de caché inmutable con CSP estricto.
+  - En `docs/guion_sustentacion.md`: se adaptó la demostración del minuto 2:15 a 3:30 para reflejar la experiencia ciudadana real (respuestas empáticas en SafeMarkdown sin SQL ni telemetría técnica expuesta al ciudadano), mostrando que la telemetría agéntica se audita en la pestaña Administración protegida por `ADMIN_TOKEN`.
+  - Se formalizó en todos los documentos la identidad de CIVIA como proyecto académico de Ingeniería de Aplicaciones con IA de la Universidad Cooperativa de Colombia (por Stefania Córdoba y Sebastian Espinosa).
+- **Fase 4 — Calibración de Timeout en Suite E2E Dual:**
+  - En `scripts/test_e2e_final.cjs`: se ajustó el timeout de transición de 15s a 30s (`waitForSelector`), asegurando tolerancia robusta ante eventuales failovers de la cadena de proveedores IA (`Gemini` → `Groq`).
+
+### 2. Matriz de Correspondencia de Skills Aplicadas
+| Hallazgo / Tarea | Skill Pertinente | Instrucción Concreta Aplicada | Verificación Adversarial Realizada |
+| :--- | :--- | :--- | :--- |
+| Exactitud de contratos REST | `api-documentation` / `api-patterns` | Sincronización del 100% de payloads, parámetros y códigos de `docs/API.md` con `/openapi.json` | Verificación de 23 endpoints y 16 esquemas Pydantic; cero campos obsoletos o ficticios |
+| Seguridad y eliminación de secretos | `backend-security-coder` / `api-security` | Retiro de contraseñas predecibles (`local_dev_change_me`) de comandos sugeridos y documentación | Inspección automatizada confirma ausencia de secretos fijos en procedimientos canónicos |
+| Almacenamiento inmutable Content-Addressed | `postgres-best-practices` / `container-security-hardening` | Documentación formal de direccionamiento CAS (`synthetic_{code}_{sha[:16]}.jpg`) y cabeceras CSP | Verificación en vivo de cabeceras HTTP: ETag con comillas, CSP estricto y Cache-Control inmutable |
+| Tolerancia de temporización en E2E | `playwright-skill` / `systematic-debugging` | Calibración de timeout a 30s en `test_e2e_final.cjs` para absorber latencias de fallback IA | Suite dual de Playwright superada al 100%: Cámara en vivo y Muestra sintética exitosas |
+
+### 3. Resultados de Verificación
+- **Suite Hermética Backend Docker:** **155 PASSED**, 1 deselected, 0 failed en 26.82s (`docker compose exec -T api pytest -m "not live" -v`).
+- **Suite Playwright Dual Cámara y Muestras Demo:** **2/2 PASSED (100%)** (`scripts/test_e2e_final.cjs`).
+- **Suite Playwright UX/UI y Trazabilidad:** **TODAS LAS PRUEBAS PASARON (100%)** (`scripts/test_citizen_ux_suite.cjs`).
+- **Verificación en Vivo de Endpoints y Cabeceras:** `/health`, `/api/reports/stats`, `/api/reports`, `/api/reports/by-code/*` y `/photo` validados con código 200 y cabeceras de seguridad.
+
+---
+
+
+
 ## CIVIA 1.0 — Adenda Obligatoria: Documentación Técnica Canónica de Swagger/OpenAPI y Enriquecimiento de Metadatos de la API (2026-11-06)
 
 ### 1. Hallazgos Corregidos e Implementación Técnica

@@ -92,11 +92,11 @@ git status
 
 1. **Inicialización automática por script de arranque (Recomendado):**
    Los scripts oficiales de despliegue (`.\scripts\run.ps1` en Windows 11 o `./scripts/run.sh` en Linux/macOS) detectan si `.env` existe; si no existe, lo crean automáticamente a partir de `.env.example` y generan credenciales criptográficas seguras (incluyendo un `ADMIN_TOKEN` aleatorio de alta entropía mediante CSPRNG) sin requerir intervención manual.
-2. **Preparación manual opcional:**
-   Si prefieres preparar el archivo `.env` antes de ejecutar el arranque:
+2. **Preparación manual opcional (con generación criptográfica de secretos):**
+   Si prefieres preparar el archivo `.env` antes de ejecutar el arranque (el script `run.ps1` lo hace automáticamente):
    ```powershell
    Copy-Item .env.example .env
-   python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); p.write_text(re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', p.read_text()))"
+   python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); pw=secrets.token_hex(16); text=re.sub(r'(?m)^POSTGRES_PASSWORD=.*$', f'POSTGRES_PASSWORD={pw}', p.read_text()); text=re.sub(r'(?m)^DATABASE_URL=.*$', f'DATABASE_URL=postgresql://civia:{pw}@db:5432/civia', text); text=re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', text); p.write_text(text)"
    ```
 3. **Claves de Inteligencia Artificial (OPCIONALES — Solo requeridas para inferencia multimodal en vivo):**
    - **NO son necesarias para evaluar el sistema:** La captura con cámara, la subida de fotos, la georreferenciación, la radicación, la persistencia en PostgreSQL 17, el seguimiento, la consulta en mapa y la suite hermética de 155 pruebas automáticas operan al 100% de forma determinista y local sin ninguna clave externa.
