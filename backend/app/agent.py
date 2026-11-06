@@ -1049,7 +1049,8 @@ AGENT_SYSTEM_PROMPT = (
     "2. JAMÁS inventes cifras, fechas, códigos de radicado, datos satelitales NDVI ni reportes inexistentes.\n"
     "3. Si la consulta pide datos que no están en la base de datos (ej. Comuna 99, sensores satelitales en tiempo real, radiación, video), responde claramente que NO existe evidencia registrada en la base de datos de CIVIA.\n"
     "4. Si el usuario pide cambiar el estado de un reporte, usa `proponer_actualizacion_critica` e informa que la acción quedó pendiente de aprobación humana.\n"
-    "5. Responde en español claro, conciso y verificable citando los códigos `CIV-2026-...` cuando corresponda."
+    "5. Responde en español claro, conciso y verificable citando los códigos `CIV-2026-...` cuando corresponda.\n"
+    "6. VERACIDAD INSTITUCIONAL: No afirmes que funcionarios, supervisores o dependencias de la Alcaldía de Cali están revisando o interviniendo un reporte a menos que esté explícitamente registrado en `assigned_to` o en las actuaciones del reporte. Informa con precisión: el reporte fue recibido en CIVIA y está disponible para revisión administrativa interna. Aclara que CIVIA no envía notificaciones automáticas por correo a entidades externas ni cuenta con confirmación automática de recepción por autoridades públicas."
 )
 
 
@@ -1303,10 +1304,10 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
                 )
             elif any(w in q_up for w in ("QUE SIGNIFICA", "QUÉ SIGNIFICA")) and any(w in q_up for w in ("PENDIENTE DE REVIS", "PENDIENTE DE CONFIRM", "PENDIENTE DE ANÁLISIS", "PENDIENTE DE ANALISIS")):
                 return (
-                    "Cuando un reporte figura como **Pendiente de revisión** o **Pendiente de confirmación**, "
-                    "significa que tu solicitud y su fotografía fueron registradas exitosamente en la plataforma. "
-                    "El equipo técnico y los supervisores de la Alcaldía de Cali están validando el diagnóstico preliminar "
-                    "y programando la asignación a la dependencia encargada para su intervención."
+                    "Tu reporte está registrado en CIVIA y se encuentra pendiente de revisión interna. "
+                    "Puedes consultar sus actualizaciones con tu número de radicado. Por ahora, CIVIA no envía "
+                    "notificaciones automáticas por correo a entidades externas ni cuenta con confirmación "
+                    "automática de recepción por autoridades públicas."
                 )
             else:
                 args: dict[str, Any] = {}
@@ -1378,10 +1379,12 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
             return "No se encontró ningún reporte ni evidencia registrada en la base de datos con ese identificador."
         rep = last.get("reporte") or {}
         if rep:
+            assigned_str = f"asignado a {rep['assigned_to']}" if rep.get("assigned_to") else "sin asignación a dependencia externa registrada"
             return (
                 f"Reporte {rep['tracking_code']} ({rep['title']}): categoría {rep['effective_category'] or 'PENDIENTE'}, "
                 f"severidad {rep['effective_severity'] or 'PENDIENTE'}, estado {rep['status']}, "
-                f"ubicado en {rep.get('comuna') or 'Cali'} ({rep.get('neighborhood') or rep.get('address_hint') or ''})."
+                f"ubicado en {rep.get('comuna') or 'Cali'} ({rep.get('neighborhood') or rep.get('address_hint') or ''}), "
+                f"{assigned_str}. Recuerda que las notificaciones externas por correo están deshabilitadas."
             )
     if "total_encontrados" in last:
         total = last["total_encontrados"]

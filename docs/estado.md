@@ -4,6 +4,44 @@
 
 ---
 
+## CIVIA 1.0 — Cierre Definitivo: Veracidad Institucional, Privacidad de Telemetría, Clon Limpio Docker y Documentación Integral (2026-11-06)
+
+### 1. Hallazgos Corregidos e Implementación Técnica
+- **Fase 1 — Veracidad Institucional en Respuestas del Asistente:**
+  - En `backend/app/agent.py` (`_deterministic_sql_fallback_answer`), se eliminó la afirmación no verificada que atribuía a funcionarios de la Alcaldía de Cali acciones operativas no registradas (*"El equipo técnico y los supervisores de la Alcaldía de Cali están validando el diagnóstico preliminar..."*).
+  - Se sustituyó por una respuesta precisa, veraz e institucionalmente honesta: *"Tu reporte está registrado en CIVIA y se encuentra pendiente de revisión interna. Puedes consultar sus actualizaciones con tu número de radicado. Por ahora, CIVIA no envía notificaciones automáticas por correo a entidades externas ni cuenta con confirmación automática de recepción por autoridades públicas."*
+  - En las consultas de detalle de radicado, se distingue explícitamente si existe una dependencia asignada registrada en `assigned_to` o si el reporte se encuentra *"sin asignación a dependencia externa registrada"*, reiterando que las notificaciones por correo externo están deshabilitadas.
+  - En `AGENT_SYSTEM_PROMPT`, se añadió la Regla 6 de **Veracidad Institucional**, prohibiendo al modelo generativo atribuir revisiones o intervenciones externas a menos que estén acreditadas en la base de datos de CIVIA.
+- **Fase 2 — Seguridad y Privacidad de Telemetría Agéntica:**
+  - En `frontend/src/App.tsx`, el acordeón de *🛠️ Telemetría y Auditoría de Consulta del Asistente (Idempotencia y Límites F4)* que antes se renderizaba fuera de la sección autenticada, fue trasladado estrictamente dentro del bloque condicional `{obsData && (`.
+  - Cuando un usuario no autenticado accede a la pestaña *Administración*, la aplicación muestra un banner informativo con candado y no renderiza en el DOM ninguna traza técnica, métrica de vueltas, consumo de tokens, latencias ni volcados SQL de herramientas. Solo tras ingresar un `ADMIN_TOKEN` validado por el backend (`/api/observability/stats`), se desbloquea la telemetría.
+- **Fase 3 — Verificación Funcional en Clon Limpio Docker:**
+  - Se creó un script de verificación autónoma (`verify_clean_clone.py`) que clona el repositorio en un directorio temporal aislado (`%TEMP%\civia_clean_v1_...`), arranca los servicios en puertos desacoplados (`18000` y `15173`) con subred `10.240.x.0/24`, comprueba el healthcheck (`http://127.0.0.1:18000/health`), verifica la PWA y los 10 reportes sintéticos iniciales, crea un reporte ciudadano con fotografía binaria válida, reinicia los contenedores (`docker compose restart`), y comprueba la persistencia íntegra de los datos y de la fotografía en PostgreSQL 17 tras el reinicio.
+  - Se verificó que las respuestas del agente en el clon limpio cumplan estrictamente la veracidad institucional.
+- **Fase 4 — Actualización Integral de TODA la Documentación:**
+  - Se eliminaron todos los enlaces absolutos locales (`file:///c:/Users/...` o `file:///C:/Users/...`) en todos los archivos Markdown del repositorio (`docs/auditoria_codex.md`, `docs/decisiones.md`, `docs/guion_sustentacion.md`, `docs/remediacion_autopilot_g0_2.md`, `docs/remediacion_g2_1.md`).
+  - Se sincronizaron las menciones de modelos de IA con la configuración real (`gemini-3.8-flash`, `qwen/qwen3.8-27b`, `gemini-3.5-flash-lite`).
+  - Se incorporó la sección honesta de **Limitaciones conocidas de la versión académica** categorizada en 4 niveles (A: Implementado y verificado, B: Requisitos externos, C: No verificado en vivo, D: Fuera de alcance).
+  - Se corrigió el esquema esperado del healthcheck en `docs/guia_instalacion_otro_pc.md`.
+
+### 2. Matriz de Correspondencia de Skills Aplicadas
+| Hallazgo / Tarea | Skill Pertinente | Instrucción Concreta Aplicada | Verificación Adversarial Realizada |
+| :--- | :--- | :--- | :--- |
+| Veracidad institucional en respuestas del agente | `backend-security-coder` / `api-security` | Supresión de afirmaciones ficticias sobre supervisores externos; clarificación de estado interno en CIVIA | Test unitario `test_institutional_truth_in_agent_answers` y prueba Playwright verificaron 0 menciones de Alcaldía |
+| Telemetría técnica expuesta sin autorización | `api-security` / `react-patterns` | Encapsulamiento de acordeón de auditoría agéntica dentro del bloque `obsData` protegido por `ADMIN_TOKEN` | Playwright verificó que sin token el selector `Telemetría y Auditoría` tiene conteo 0 en el DOM |
+| Verificación en clon limpio Docker | `docker-expert` / `postgres-best-practices` | Despliegue hermético en directorio temporal con puertos 18000/15173 y verificación de persistencia tras reinicio | `verify_clean_clone.py` ejecutó ciclo completo: arranque -> seed -> reporte -> restart -> persistencia -> OK |
+| Rutas absolutas en documentación | `code-review-and-quality` | Búsqueda exhaustiva y reemplazo de enlaces `file:///C:/...` por enlaces relativos portables | `Select-String` en todo el repositorio confirmó 0 ocurrencias de `file:///` |
+| Sincronización de contratos de evaluación | `systematic-debugging` / `code-review-and-quality` | Actualización de la suite hermética de 154 a 155 pruebas tras incorporar el contrato de veracidad | Pytest en Docker reportó: 155 passed, 1 deselected, 0 failed |
+
+### 3. Resultados de Verificación
+- **Suite Hermética Backend Docker:** **155 PASSED**, 1 deselected, 0 failed (100% GREEN en 28.80s).
+- **Suite E2E UX/UI y Trazabilidad (Playwright):** **100% PASSED** (`scripts/test_citizen_ux_suite.cjs`) en Desktop (1366x768) y Móvil (390x844).
+- **Suite E2E Dual Cámara / Sintéticos:** **2/2 PASSED** (`scripts/test_e2e_final.cjs`).
+- **Frontend Build (Vite + TypeScript):** `tsc -b && vite build` completado exitosamente sin errores en 2.65s.
+- **Clon Limpio Docker:** Verificado y validado en entorno temporal aislado.
+
+---
+
 ## CIVIA 1.0 — Pulido Integral de Producto, Markdown Seguro y Experiencia Ciudadana (2026-11-06)
 
 ### 1. Hallazgos Corregidos e Implementación Técnica

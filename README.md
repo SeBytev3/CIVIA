@@ -147,13 +147,13 @@ Todas las variables se configuran en el archivo `.env` en la raíz del proyecto.
 ## Ejecución de pruebas automatizadas y suite de evaluación
 
 ### 1. Suite Hermética de Backend (`pytest`)
-Ejecuta la suite hermética de 154 pruebas automáticas (contratos de seguridad F1-F8, invariantes A-L de almacenamiento inmutable, procedencia ética de servidor, ledger de auditoría, resiliencia `429`/`503`/`TIMEOUT`/`TOTAL`, y los 4 límites del agente):
+Ejecuta la suite hermética de 155 pruebas automáticas (contratos de seguridad F1-F8, invariantes A-L de almacenamiento inmutable, procedencia ética de servidor, ledger de auditoría, resiliencia `429`/`503`/`TIMEOUT`/`TOTAL`, y los 4 límites del agente):
 
 ```powershell
 docker compose exec -T api pytest -m "not live" -v
 ```
 
-*(Resultado verificado: **154 passed, 1 deselected, 0 failed**).*
+*(Resultado verificado: **155 passed, 1 deselected, 0 failed**).*
 
 ### 2. Pruebas E2E de Interfaz de Usuario y Experiencia Ciudadana (Playwright)
 La plataforma incluye dos suites completas de pruebas de interfaz en navegador:
@@ -248,6 +248,34 @@ Invoke-RestMethod -Method Post -Uri "http://localhost:8000/api/admin/fault-injec
 - [`docs/guion_sustentacion.md`](docs/guion_sustentacion.md): Guion de sustentación en vivo (demo + preguntas).
 - [`docs/estado.md`](docs/estado.md): Registro de avance y pruebas por fase.
 - [`docs/entrega_final.md`](docs/entrega_final.md): Informe oficial de entrega académica final.
+
+---
+
+---
+
+## Limitaciones conocidas de la versión académica
+
+Para garantizar transparencia y rigor técnico ante la evaluación docente, las capacidades de CIVIA se declaran bajo la siguiente clasificación objetiva:
+
+### A. Implementado y verificado (100% Funcional y Demostrable)
+- **Flujo vertical ciudadano completo:** Captura interactiva mediante cámara web emulada o física (`getUserMedia`), subida de archivos locales de imagen (`JPEG`, `PNG`, `WEBP` <= 5 MB), validación de dimensiones mínimas y máximas (`32x32` a `8192x8192`) con Pillow y descarte riguroso de metadatos EXIF / GPS privados antes de almacenar.
+- **Georreferenciación y delimitación municipal:** Selección sobre mapa interactivo Leaflet y geolocalización restringida a las 22 comunas y corregimientos de Santiago de Cali y Valle del Cauca.
+- **Persistencia transaccional:** Motor PostgreSQL 17 con esquema relacional normalizado (`reports`, `report_events`, `pending_approvals`, `ai_traces`, `admin_notifications`, `admin_internal_notes`), transacciones atómicas y migraciones idempotentes automáticas.
+- **Catálogo sintético ético:** 10 reportes sintéticos de prueba con evidencias fotorrealistas de alta resolución (`CIV-2026-DEMO0001` a `CIV-2026-DEMO0010`), almacenamiento Content-Addressed (`synthetic_{code}_{sha[:16]}.jpg`), procedencia ética forzada en servidor (`is_synthetic = true`) y renderizado en `objectFit: contain`.
+- **Trazabilidad y seguimiento ciudadano:** Línea de tiempo cronológica accesible (`report_events`) con hitos de radicación, diagnóstico y actuaciones operativas.
+- **Bandeja de notificaciones internas:** Registro automático de alertas en `admin_notifications` cuando ingresa un nuevo reporte ciudadano para conocimiento de operadores, sin requerir servicios de correo externos.
+- **Agente genuino con 4 límites efectivos:** Consultas mediante herramientas tipadas con SQL directo parametrizado (`consultar_reportes`, `obtener_reporte`, `clasificar_evidencia`, `proponer_actualizacion_critica`) acotadas por máximo de iteraciones (5), presupuesto de tokens (6000), timeout por herramienta (8s) y aprobación humana obligatoria (`pending_approvals`).
+- **Seguridad y privacidad integral:** Respuestas ciudadanas renderizadas con `SafeMarkdown` (sin telemetría interna, vueltas ni tokens). Sección de telemetría y auditoría agéntica protegida estrictamente bajo autenticación con `ADMIN_TOKEN` seguro generado por CSPRNG.
+
+### B. Implementado con requisitos externos
+- **Inferencia multimodal y agéntica en vivo:** Conexión con Google AI Studio (`Gemini 3.8 Flash` y `Gemini 3.5 Flash Lite`) y Groq Cloud (`Qwen 3.8 27B`). Requiere configurar claves válidas (`GOOGLE_API_KEY_PRIMARY`, `GOOGLE_API_KEY_SECONDARY`, `GROQ_API_KEY`) en el archivo `.env`.
+
+### C. Implementado no verificado en vivo
+- **Transcripción de notas de voz:** Soporte backend para carga de audio opcional (`MP3`, `WAV`, `OGG` <= 5 MB, <= 60s) con validación binaria de cabeceras. La transcripción con Whisper está implementada en código, pero se omite en la demostración en vivo obligatoria para garantizar determinismo y tiempos de respuesta ágiles.
+
+### D. Fuera del alcance académico / No implementado
+- **Integraciones satelitales / Sensores de radiación:** CIVIA no dispone de conexión con satélites en tiempo real (NDVI) ni sensores de radiación. Ante cualquier consulta sobre Comuna 99 o datos satelitales, el agente declara honestamente la ausencia de evidencia registrada en la base de datos de CIVIA.
+- **Envío de correos a dependencias de la Alcaldía de Cali:** CIVIA no envía notificaciones automáticas por correo electrónico a entidades externas ni cuenta con confirmación automática de recepción por autoridades públicas. Esta limitación se informa explícitamente en la interfaz ciudadana; todas las actuaciones se canalizan internamente mediante la bandeja administrativa y la línea de tiempo del radicado.
 
 ---
 

@@ -2292,100 +2292,105 @@ export function App() {
               </button>
             </div>
 
-            {/* AUDITORÍA TÉCNICA DEL ASISTENTE CIUDADANO (IDEMPOTENCIA Y LÍMITES F4) */}
-            {(() => {
-              const effectiveOpId = agentResponse?.operation_id || activeAttempt?.operationId;
-              const effectiveOpToken = agentResponse?.query_token || activeAttempt?.operationToken;
-              const effectiveOpStatus = agentResponse?.operation_status || activeAttempt?.operationStatus;
-
-              if (!agentResponse && !effectiveOpId) return null;
-
-              return (
-                <details className="civia-demo-details" style={{ marginBottom: '1.25rem', background: '#f8fafc', padding: '0.85rem 1rem' }}>
-                  <summary style={{ fontWeight: 700, color: 'var(--civia-teal-dark)' }}>
-                    🛠️ Telemetría y Auditoría de Consulta del Asistente (Idempotencia y Límites F4)
-                  </summary>
-                  <div style={{ marginTop: '0.75rem' }}>
-                    <div className="civia-badge-row" style={{ marginBottom: '0.65rem' }}>
-                      {agentResponse && (
-                        <>
-                          <span className="civia-badge status">
-                            Vueltas: {agentResponse.iterations_used} / {agentResponse.max_iterations}
-                          </span>
-                          <span className="civia-badge status">
-                            Tokens: {agentResponse.total_tokens_used} / {agentResponse.max_tokens_budget}
-                          </span>
-                          <span className="civia-badge status">Latencia: {agentResponse.latency_ms} ms</span>
-                          {agentResponse.guardrail_triggered && (
-                            <span className="civia-badge synthetic">
-                              Límite activado: {agentResponse.guardrail_triggered}
-                            </span>
-                          )}
-                        </>
-                      )}
-                      {effectiveOpId && (
-                        <span className="civia-badge status">
-                          ID Operación: <code>{effectiveOpId}</code>
-                          {effectiveOpStatus && ` (${effectiveOpStatus})`}
-                        </span>
-                      )}
-                    </div>
-
-                    {effectiveOpId && (
-                      <div style={{ marginBottom: '0.75rem' }}>
-                        <button
-                          type="button"
-                          className="civia-btn secondary sm"
-                          disabled={checkingOperation}
-                          onClick={() => handleCheckOperationStatus(effectiveOpId, effectiveOpToken ?? undefined)}
-                        >
-                          {checkingOperation ? 'Consultando...' : 'Verificar estado definitivo de operación'}
-                        </button>
-                        {operationStatus && (
-                          <div style={{ marginTop: '0.5rem', padding: '0.6rem', background: '#ffffff', borderRadius: '6px', fontSize: '0.82rem', border: '1px solid #dce4e2' }}>
-                            <div><strong>Estado persistido:</strong> {operationStatus.status}</div>
-                            {operationStatus.target_id && <div><strong>Reporte objetivo:</strong> {operationStatus.target_id}</div>}
-                            {operationStatus.operation_type && <div><strong>Tipo de operación:</strong> {operationStatus.operation_type}</div>}
-                            {operationStatus.result_payload && (
-                              <pre style={{ margin: '0.4rem 0 0', padding: '0.4rem', background: '#f5f5f5', borderRadius: '4px', maxHeight: '120px', overflow: 'auto' }}>
-                                {JSON.stringify(operationStatus.result_payload, null, 2)}
-                              </pre>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    {agentResponse?.tools_invoked && agentResponse.tools_invoked.length > 0 && (
-                      <div>
-                        <strong style={{ fontSize: '0.84rem' }}>
-                          Herramientas tipadas invocadas ({agentResponse.tools_invoked.length}):
-                        </strong>
-                        {agentResponse.tools_invoked.map((t, idx) => (
-                          <pre
-                            key={`${t.tool}-${idx}`}
-                            style={{
-                              background: '#14242b',
-                              color: '#e2f1ef',
-                              padding: '0.65rem',
-                              borderRadius: '8px',
-                              fontSize: '0.78rem',
-                              overflowX: 'auto',
-                              marginTop: '0.4rem',
-                            }}
-                          >
-                            {`Herramienta: ${t.tool}(${JSON.stringify(t.args)})\nResultado SQL: ${JSON.stringify(t.result, null, 2)}`}
-                          </pre>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                </details>
-              );
-            })()}
+            {!obsData && (
+              <div style={{ padding: '1rem', background: '#f8fafc', borderRadius: '8px', border: '1px solid var(--civia-border)', color: 'var(--civia-muted)', fontSize: '0.9rem' }}>
+                🔒 Ingrese su clave de acceso de administrador para desbloquear la telemetría agéntica, la bandeja de notificaciones internas, la aprobación de escrituras críticas y las métricas de observabilidad.
+              </div>
+            )}
 
             {obsData && (
               <>
+                {/* AUDITORÍA TÉCNICA DEL ASISTENTE CIUDADANO (IDEMPOTENCIA Y LÍMITES F4 - PROTEGIDA CON ADMIN_TOKEN) */}
+                {(() => {
+                  const effectiveOpId = agentResponse?.operation_id || activeAttempt?.operationId;
+                  const effectiveOpToken = agentResponse?.query_token || activeAttempt?.operationToken;
+                  const effectiveOpStatus = agentResponse?.operation_status || activeAttempt?.operationStatus;
+
+                  if (!agentResponse && !effectiveOpId) return null;
+
+                  return (
+                    <details className="civia-demo-details" style={{ marginBottom: '1.25rem', background: '#f8fafc', padding: '0.85rem 1rem' }}>
+                      <summary style={{ fontWeight: 700, color: 'var(--civia-teal-dark)' }}>
+                        🛠️ Telemetría y Auditoría de Consulta del Asistente (Idempotencia y Límites F4)
+                      </summary>
+                      <div style={{ marginTop: '0.75rem' }}>
+                        <div className="civia-badge-row" style={{ marginBottom: '0.65rem' }}>
+                          {agentResponse && (
+                            <>
+                              <span className="civia-badge status">
+                                Vueltas: {agentResponse.iterations_used} / {agentResponse.max_iterations}
+                              </span>
+                              <span className="civia-badge status">
+                                Tokens: {agentResponse.total_tokens_used} / {agentResponse.max_tokens_budget}
+                              </span>
+                              <span className="civia-badge status">Latencia: {agentResponse.latency_ms} ms</span>
+                              {agentResponse.guardrail_triggered && (
+                                <span className="civia-badge synthetic">
+                                  Límite activado: {agentResponse.guardrail_triggered}
+                                </span>
+                              )}
+                            </>
+                          )}
+                          {effectiveOpId && (
+                            <span className="civia-badge status">
+                              ID Operación: <code>{effectiveOpId}</code>
+                              {effectiveOpStatus && ` (${effectiveOpStatus})`}
+                            </span>
+                          )}
+                        </div>
+
+                        {effectiveOpId && (
+                          <div style={{ marginBottom: '0.75rem' }}>
+                            <button
+                              type="button"
+                              className="civia-btn secondary sm"
+                              disabled={checkingOperation}
+                              onClick={() => handleCheckOperationStatus(effectiveOpId, effectiveOpToken ?? undefined)}
+                            >
+                              {checkingOperation ? 'Consultando...' : 'Verificar estado definitivo de operación'}
+                            </button>
+                            {operationStatus && (
+                              <div style={{ marginTop: '0.5rem', padding: '0.6rem', background: '#ffffff', borderRadius: '6px', fontSize: '0.82rem', border: '1px solid #dce4e2' }}>
+                                <div><strong>Estado persistido:</strong> {operationStatus.status}</div>
+                                {operationStatus.target_id && <div><strong>Reporte objetivo:</strong> {operationStatus.target_id}</div>}
+                                {operationStatus.operation_type && <div><strong>Tipo de operación:</strong> {operationStatus.operation_type}</div>}
+                                {operationStatus.result_payload && (
+                                  <pre style={{ margin: '0.4rem 0 0', padding: '0.4rem', background: '#f5f5f5', borderRadius: '4px', maxHeight: '120px', overflow: 'auto' }}>
+                                    {JSON.stringify(operationStatus.result_payload, null, 2)}
+                                  </pre>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
+                        {agentResponse?.tools_invoked && agentResponse.tools_invoked.length > 0 && (
+                          <div>
+                            <strong style={{ fontSize: '0.84rem' }}>
+                              Herramientas tipadas invocadas ({agentResponse.tools_invoked.length}):
+                            </strong>
+                            {agentResponse.tools_invoked.map((t, idx) => (
+                              <pre
+                                key={`${t.tool}-${idx}`}
+                                style={{
+                                  background: '#14242b',
+                                  color: '#e2f1ef',
+                                  padding: '0.65rem',
+                                  borderRadius: '8px',
+                                  fontSize: '0.78rem',
+                                  overflowX: 'auto',
+                                  marginTop: '0.4rem',
+                                }}
+                              >
+                                {`Herramienta: ${t.tool}(${JSON.stringify(t.args)})\nResultado SQL: ${JSON.stringify(t.result, null, 2)}`}
+                              </pre>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </details>
+                  );
+                })()}
                 {/* BANDEJA DE REPORTES RECIBIDOS (NOTIFICACIONES INTERNAS) */}
                 <div style={{ background: '#f5f9f8', padding: '1.1rem', borderRadius: '10px', border: '1px solid var(--civia-border)', marginBottom: '1.25rem' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.65rem', marginBottom: '0.75rem' }}>

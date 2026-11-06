@@ -344,6 +344,14 @@ async function launchBrowser() {
       await navAdminBtn.click();
       await page.waitForTimeout(300);
 
+      // Verificar protección estricta de telemetría sin autenticación (Fase 2)
+      const unauthTelemetry = page.locator('summary:has-text("Telemetría y Auditoría")');
+      const unauthTelemetryCount = await unauthTelemetry.count();
+      if (unauthTelemetryCount > 0) {
+        throw new Error('Fallo de seguridad: Telemetría técnica expuesta sin haber suministrado ADMIN_TOKEN.');
+      }
+      console.log('✓ Protección de privacidad confirmada: Sin ADMIN_TOKEN no se renderiza telemetría agéntica.');
+
       const tokenInput = page.locator('input#admin-token-input');
       await tokenInput.fill(adminToken);
       const refreshAdminBtn = page.locator('button:has-text("Refrescar Observabilidad")');
@@ -422,6 +430,25 @@ async function launchBrowser() {
     }
     console.log('✓ Confirmado: Vista ciudadana del asistente 100% libre de vueltas, tokens, latencia e ID de operación.');
 
+    // 1.11.5 Verificación de Veracidad Institucional en Respuestas (Fase 1)
+    console.log('\n--- Verificación de Veracidad Institucional en Respuestas ---');
+    const agentInputTruth = page.locator('input[aria-label="Consulta para el agente de CIVIA"]');
+    await agentInputTruth.fill('¿Qué significa que mi reporte figure como pendiente de revisión?');
+    const submitTruthBtn = page.locator('button[type="submit"]:has-text("Preguntar al Asistente")');
+    await submitTruthBtn.click();
+    await page.waitForTimeout(1000);
+    const truthMarkdown = page.locator('.civia-agent-response-card .safe-markdown-root');
+    await truthMarkdown.waitFor({ state: 'visible', timeout: 35000 });
+    const truthText = await truthMarkdown.innerText();
+    console.log(`✓ Respuesta de veracidad capturada: "${truthText.substring(0, 80)}..."`);
+    if (truthText.includes('supervisores de la Alcaldía') || truthText.includes('Alcaldía de Cali están validando')) {
+      throw new Error(`Fallo de veracidad institucional: Afirmación no verificada encontrada en respuesta: ${truthText}`);
+    }
+    if (!truthText.includes('pendiente de revisión interna') && !truthText.includes('CIVIA')) {
+      throw new Error(`La respuesta institucional no menciona el estado interno de CIVIA: ${truthText}`);
+    }
+    console.log('✓ Veracidad institucional confirmada: Cero atribuciones ficticias a supervisores de la Alcaldía.');
+
     // 1.12 Verificación de Notificación Humana para Solicitudes Críticas
     console.log('\n--- Verificación de Notificación Amigable de Aprobación Humana ---');
     const agentInputEl = page.locator('input[aria-label="Consulta para el agente de CIVIA"]');
