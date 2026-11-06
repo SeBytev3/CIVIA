@@ -17,7 +17,13 @@ from app.db import run_migrations
 from app.main import app
 from app.observability import sanitize_secret_text
 from app.security import rate_limiter
-from app.seed import generate_synthetic_evidence_png, seed_synthetic_reports
+from app.seed import seed_synthetic_reports, DEMO_ASSETS_DIR
+
+def _get_test_image_bytes() -> bytes:
+    sample_file = DEMO_ASSETS_DIR / "civ-2026-demo0001.jpg"
+    if sample_file.exists():
+        return sample_file.read_bytes()
+    return b"\xff\xd8\xff\xe0" + b"\x00" * 2048
 from tests.conftest import cleanup_tracked_test_records
 
 client = TestClient(app)
@@ -152,7 +158,7 @@ def test_vertical_flow_create_analyze_confirm_and_query():
     Flujo vertical completo:
     Crear reporte -> guardar evidencia -> analizar con IA -> validar respuesta -> confirmar clasificación -> consultar estado.
     """
-    img_bytes = generate_synthetic_evidence_png("HUECO", "TEST-FLOW-01")
+    img_bytes = _get_test_image_bytes()
     resp = client.post(
         "/api/reports",
         data={
@@ -215,7 +221,7 @@ def test_router_resilience_and_fallback_across_providers(fault_mode: str):
     )
     assert r_fault.status_code == 200
 
-    img_bytes = generate_synthetic_evidence_png("QUEMA", f"FAULT-{fault_mode}")
+    img_bytes = _get_test_image_bytes()
     resp = client.post(
         "/api/reports",
         data={
@@ -250,7 +256,7 @@ def test_total_provider_outage_graceful_degradation():
         json={"mode": "TOTAL", "reset_circuits": True},
     )
 
-    img_bytes = generate_synthetic_evidence_png("BASURAS", "TOTAL-OUTAGE")
+    img_bytes = _get_test_image_bytes()
     resp = client.post(
         "/api/reports",
         data={
@@ -347,7 +353,7 @@ def test_four_agent_guardrails_enforced(monkeypatch):
 
     # Guardrail 4: Aprobación humana obligatoria para escritura crítica (la IA NO modifica reports directamente)
     # Usamos un reporte propio desechable creado en esta prueba para jamás tocar CIV-2026-DEMO0001
-    img_bytes = generate_synthetic_evidence_png("HUECO", "GUARDRAIL-4")
+    img_bytes = _get_test_image_bytes()
     r_disp = client.post(
         "/api/reports",
         data={

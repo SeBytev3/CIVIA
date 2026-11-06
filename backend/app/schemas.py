@@ -207,3 +207,4 @@ class ReportManagementUpdateRequest(BaseModel):
     assigned_to: str | None = Field(default=None, max_length=120)
     admin_review_status: Literal["PENDING_REVIEW", "IN_REVIEW", "REVIEWED"] | None = None
     public_note: str | None = Field(default=None, max_length=500)
+    internal_note: str | None = Field(default=None, max_length=1000)

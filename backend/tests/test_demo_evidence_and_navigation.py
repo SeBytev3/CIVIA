@@ -147,7 +147,7 @@ def test_update_synthetic_catalog_photos_idempotent_and_safe():
                     photo_width = 240,
                     photo_height = 160,
                     photo_sha256 = '0000000000000000000000000000000000000000000000000000000000000000'
-                WHERE is_synthetic = TRUE;
+                WHERE is_synthetic = TRUE AND tracking_code LIKE 'CIV-2026-DEMO%';
                 """
             )
             conn.commit()
@@ -160,7 +160,7 @@ def test_update_synthetic_catalog_photos_idempotent_and_safe():
     # 4. Verificar que los reportes demo se actualizaron
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT photo_mime, photo_width, photo_height FROM reports WHERE is_synthetic = TRUE;")
+            cur.execute("SELECT photo_mime, photo_width, photo_height FROM reports WHERE is_synthetic = TRUE AND tracking_code LIKE 'CIV-2026-DEMO%';")
             for r in cur.fetchall():
                 assert r["photo_mime"] == "image/jpeg"
                 assert r["photo_width"] == 1200
@@ -503,15 +503,11 @@ def test_adversarial_case_k_missing_catalog_asset_safe_fallback():
     """
     Caso K: Ausencia de archivos de catálogo en disco.
     Verifica que si un código de reporte no tiene activo .jpg en DEMO_ASSETS_DIR,
-    get_synthetic_evidence_bytes() devuelva un fallback válido en memoria sin abortar el servidor.
+    get_synthetic_evidence_bytes() genere un error controlado (FileNotFoundError)
+    y no intente fabricar o dibujar una imagen sintética en memoria.
     """
-    data, filename, mime, width, height = get_synthetic_evidence_bytes("CIV-2026-DEMO9999", "OTRO")
-    assert mime == "image/png"
-    assert len(data) > 1000
-    assert width == 1024
-    assert height == 768
-    im = Image.open(io.BytesIO(data))
-    assert im.format == "PNG"
+    with pytest.raises(FileNotFoundError):
+        get_synthetic_evidence_bytes("CIV-2026-DEMO9999", "OTRO")
 
 
 def test_adversarial_case_l_citizen_reports_untouched():

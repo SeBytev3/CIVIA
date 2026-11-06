@@ -47,7 +47,7 @@ from app.db import (
     run_migrations,
 )
 from app.observability import estimate_cost_usd
-from app.seed import generate_synthetic_evidence_png, seed_synthetic_reports
+from app.seed import DEMO_ASSETS_DIR, seed_synthetic_reports
 
 EVAL_DIR = Path(__file__).resolve().parent
 RESULTS_DIR = EVAL_DIR / "resultados"
@@ -439,13 +439,17 @@ def run_evaluation(mode: str = "all", pause_sec: float = 2.5) -> dict[str, Any]:
             else:
                 set_runtime_fault_override("NONE")
 
-            img_bytes = generate_synthetic_evidence_png(q["expected_category"], f"EVAL-{qid}")
+            cat_lower = q["expected_category"].lower()
+            asset_file = DEMO_ASSETS_DIR / f"sample_{cat_lower}.jpg"
+            if not asset_file.exists():
+                asset_file = DEMO_ASSETS_DIR / "civ-2026-demo0001.jpg"
+            img_bytes = asset_file.read_bytes()
             contract, meta = classify_evidence_with_router(
                 description=q["input"],
                 latitude=q["latitude"],
                 longitude=q["longitude"],
                 image_bytes=img_bytes,
-                image_mime="image/png",
+                image_mime="image/jpeg",
             )
             dt_ms = int((time.perf_counter() - t0) * 1000)
             set_runtime_fault_override("NONE")

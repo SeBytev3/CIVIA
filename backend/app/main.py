@@ -863,6 +863,7 @@ def admin_update_report_management(
         assigned_to=payload.assigned_to,
         admin_review_status=payload.admin_review_status,
         public_note=payload.public_note,
+        internal_note=payload.internal_note,
     )
     if not updated:
         raise CitizenValidationError(

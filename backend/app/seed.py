@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from PIL import Image, ImageDraw
+from PIL import Image
 
 from app.config import settings
 from app.db import assert_disposable_test_db, get_conn
@@ -44,37 +44,8 @@ def get_synthetic_evidence_bytes(code: str, kind: str) -> tuple[bytes, str, str,
         filename = f"synthetic_{code_lower}_{sha_prefix}.jpg"
         return data, filename, "image/jpeg", 1200, 896
 
-    # Fallback seguro en memoria si no estuviera el archivo en disco
-    fallback_data = generate_synthetic_evidence_png(kind, code, 1024, 768)
-    sha_fallback = hashlib.sha256(fallback_data).hexdigest()[:16]
-    return fallback_data, f"synthetic_{code_lower}_{sha_fallback}.png", "image/png", 1024, 768
-
-
-def generate_synthetic_evidence_png(kind: str, code: str, width: int = 1024, height: int = 768) -> bytes:
-    """
-    Genera una tarjeta limpia y neutral con identificación ética de prueba (sin dibujos geométricos tipo Paint).
-    Utilizada exclusivamente como salvaguarda en memoria si un activo empaquetado no estuviera disponible.
-    """
-    kind_u = kind.upper()
-    img = Image.new("RGB", (width, height), color=(15, 23, 42))
-    draw = ImageDraw.Draw(img)
-
-    draw.rectangle([16, 16, width - 16, height - 16], outline=(51, 65, 85), width=2)
-    draw.rectangle([16, 16, width - 16, 96], fill=(30, 41, 59))
-    draw.text((40, 42), "CIVIA — SISTEMA DE REPORTES CIUDADANOS (CALI)", fill=(248, 250, 252))
-
-    draw.text((40, 220), "MUESTRA DE EVALUACIÓN ACADÉMICA", fill=(148, 163, 184))
-    draw.text((40, 280), f"CATEGORÍA: {kind_u}", fill=(56, 189, 248))
-    draw.text((40, 340), f"RADICADO: {code}", fill=(248, 250, 252))
-    draw.text((40, 420), "Fotografía sintética de catálogo ético para demostración técnica.", fill=(148, 163, 184))
-    draw.text((40, 460), "Sin datos privados ni capturas ciudadanas reales.", fill=(100, 116, 139))
-
-    draw.rectangle([16, height - 80, width - 16, height - 16], fill=(30, 41, 59))
-    draw.text((40, height - 56), "SIMULACIÓN ÉTICA · PROCEDENCIA CERTIFICADA POR SERVIDOR", fill=(226, 232, 240))
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
+    logger.error("Activo de catálogo sintético no encontrado en disco: %s para radicado %s", asset_file, code)
+    raise FileNotFoundError(f"Activo de catálogo requerido no encontrado: {asset_file}")
 
 
 SYNTHETIC_REPORTS: list[dict[str, Any]] = [

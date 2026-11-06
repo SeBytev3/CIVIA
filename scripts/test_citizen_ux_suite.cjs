@@ -3,14 +3,16 @@
  * 
  * Verifica exhaustivamente:
  * 1. Estilos y contrastes de botones (especialmente hover en .civia-btn.secondary).
- * 2. Lenguaje empático ciudadano (sin jerga técnica en el proceso de guardado).
+ * 2. Lenguaje empático ciudadano (sin jerga técnica en mensajes ni pantallas públicas).
  * 3. Flujo vertical post-envío: scroll accesible, foco al resultado, radicado grande, botón copiar radicado.
  * 4. Aviso obligatorio sobre correo electrónico a entidades externas no habilitado.
  * 5. Trazabilidad ciudadana con línea de tiempo cronológica de eventos (report_events).
- * 6. Input de radicado inicialmente vacío y modo demo opcional en acordeón colapsable.
- * 7. Cierre limpio de detalles (botón "Cerrar detalle" restaura foco).
- * 8. Bandeja de notificaciones internas en el panel administrativo.
- * 9. Portabilidad y accesibilidad tanto en Desktop (1366x768) como en Mobile (390x844).
+ * 6. Cierre real de tarjeta de detalle tanto desde Mapa como desde Seguimiento.
+ * 7. Historial de cambios administrativos (STATUS_UPDATED, asignación de dependencia y notas públicas).
+ * 8. Confidencialidad administrativa: las notas internas NUNCA se exponen al ciudadano.
+ * 9. Eliminación de generadores alternativos tipo Paint en frontend y backend.
+ * 10. Bandeja de notificaciones internas en el panel administrativo.
+ * 11. Portabilidad y accesibilidad tanto en Desktop (1366x768) como en Mobile (390x844).
  */
 
 const path = require('path');
@@ -65,15 +67,27 @@ async function launchBrowser() {
 
 (async () => {
   console.log('========================================================================');
-  console.log(' CIVIA - Verificación E2E de Refinamiento UX/UI y Trazabilidad');
+  console.log(' CIVIA - Verificación E2E de Refinamiento UX/UI y Trazabilidad (Hotfix)');
   console.log('========================================================================\n');
+
+  // Verificación estática 0: Comprobar que los generadores Paint fueron eliminados definitivamente
+  console.log('--- VERIFICACIÓN 0: Ausencia definitiva de generadores Paint ---');
+  const appTsx = fs.readFileSync(path.join(__dirname, '..', 'frontend', 'src', 'App.tsx'), 'utf-8');
+  if (appTsx.includes('createCanvasDemoPhoto')) {
+    throw new Error('Fallo: createCanvasDemoPhoto todavía existe en frontend/src/App.tsx');
+  }
+  const seedPy = fs.readFileSync(path.join(__dirname, '..', 'backend', 'app', 'seed.py'), 'utf-8');
+  if (seedPy.includes('generate_synthetic_evidence_png') || seedPy.includes('ImageDraw')) {
+    throw new Error('Fallo: generate_synthetic_evidence_png o ImageDraw todavía existen en backend/app/seed.py');
+  }
+  console.log('✓ Confirmado: Ni frontend ni backend contienen generadores de canvas o tarjetas dibujadas.');
 
   const adminToken = getAdminToken();
   const browser = await launchBrowser();
 
   try {
     // TEST 1: DESKTOP (1366 x 768)
-    console.log('--- TEST 1: Experiencia Ciudadana en Desktop (1366 x 768) ---');
+    console.log('\n--- TEST 1: Experiencia Ciudadana en Desktop (1366 x 768) ---');
     const contextDesktop = await browser.newContext({
       viewport: { width: 1366, height: 768 },
       permissions: ['camera', 'microphone', 'clipboard-read', 'clipboard-write'],
@@ -103,8 +117,6 @@ async function launchBrowser() {
     console.log(`✓ Botón secundario normal: bg=${btnStyleNormal.bg}, color=${btnStyleNormal.color}`);
     console.log(`✓ Botón secundario hover:  bg=${btnStyleHover.bg}, color=${btnStyleHover.color}`);
 
-    // Comprobar que en hover el fondo no sea negro/oscuro (RGB R<20, G<40, B<40) mientras el texto es oscuro
-    // En nuestro CSS nuevo: bg hover es #d6e8e5 (rgb(214, 232, 229))
     if (btnStyleHover.bg.includes('11, 60, 73') || btnStyleHover.bg.includes('5, 29, 35')) {
       throw new Error(`Fallo de contraste: el botón secundario en hover se oscureció incorrectamente (${btnStyleHover.bg}).`);
     }
@@ -123,7 +135,7 @@ async function launchBrowser() {
     }
     console.log('✓ Input de seguimiento inicia vacío con placeholder informativo.');
 
-    // Verificar que los ejemplos de prueba están en un acordeón discreto
+    // Verificar acordeón de pruebas
     const demoAccordion = page.locator('details.civia-demo-details');
     await demoAccordion.waitFor({ state: 'attached' });
     const isAccordionOpen = await demoAccordion.evaluate((el) => el.open);
@@ -182,12 +194,10 @@ async function launchBrowser() {
     const noticeCard = page.locator('.civia-notice-card').first();
     await noticeCard.waitFor({ state: 'visible' });
     const noticeContent = await noticeCard.innerText();
-    console.log('✓ Contenido del aviso sobre entidades externas comprobado:');
+    console.log('✓ Contenido del aviso sobre entidades externas comprobado.');
     if (!noticeContent.includes('no está habilitado') || !noticeContent.includes('permanecerá guardado')) {
       throw new Error('El aviso de correo a entidades externas no contiene el texto obligatorio.');
     }
-    console.log('  → "Por ahora, el envío de notificaciones por correo electrónico a las entidades responsables no está habilitado."');
-    console.log('  → "Tu reporte permanecerá guardado en la plataforma para su consulta y gestión."');
 
     // 1.6 Verificar que el formulario se limpió al volver a la pestaña de reporte
     await page.locator('button.civia-nav-btn:has-text("+ Nuevo Reporte")').click();
@@ -198,34 +208,137 @@ async function launchBrowser() {
     }
     console.log('✓ Formulario limpiado automáticamente tras el éxito de guardado.');
 
-    // Regresar a la pestaña de seguimiento para continuar validando la trazabilidad
+    // 1.7 Probar cierre real de detalle desde pestaña Seguimiento
+    console.log('\n--- Verificación de Cierre de Detalle en Seguimiento ---');
     await page.locator('button.civia-nav-btn:has-text("Seguimiento Radicado")').click();
     await page.waitForTimeout(300);
 
-    // 1.7 Verificar que estamos en la pestaña de seguimiento y que se cargó la línea de tiempo
-    const eventsTimeline = page.locator('.civia-events-timeline').first();
-    await eventsTimeline.waitFor({ state: 'visible' });
-    const timelineText = await eventsTimeline.innerText();
-    console.log('✓ Línea de tiempo de eventos ciudadana visible:');
-    console.log(`  ${timelineText.replace(/\n+/g, ' · ')}`);
-    if (!timelineText.includes('Reporte recibido y registrado')) {
-      throw new Error('La línea de tiempo no contiene el evento de registro inicial.');
-    }
+    // Consultar el radicado
+    await trackingInput.fill(radicadoCode);
+    await page.locator('button[type="submit"]:has-text("Consultar Radicado")').click();
+    await page.waitForTimeout(600);
 
-    // 1.8 Verificar botón "Cerrar detalle"
-    const closeDetailBtn = page.locator('button:has-text("Cerrar detalle")');
-    await closeDetailBtn.click();
+    // Confirmar presencia del panel de inspección
+    const closeBtnTracking = page.locator('button:has-text("✕ Cerrar detalle")');
+    await closeBtnTracking.waitFor({ state: 'visible' });
+    const trackingBadge = page.locator(`.civia-badge.status:has-text("${radicadoCode}")`);
+    await trackingBadge.waitFor({ state: 'visible' });
+    console.log(`✓ Panel de detalle visible para ${radicadoCode}.`);
+
+    // Hacer clic en "✕ Cerrar detalle"
+    await closeBtnTracking.click();
     await page.waitForTimeout(400);
 
-    // Verificar que la tarjeta de detalle desapareció
-    const detailCount = await page.locator('.civia-panel:has-text("Línea de Tiempo y Trazabilidad")').count();
-    if (detailCount !== 0) {
-      throw new Error('El botón "Cerrar detalle" no ocultó la tarjeta.');
+    // VERIFICACIÓN ADVERSARIAL OBLIGATORIA: El botón y el panel deben desaparecer REALMENTE del DOM
+    const closeBtnCountAfter = await page.locator('button:has-text("✕ Cerrar detalle")').count();
+    const radicadoBadgeCountAfter = await page.locator(`.civia-badge.status:has-text("${radicadoCode}")`).count();
+    console.log(`✓ Conteo de botón "Cerrar detalle" tras cierre: ${closeBtnCountAfter}`);
+    console.log(`✓ Conteo de badge ${radicadoCode} tras cierre: ${radicadoBadgeCountAfter}`);
+    if (closeBtnCountAfter !== 0 || radicadoBadgeCountAfter !== 0) {
+      throw new Error(`Fallo: "Cerrar detalle" en Seguimiento no ocultó el panel (closeBtnCount=${closeBtnCountAfter}, badgeCount=${radicadoBadgeCountAfter}).`);
     }
-    console.log('✓ Botón "Cerrar detalle" oculta la tarjeta correctamente.');
+    console.log('✓ Cierre de detalle en Seguimiento verificado: panel, fotografía e historial ocultos al 100%.');
 
-    // 1.9 Verificar panel de administración y notificaciones
+    // 1.8 Probar cierre real de detalle desde pestaña Mapa (Explorar)
+    console.log('\n--- Verificación de Cierre de Detalle en Mapa (Explorar) ---');
+    await page.locator('button.civia-nav-btn:has-text("Mapa y Reportes")').click();
+    await page.waitForTimeout(400);
+
+    const detailBtn = page.locator('.civia-report-card button:has-text("Ver detalle")').first();
+    await detailBtn.waitFor({ state: 'visible' });
+    await detailBtn.click();
+    await page.waitForTimeout(400);
+
+    const closeBtnMap = page.locator('button:has-text("✕ Cerrar detalle")');
+    await closeBtnMap.waitFor({ state: 'visible' });
+    console.log('✓ Panel de detalle abierto desde la lista del mapa.');
+
+    await closeBtnMap.click();
+    await page.waitForTimeout(400);
+
+    const mapCloseBtnCountAfter = await page.locator('button:has-text("✕ Cerrar detalle")').count();
+    if (mapCloseBtnCountAfter !== 0) {
+      throw new Error(`Fallo: "Cerrar detalle" en Mapa no ocultó el panel (count=${mapCloseBtnCountAfter}).`);
+    }
+    console.log('✓ Cierre de detalle en Mapa verificado: panel ocultado correctamente.');
+
+    // 1.9 Verificación de Cambios Administrativos, Trazabilidad y Confidencialidad
     if (adminToken) {
+      console.log('\n--- Verificación de Historial Administrativo y Confidencialidad ---');
+      const apiBase = 'http://localhost:8000';
+
+      // Obtener el reporte por código
+      const repResp = await fetch(`${apiBase}/api/reports/by-code/${radicadoCode}`);
+      if (!repResp.ok) throw new Error(`No se pudo obtener el reporte ${radicadoCode}`);
+      const repData = await repResp.json();
+      const reportId = repData.id;
+
+      // 1.9.1 Actualizar estado a IN_REVIEW con nota
+      const statusRes = await fetch(`${apiBase}/api/reports/${reportId}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
+        body: JSON.stringify({ status: 'IN_REVIEW', human_approved: true, note: 'Inspección técnica programada' }),
+      });
+      if (!statusRes.ok) throw new Error(`Fallo al actualizar status administrativo: ${statusRes.status}`);
+
+      // 1.9.2 Actualizar gestión: asignar dependencia, nota pública y nota interna privada
+      const secretInternalNote = 'NOTA_CONFIDENCIAL_POLICIAL_INTERNA_987654';
+      const publicNote = 'Cuadrilla de bacheo asignada para intervención prioritaria.';
+      const deptName = 'Secretaría de Infraestructura de Cali';
+
+      const mgmtRes = await fetch(`${apiBase}/api/admin/reports/${reportId}/management`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Token': adminToken },
+        body: JSON.stringify({
+          assigned_to: deptName,
+          public_note: publicNote,
+          internal_note: secretInternalNote,
+        }),
+      });
+      if (!mgmtRes.ok) throw new Error(`Fallo al actualizar gestión administrativa: ${mgmtRes.status}`);
+
+      // 1.9.3 Consultar en frontend en la pestaña Seguimiento y verificar eventos públicos
+      await page.locator('button.civia-nav-btn:has-text("Seguimiento Radicado")').click();
+      await page.waitForTimeout(300);
+      await trackingInput.fill(radicadoCode);
+      await page.locator('button[type="submit"]:has-text("Consultar Radicado")').click();
+      await page.waitForTimeout(600);
+
+      const timelineEl = page.locator('.civia-events-timeline');
+      await timelineEl.waitFor({ state: 'visible' });
+      const timelineHtml = await timelineEl.innerHTML();
+
+      // Verificar que los eventos públicos requeridos están en el historial
+      if (!timelineHtml.includes('Estado administrativo actualizado a: IN_REVIEW')) {
+        throw new Error('Fallo: Evento STATUS_UPDATED no aparece en la línea de tiempo pública.');
+      }
+      console.log('✓ Evento STATUS_UPDATED verificado en la línea de tiempo.');
+
+      if (!timelineHtml.includes(deptName)) {
+        throw new Error('Fallo: Evento ASSIGNED_TO_DEPARTMENT no aparece en la línea de tiempo pública.');
+      }
+      console.log(`✓ Evento de asignación institucional verificado: "${deptName}".`);
+
+      if (!timelineHtml.includes(publicNote)) {
+        throw new Error('Fallo: Evento PUBLIC_NOTE_ADDED no aparece en la línea de tiempo pública.');
+      }
+      console.log('✓ Observación pública de seguimiento verificada en la línea de tiempo.');
+
+      // 1.9.4 VERIFICACIÓN DE CONFIDENCIALIDAD OBLIGATORIA
+      // Comprobar que secretInternalNote NO aparece en la página pública ni en la API pública
+      const pageWholeText = await page.innerText('body');
+      if (pageWholeText.includes(secretInternalNote)) {
+        throw new Error('VIOLACIÓN CRÍTICA DE SEGURIDAD: La nota interna privada se expuso en la interfaz ciudadana!');
+      }
+
+      const publicCheckRes = await fetch(`${apiBase}/api/reports/by-code/${radicadoCode}`);
+      const publicCheckJson = await publicCheckRes.text();
+      if (publicCheckJson.includes(secretInternalNote)) {
+        throw new Error('VIOLACIÓN CRÍTICA DE SEGURIDAD: La nota interna privada se expuso en la API pública!');
+      }
+      console.log('✓ Confidencialidad verificada: Las notas internas privadas NO se exponen al ciudadano.');
+
+      // 1.9.5 Verificar Bandeja de Notificaciones en Admin
       console.log('\n--- Verificación de Bandeja de Notificaciones en Admin ---');
       const navAdminBtn = page.locator('button.civia-nav-btn:has-text("Observabilidad Admin")');
       await navAdminBtn.click();
@@ -241,24 +354,44 @@ async function launchBrowser() {
       await notifHeader.waitFor({ state: 'visible' });
       console.log('✓ Bandeja de Reportes Recibidos visible en Panel Admin.');
 
-      // Comprobar que nuestro radicado recién creado aparece en las notificaciones
       const notifItem = page.locator(`.civia-notif-item:has-text("${radicadoCode}")`);
       const notifFound = await notifItem.count();
       console.log(`✓ Notificación para ${radicadoCode} encontrada en bandeja admin: ${notifFound > 0}`);
       if (notifFound > 0) {
-        // Probar botón "Marcar leída"
         const markReadBtn = notifItem.locator('button:has-text("Marcar leída")');
         if (await markReadBtn.count() > 0) {
           await markReadBtn.click();
           await page.waitForTimeout(500);
-          console.log(`✓ Notificación para ${radicadoCode} marcada como leída sin alterar el reporte.`);
+          console.log(`✓ Notificación para ${radicadoCode} marcada como leída.`);
         }
       }
     }
 
+    // 1.10 Verificar Ausencia de Términos Internos en Todas las Pestañas Públicas
+    console.log('\n--- Verificación de Lenguaje Ciudadano en Pestañas Públicas ---');
+    const forbiddenTerms = ['PostgreSQL', 'PENDING_ANALYSIS', 'SQL Directo', 'Herramientas Tipadas'];
+    const publicTabs = [
+      { name: 'Mapa y Reportes', btn: 'Mapa y Reportes' },
+      { name: 'Nuevo Reporte', btn: '+ Nuevo Reporte' },
+      { name: 'Seguimiento Radicado', btn: 'Seguimiento Radicado' },
+      { name: 'Asistente Ciudadano', btn: 'Asistente' },
+    ];
+
+    for (const tab of publicTabs) {
+      await page.locator(`button.civia-nav-btn:has-text("${tab.btn}")`).click();
+      await page.waitForTimeout(300);
+      const tabText = await page.innerText('body');
+      for (const term of forbiddenTerms) {
+        if (tabText.includes(term)) {
+          throw new Error(`Término interno prohibido "${term}" encontrado en pestaña pública "${tab.name}".`);
+        }
+      }
+      console.log(`✓ Pestaña "${tab.name}" libre de jerga técnica interna.`);
+    }
+
     await contextDesktop.close();
 
-    // TEST 2: MOBILE (390 x 844 - iPhone / Android Viewport)
+    // TEST 2: MOBILE (390 x 844)
     console.log('\n--- TEST 2: Experiencia Ciudadana en Móvil (390 x 844) ---');
     const contextMobile = await browser.newContext({
       viewport: { width: 390, height: 844 },
@@ -270,31 +403,38 @@ async function launchBrowser() {
     await pageMobile.goto('http://localhost:5173', { waitUntil: 'networkidle' });
     console.log('✓ Aplicación cargada en vista móvil (390 x 844)');
 
-    // Verificar que los botones de navegación tienen tamaño táctil adecuado (>= 44px de alto)
     const mobileNavBtn = pageMobile.locator('button.civia-nav-btn').first();
     const navBtnBox = await mobileNavBtn.boundingBox();
-    console.log(`✓ Altura de botón en móvil: ${navBtnBox.height}px (estándar táctil WCAG >= 44px o accesible)`);
+    console.log(`✓ Altura de botón en móvil: ${navBtnBox.height}px`);
 
-    // Navegar a Seguimiento
     await pageMobile.locator('button.civia-nav-btn:has-text("Seguimiento")').click();
     await pageMobile.waitForTimeout(300);
 
-    // Buscar el radicado creado anteriormente
     const mobileInput = pageMobile.locator('input[aria-label="Código de radicado"]');
     await mobileInput.fill(radicadoCode);
     const searchBtn = pageMobile.locator('button[type="submit"]:has-text("Consultar Radicado")');
     await searchBtn.click();
     await pageMobile.waitForTimeout(600);
 
-    // Verificar aviso obligatorio en móvil
     const mobileNotice = pageMobile.locator('.civia-notice-card').first();
     await mobileNotice.waitFor({ state: 'visible' });
     console.log('✓ Aviso de entrega externa no habilitada visible y adaptable en pantalla móvil.');
 
-    // Verificar timeline en móvil
     const mobileTimeline = pageMobile.locator('.civia-events-timeline');
     await mobileTimeline.waitFor({ state: 'visible' });
     console.log('✓ Línea de tiempo de eventos renderizada correctamente en móvil.');
+
+    // Probar cierre de detalle en móvil
+    const mobileCloseBtn = pageMobile.locator('button:has-text("✕ Cerrar detalle")');
+    await mobileCloseBtn.waitFor({ state: 'visible' });
+    await mobileCloseBtn.click();
+    await pageMobile.waitForTimeout(400);
+
+    const mobileCloseCount = await pageMobile.locator('button:has-text("✕ Cerrar detalle")').count();
+    if (mobileCloseCount !== 0) {
+      throw new Error(`Fallo: "Cerrar detalle" en móvil no ocultó el panel.`);
+    }
+    console.log('✓ Cierre de detalle verificado exitosamente en móvil.');
 
     await contextMobile.close();
 

@@ -983,8 +983,8 @@ def test_g2_1_1_m06_direct_container_ip_spoofing_rejected_200_200_429(monkeypatc
     Por tanto, sus cabeceras XFF se descartan y la cuota aplica sobre su IP real.
     Resultado exacto: 201, 201, 429 (evasión bloqueada).
     """
-    from app.seed import generate_synthetic_evidence_png
-    valid_png = generate_synthetic_evidence_png("HUECO", "M06-DIRECT")
+    from app.seed import DEMO_ASSETS_DIR
+    valid_png = (DEMO_ASSETS_DIR / "civ-2026-demo0001.jpg").read_bytes()
 
     rate_limiter.reset()
     monkeypatch.setattr(settings, "RATE_LIMIT_MAX_REQUESTS", 2)
@@ -1028,8 +1028,8 @@ def test_g2_1_1_m06_trusted_proxy_separate_client_quotas(monkeypatch):
     Verifica que las peticiones que sí provienen del proxy inverso legítimo
     (172.28.0.2) preservan cuotas independientes para clientes distintos.
     """
-    from app.seed import generate_synthetic_evidence_png
-    valid_png = generate_synthetic_evidence_png("HUECO", "M06-PROXY")
+    from app.seed import DEMO_ASSETS_DIR
+    valid_png = (DEMO_ASSETS_DIR / "civ-2026-demo0001.jpg").read_bytes()
 
     rate_limiter.reset()
     monkeypatch.setattr(settings, "RATE_LIMIT_MAX_REQUESTS", 2)

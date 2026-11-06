@@ -4,6 +4,32 @@
 
 ---
 
+## Hotfix de Aceptación UX, Trazabilidad y Eliminación Definitiva de Paint (2026-11-05)
+
+### 1. Hallazgos Corregidos e Implementación Técnica
+- **Cierre real del panel de detalle:** En `frontend/src/App.tsx`, `renderInspectionPanel` invocaba `handleCloseInspection` que solo limpiaba `selectedReport`, ignorando el callback `onClose` recibido. Se corrigió para que cerrar desde Seguimiento limpie `trackedReport` y `newlyCreatedReport`, y desde Mapa limpie `selectedReport`, eliminando del DOM fotografía, historial, radicado y botones, y restaurando el foco al elemento adecuado sin borrar datos persistentes.
+- **Eliminación definitiva de generadores Paint:** Se eliminaron por completo `createCanvasDemoPhoto` (y su fallback canvas) en `App.tsx`, y `generate_synthetic_evidence_png` e `ImageDraw` en `backend/app/seed.py`. Si falta un recurso, el sistema no inventa dibujos geométricos; reporta que la muestra no está disponible, ofrece tomar o subir una fotografía y preserva la integridad del catálogo.
+- **Historial de cambios administrativos y atomicidad:** En `backend/app/repository.py`, `update_report_status()` referenciaba incorrectamente `existing["status"]` (provocando `NameError` que era silenciado por un bloque `except: pass`). Se corrigió a `prev_status` y se eliminaron los silenciamientos de excepciones; ahora el cambio de estado, el evento público `STATUS_UPDATED` y el registro de auditoría se efectúan en la misma transacción atómica. En `update_report_management()`, se separaron las notas internas confidenciales (`internal_note` en `admin_internal_notes`) de las observaciones públicas (`public_note`), garantizando que la información privada administrativa jamás sea expuesta al ciudadano.
+- **Lenguaje ciudadano completo:** Se eliminaron términos técnicos internos (`PostgreSQL`, `PENDING_ANALYSIS`, `SQL Directo`, `Herramientas Tipadas`, `análisis multimodal IA`) de todas las pantallas públicas ciudadanas (Mapa, Reporte, Seguimiento y Asistente Ciudadano).
+- **Pruebas UX corregidas y adversariales:** `scripts/test_citizen_ux_suite.cjs` fue actualizado para verificar la ausencia real del panel tras el cierre (conteos en 0), probar cierre en Mapa y Seguimiento, validar eventos `STATUS_UPDATED` y asignación departamental, verificar la no filtración de notas privadas, y comprobar la ausencia de jerga técnica en desktop y móvil.
+
+### 2. Matriz de Correspondencia de Skills Aplicadas
+| Hallazgo / Tarea | Skill Pertinente | Instrucción Concreta Aplicada | Verificación Adversarial Realizada |
+| :--- | :--- | :--- | :--- |
+| Cierre no efectivo en Seguimiento | `react-patterns` / `systematic-debugging` | Manejo de callbacks en componentes de orden superior y gestión de foco accesible | Prueba Playwright confirmó conteo 1 antes de clic y 0 después de clic |
+| Persistencia de fallback Paint en frontend y backend | `backend-security-coder` / `code-review-and-quality` | Supresión de generadores sintéticos alternativos; fail-closed en recursos faltantes | Búsqueda estática en código confirmó cero ocurrencias de `createCanvasDemoPhoto` e `ImageDraw` |
+| Fallo en registro de STATUS_UPDATED | `postgres-best-practices` / `systematic-debugging` | Corrección de variable (`prev_status`), supresión de `except: pass`, transacción atómica única | Prueba en PostgreSQL 17 demostró 0 eventos antes (RED) y 1 evento después (GREEN) |
+| Filtración potencial de notas internas | `api-security` / `backend-security-coder` | Separación de notas internas privadas vs públicas; sanitización en `row_to_public_dict` | Test Playwright y HTTP validaron ausencia de `NOTA_CONFIDENCIAL` en DOM y payload público |
+| Términos técnicos en vistas ciudadanas | `uxui-principles` / `frontend-ui-engineering` | Sustitución de jerga de base de datos por redacción ciudadana empática | Escaneo DOM en Playwright confirmó 0 términos prohibidos en las 4 pestañas públicas |
+
+### 3. Resultados de Verificación
+- **Suite Hermética Backend Docker:** **154 PASSED**, 1 deselected, 0 failed (100% GREEN en 28.63s).
+- **Suite E2E UX/UI y Trazabilidad (Playwright):** **100% PASSED** en Desktop (1366x768) y Móvil (390x844).
+- **Suite E2E Dual Cámara / Sintéticos:** **2/2 PASSED** (100%).
+- **Frontend Build:** `npm run build` completado exitosamente sin advertencias.
+
+---
+
 ## Refinamiento Integral UX/UI, Trazabilidad Ciudadana y Notificaciones Internas (2026-11-05)
 
 ### 1. Transformación de Experiencia Ciudadana (Plataforma Humana y Empática)

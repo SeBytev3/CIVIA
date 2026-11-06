@@ -7,6 +7,7 @@ ALTER TABLE reports ADD COLUMN IF NOT EXISTS assigned_at TIMESTAMPTZ;
 ALTER TABLE reports ADD COLUMN IF NOT EXISTS external_delivery_status VARCHAR(32) NOT NULL DEFAULT 'NOT_ENABLED';
 ALTER TABLE reports ADD COLUMN IF NOT EXISTS admin_review_status VARCHAR(32) NOT NULL DEFAULT 'PENDING_REVIEW';
 ALTER TABLE reports ADD COLUMN IF NOT EXISTS last_public_note TEXT;
+ALTER TABLE reports ADD COLUMN IF NOT EXISTS admin_internal_notes TEXT;
 
 -- Tabla de eventos históricos de seguimiento ciudadano
 CREATE TABLE IF NOT EXISTS report_events (

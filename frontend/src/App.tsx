@@ -52,38 +52,15 @@ const CALI_PRESETS = [
   { label: 'Cerro de las Tres Cruces (Comuna 2)', lat: 3.4752, lon: -76.5468, comuna: 'Comuna 2', neighborhood: 'Tres Cruces' },
 ];
 
-async function createCanvasDemoPhoto(category: ReportCategory): Promise<File> {
+async function fetchDemoPhoto(category: ReportCategory): Promise<File> {
   const catLower = category.toLowerCase();
   const sampleUrl = `/demo_evidence/sample_${catLower}.jpg`;
-  try {
-    const res = await fetch(sampleUrl);
-    if (res.ok) {
-      const blob = await res.blob();
-      return new File([blob], `evidencia_sintetica_${catLower}.jpg`, { type: 'image/jpeg' });
-    }
-  } catch {
-    // Continuar a fallback dinámico si el recurso estático no responde
+  const res = await fetch(sampleUrl);
+  if (!res.ok) {
+    throw new Error(`Muestra no disponible para ${category} (HTTP ${res.status})`);
   }
-
-  return new Promise((resolve) => {
-    const canvas = document.createElement('canvas');
-    canvas.width = 1024;
-    canvas.height = 768;
-    const ctx = canvas.getContext('2d')!;
-
-    ctx.fillStyle = '#1e293b';
-    ctx.fillRect(0, 0, 1024, 768);
-
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(0, 768 - 48, 1024, 48);
-    ctx.fillStyle = '#f8fafc';
-    ctx.font = 'bold 18px sans-serif';
-    ctx.fillText(`CIVIA · SIMULACIÓN IA · EVIDENCIA SINTÉTICA DEMO · CATEGORÍA: ${category}`, 24, 768 - 18);
-
-    canvas.toBlob((blob) => {
-      resolve(new File([blob!], `evidencia_sintetica_${catLower}.png`, { type: 'image/png' }));
-    }, 'image/png');
-  });
+  const blob = await res.blob();
+  return new File([blob], `evidencia_sintetica_${catLower}.jpg`, { type: 'image/jpeg' });
 }
 
 interface AgentQueryAttempt {
@@ -285,6 +262,8 @@ export function App() {
 
   const handleCloseInspection = () => {
     setSelectedReport(null);
+    setTrackedReport(null);
+    setNewlyCreatedReport(null);
     setTimeout(() => {
       if (lastFocusedElementRef.current && typeof lastFocusedElementRef.current.focus === 'function') {
         lastFocusedElementRef.current.focus();
@@ -505,7 +484,7 @@ export function App() {
 
   const handleSelectSyntheticSample = async (category: ReportCategory) => {
     try {
-      const file = await createCanvasDemoPhoto(category);
+      const file = await fetchDemoPhoto(category);
       handleAssignPhoto(file, true);
       setFormCategoryHint(category);
       if (!formDescription.trim()) {
@@ -523,8 +502,10 @@ export function App() {
         };
         setFormDescription(sampleText[category]);
       }
-    } catch {
-      setGlobalError('No fue posible cargar la muestra sintética de prueba.');
+    } catch (err) {
+      console.warn('La muestra sintética de prueba no está disponible:', err);
+      setGlobalError('La muestra de prueba no está disponible en este momento. Por favor toma una fotografía con tu cámara o selecciona una imagen desde tu dispositivo.');
+      handleDiscardPhoto();
     }
   };
 
@@ -951,7 +932,7 @@ export function App() {
       { key: 'RECIBIDO', label: '1. Evidencia recibida', done: true },
       {
         key: 'ANALIZADO',
-        label: '2. Análisis multimodal IA',
+        label: '2. Diagnóstico del reporte',
         done: status !== 'PENDING_ANALYSIS',
       },
       {
@@ -977,7 +958,7 @@ export function App() {
     );
   };
 
-  const renderInspectionPanel = (rep: ReportItem, _onClose?: () => void) => (
+  const renderInspectionPanel = (rep: ReportItem, onClose?: () => void) => (
     <div className="civia-panel" style={{ borderLeft: '5px solid var(--civia-teal)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', flexWrap: 'wrap' }}>
         <div>
@@ -1002,7 +983,14 @@ export function App() {
         <button
           type="button"
           className="civia-btn secondary"
-          onClick={handleCloseInspection}
+          onClick={() => {
+            if (onClose) {
+              onClose();
+            } else {
+              handleCloseInspection();
+            }
+          }}
+          aria-label="Cerrar detalle de inspección de reporte"
         >
           ✕ Cerrar detalle
         </button>
@@ -1097,7 +1085,7 @@ export function App() {
                   disabled={confirmBusy}
                   onClick={() => void handleRetryAiAnalysis(rep)}
                 >
-                  {confirmBusy ? 'Analizando evidencia...' : 'Ejecutar análisis multimodal IA ahora'}
+                  {confirmBusy ? 'Analizando evidencia...' : 'Solicitar diagnóstico de fotografía'}
                 </button>
               </div>
             </div>
@@ -1279,7 +1267,7 @@ export function App() {
               className={`civia-nav-btn ${activeTab === 'asistente' ? 'active' : ''}`}
               onClick={() => setActiveTab('asistente')}
             >
-              Asistente Agéntico
+              Asistente Ciudadano
             </button>
             <button
               type="button"
@@ -1309,13 +1297,13 @@ export function App() {
           </div>
         )}
 
-        {/* Estadísticas reales desde PostgreSQL */}
+        {/* Estadísticas reales de reportes ciudadanos */}
         {stats && (
-          <section className="civia-stats-grid" aria-label="Estadísticas reales en PostgreSQL">
+          <section className="civia-stats-grid" aria-label="Estadísticas de reportes ciudadanos">
             <div className="civia-stat-card">
               <div className="civia-stat-label">Total Reportes BD</div>
               <div className="civia-stat-value">{stats.total_reports}</div>
-              <div className="civia-stat-sub">Almacenados en PostgreSQL</div>
+              <div className="civia-stat-sub">Reportes guardados</div>
             </div>
             <div className="civia-stat-card">
               <div className="civia-stat-label">Huecos Viales</div>
@@ -1352,7 +1340,14 @@ export function App() {
         {/* PESTAÑA 1: EXPLORAR MAPA Y REPORTES */}
         {activeTab === 'explorar' && (
           <>
-            {selectedReport && renderInspectionPanel(selectedReport, () => setSelectedReport(null))}
+            {selectedReport && renderInspectionPanel(selectedReport, () => {
+              setSelectedReport(null);
+              setTimeout(() => {
+                if (lastFocusedElementRef.current && typeof lastFocusedElementRef.current.focus === 'function') {
+                  lastFocusedElementRef.current.focus();
+                }
+              }, 50);
+            })}
             <section className="civia-panel">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.5rem', marginBottom: '0.75rem' }}>
                 <h2>Mapa Interactivo de Santiago de Cali ({totalReports} reportes encontrados)</h2>
@@ -1406,7 +1401,7 @@ export function App() {
                     onChange={(e) => setFilterStatus(e.target.value)}
                   >
                     <option value="">Todos los estados</option>
-                    <option value="PENDING_ANALYSIS">Pendiente análisis IA</option>
+                    <option value="PENDING_ANALYSIS">Pendiente de diagnóstico</option>
                     <option value="ANALYZED_PENDING_CONFIRMATION">Analizado (Por confirmar)</option>
                     <option value="CONFIRMED">Confirmado</option>
                     <option value="IN_REVIEW">En revisión</option>
@@ -1513,7 +1508,7 @@ export function App() {
                         style={{ marginTop: '0.4rem' }}
                         onClick={() => openReportInspection(rep)}
                       >
-                        Revisar análisis IA / Confirmar
+                        Ver detalle del reporte
                       </button>
                     </div>
                   </article>
@@ -1528,7 +1523,7 @@ export function App() {
           <section className="civia-panel">
             <h2>Registrar Nuevo Reporte Ciudadano en Cali / Valle del Cauca</h2>
             <p style={{ color: 'var(--civia-muted)', marginTop: 0 }}>
-              Flujo vertical completo: captura de evidencia y GPS → almacenamiento seguro en PostgreSQL → análisis multimodal asistido por IA → confirmación o corrección humana.
+              Flujo vertical completo: captura de evidencia y GPS → guardado seguro del reporte → diagnóstico asistido por IA → confirmación o corrección ciudadana.
             </p>
 
             <form onSubmit={(e) => void handleCreateReport(e)}>
@@ -2105,7 +2100,18 @@ export function App() {
             </details>
 
             {trackedReport ? (
-              renderInspectionPanel(trackedReport, () => setTrackedReport(null))
+              renderInspectionPanel(trackedReport, () => {
+                setTrackedReport(null);
+                setNewlyCreatedReport(null);
+                setTimeout(() => {
+                  const inputEl = document.querySelector('input[aria-label="Código de radicado"]') as HTMLElement | null;
+                  if (inputEl && typeof inputEl.focus === 'function') {
+                    inputEl.focus();
+                  } else if (lastFocusedElementRef.current && typeof lastFocusedElementRef.current.focus === 'function') {
+                    lastFocusedElementRef.current.focus();
+                  }
+                }, 50);
+              })
             ) : (
               <div
                 style={{
@@ -2132,9 +2138,9 @@ export function App() {
         {/* PESTAÑA 4: ASISTENTE AGÉNTICO CON HERRAMIENTAS Y 4 LÍMITES */}
         {activeTab === 'asistente' && (
           <section className="civia-panel">
-            <h2>Asistente Agéntico de Consulta y Gestión (SQL Directo + Herramientas Tipadas)</h2>
+            <h2>Asistente Ciudadano de Consulta y Gestión</h2>
             <p style={{ color: 'var(--civia-muted)', marginTop: 0 }}>
-              El agente consulta PostgreSQL mediante herramientas tipadas (`consultar_reportes`, `obtener_reporte`, `clasificar_evidencia`, `proponer_actualizacion_critica`) bajo cuatro límites estrictos: vueltas máximas, presupuesto de tokens, timeout por herramienta y aprobación humana obligatoria para escrituras.
+              El asistente ciudadano te ayuda a consultar información sobre reportes en Santiago de Cali, conocer el estado de incidentes y registrar observaciones de forma guiada y segura. Cualquier actualización crítica es supervisada por operadores calificados.
             </p>
 
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.45rem', marginBottom: '0.85rem' }}>
@@ -2214,7 +2220,7 @@ export function App() {
                       {agentResponse.tools_invoked && agentResponse.tools_invoked.length > 0 && (
                         <div>
                           <strong style={{ fontSize: '0.88rem' }}>
-                            Herramientas tipadas invocadas ({agentResponse.tools_invoked.length}):
+                            Acciones de consulta realizadas ({agentResponse.tools_invoked.length}):
                           </strong>
                           {agentResponse.tools_invoked.map((t, idx) => (
                             <pre

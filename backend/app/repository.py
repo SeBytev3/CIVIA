@@ -728,24 +728,35 @@ def update_report_status(
                     json.dumps(result_payload),
                 ),
             )
-        if row is not None:
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type)
-                    VALUES (gen_random_uuid(), %s, 'STATUS_UPDATED', %s, %s, %s, 'ADMIN');
-                    """,
-                    (
-                        rid,
-                        existing["status"],
-                        status,
-                        f"Estado administrativo actualizado a: {status}." + (f" Motivo: {note}" if note else ""),
-                    ),
-                )
-            except Exception:
-                pass
-        conn.commit()
-        return row
+
+            # Evento público en report_events obligatorio en la MISMA transacción (sin silenciar errores)
+            cur.execute(
+                """
+                INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type)
+                VALUES (gen_random_uuid(), %s, 'STATUS_UPDATED', %s, %s, %s, 'ADMIN');
+                """,
+                (
+                    rid,
+                    prev_status,
+                    status,
+                    f"Estado administrativo actualizado a: {status}." + (f" Motivo: {note}" if note else ""),
+                ),
+            )
+
+            cur.execute(
+                """
+                SELECT id, report_id, event_type, previous_status, new_status,
+                       public_message, actor_type, created_at
+                FROM report_events
+                WHERE report_id = %s
+                ORDER BY created_at ASC;
+                """,
+                (rid,),
+            )
+            row["events"] = cur.fetchall()
+
+            conn.commit()
+            return row
 
 
 def list_reports(
@@ -1038,6 +1049,7 @@ def update_report_management(
     assigned_to: str | None = None,
     admin_review_status: str | None = None,
     public_note: str | None = None,
+    internal_note: str | None = None,
 ) -> dict[str, Any] | None:
     try:
         rid = UUID(str(report_id))
@@ -1048,6 +1060,7 @@ def update_report_management(
             cur.execute("SELECT * FROM reports WHERE id = %s FOR UPDATE;", (rid,))
             existing = cur.fetchone()
             if not existing:
+                conn.rollback()
                 return None
 
             updates = []
@@ -1061,6 +1074,9 @@ def update_report_management(
             if public_note is not None:
                 updates.append("last_public_note = %s")
                 params.append(public_note.strip() or None)
+            if internal_note is not None:
+                updates.append("admin_internal_notes = %s")
+                params.append(internal_note.strip() or None)
 
             if updates:
                 updates.append("updated_at = NOW()")
@@ -1069,29 +1085,40 @@ def update_report_management(
                 cur.execute(query, tuple(params))
                 updated_row = cur.fetchone()
 
-                if assigned_to and assigned_to.strip():
-                    try:
-                        cur.execute(
-                            """
-                            INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type)
-                            VALUES (gen_random_uuid(), %s, 'ASSIGNED_TO_DEPARTMENT', %s, %s, %s, 'ADMIN');
-                            """,
-                            (rid, existing["status"], existing["status"], f"Reporte asignado internamente a: {assigned_to.strip()}."),
-                        )
-                    except Exception:
-                        pass
+                # Evento público si se asigna a una dependencia (sin silenciar errores)
+                if assigned_to is not None and assigned_to.strip() and assigned_to.strip() != (existing.get("assigned_to") or ""):
+                    cur.execute(
+                        """
+                        INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type)
+                        VALUES (gen_random_uuid(), %s, 'ASSIGNED_TO_DEPARTMENT', %s, %s, %s, 'ADMIN');
+                        """,
+                        (rid, existing["status"], existing["status"], f"Reporte asignado a la dependencia competente: {assigned_to.strip()}."),
+                    )
 
-                if public_note and public_note.strip():
-                    try:
-                        cur.execute(
-                            """
-                            INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type)
-                            VALUES (gen_random_uuid(), %s, 'PUBLIC_NOTE_ADDED', %s, %s, %s, 'ADMIN');
-                            """,
-                            (rid, existing["status"], existing["status"], f"Nota de seguimiento: {public_note.strip()}."),
-                        )
-                    except Exception:
-                        pass
+                # Evento público si se añade una observación pública de seguimiento
+                if public_note is not None and public_note.strip() and public_note.strip() != (existing.get("last_public_note") or ""):
+                    cur.execute(
+                        """
+                        INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type)
+                        VALUES (gen_random_uuid(), %s, 'PUBLIC_NOTE_ADDED', %s, %s, %s, 'ADMIN');
+                        """,
+                        (rid, existing["status"], existing["status"], f"Observación de seguimiento: {public_note.strip()}."),
+                    )
+
+                # NOTA DE SEGURIDAD: internal_note NUNCA genera evento público para preservar la confidencialidad interna
+
+                cur.execute(
+                    """
+                    SELECT id, report_id, event_type, previous_status, new_status,
+                           public_message, actor_type, created_at
+                    FROM report_events
+                    WHERE report_id = %s
+                    ORDER BY created_at ASC;
+                    """,
+                    (rid,),
+                )
+                if updated_row is not None:
+                    updated_row["events"] = cur.fetchall()
 
                 conn.commit()
                 return updated_row
