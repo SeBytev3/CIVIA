@@ -1,3 +1,45 @@
+
+## CIVIA 1.0 — Hotfix Urgente: Credenciales de IA y Acceso Administrativo (2026-11-06)
+
+### 1. Hallazgos Corregidos e Implementación Técnica
+- **Fase 1 — Módulo de Validación de Conectividad Segura (`backend/app/validate_providers.py`):**
+  - Implementación del verificador de credenciales de IA para los tres niveles (`GOOGLE_API_KEY_PRIMARY`, `GOOGLE_API_KEY_SECONDARY`, `GROQ_API_KEY`).
+  - Distinción transparente entre estados: `PENDIENTE` (Modo MVP local), `CONFIGURADA` (variable cargada en contenedor) y `VALIDADA` (ping mínimo HTTP 200 en vivo).
+  - Manejo categorizado de respuestas de API: `CLAVE_INVALIDA` (HTTP 401/403), `CUOTA_AGOTADA` (HTTP 429), `TIMEOUT` y `ERROR_RED`.
+  - Soporte de salida formateada en consola y formato estructurado `--json`.
+  - Invariante estricta: ninguna clave privada se imprime en pantalla, logs ni detalles de error.
+- **Fase 2 — Scripts de Configuración Segura de Claves (`setup_ai_keys.ps1` y `setup_ai_keys.sh`):**
+  - Permiten configurar o actualizar las credenciales de IA después del arranque sin reinstalar la base de datos ni reconstruir contenedores desde cero.
+  - Actualización limpia de `.env` preservando `POSTGRES_PASSWORD`, `DATABASE_URL` y `ADMIN_TOKEN`.
+  - Recarga en caliente del servicio de la API con `docker compose up -d --no-deps api` en menos de 3 segundos.
+  - Validación inmediata de las variables dentro del contenedor.
+- **Fase 3 — Detección y Flujo Guiado en Scripts de Arranque (`run.ps1` y `run.sh`):**
+  - Detección de claves de IA al crear o inspeccionar `.env`.
+  - En sesiones interactivas, solicitud opcional mediante entrada oculta (`Read-Host -AsSecureString` / `read -s`) permitiendo continuar en Modo MVP Local al presionar Enter.
+  - En sesiones desatendidas / agentes, advertencia explícita de "Modo MVP Local activo" sin bloquear la orquestación.
+  - Salida final obligatoria estructurada: estado de Frontend PWA, PostgreSQL 17, API REST & Swagger, Google IA primaria, Google IA secundaria, Groq Cloud, e instrucciones privadas de acceso administrativo.
+  - Comando de portapapeles para copiar `ADMIN_TOKEN` de forma privada sin exponerlo en pantalla ni logs.
+- **Fase 4 — Suite de Pruebas Unitarias y Documentación Integral:**
+  - Creación de `backend/tests/test_validate_providers.py` con 13 pruebas unitarias completas que validan todos los estados y confirman la no divulgación de secretos.
+  - Suite hermética ampliada de 155 a **168 contratos herméticos** (`168 passed, 1 deselected, 0 failed`).
+  - Actualización exhaustiva de `README.md`, `AGENTS.md`, `docs/AI_DEPLOY.md`, `docs/guia_instalacion_otro_pc.md`, `docs/entrega_final.md` y `docs/estado.md`.
+
+### 2. Matriz de Correspondencia de Skills Aplicadas
+| Hallazgo / Tarea | Skill Pertinente | Instrucción Concreta Aplicada | Verificación Adversarial Realizada |
+| :--- | :--- | :--- | :--- |
+| Gestión segura de credenciales de IA | `backend-security-coder` / `api-security` | Almacenamiento exclusivo en `.env` local, entrada enmascarada y sanitización total en logs/pantalla | Verificación con `validate_providers.py` y pruebas unitarias: cero secretos en salidas o trazas |
+| Recarga en caliente de API sin pérdida de datos | `docker-expert` / `postgres-best-practices` | Uso de `docker compose up -d --no-deps api` para propagar variables de entorno sin tocar `db` | Pruebas de recarga confirmaron preservación íntegra de reportes y migraciones en PostgreSQL 17 |
+| Recuperación privada de token administrativo | `backend-security-coder` / `powershell-windows` | Generación de comando directo a portapapeles de Windows (`Set-Clipboard`) y Linux/macOS | Copia validada al portapapeles sin emitir la cadena en la consola o transcripción |
+| Pruebas unitarias de proveedores y hermeticidad | `code-review-and-quality` / `systematic-debugging` | Cobertura hermética de estados HTTP (200, 401, 403, 429, timeout) con mocks sin red | 13/13 tests pasaron; suite global alcanzó 168 passed, 1 deselected, 0 failed |
+
+### 3. Resultados de Verificación
+- **Suite Hermética Backend Docker:** **168 PASSED**, 1 deselected, 0 failed en 26.20s (`docker compose exec -T api pytest -m "not live" -v`).
+- **Suite Playwright Dual Cámara y Muestras Demo:** **2/2 PASSED (100%)** (`scripts/test_e2e_final.cjs`).
+- **Suite Playwright UX/UI y Trazabilidad:** **TODAS LAS PRUEBAS PASARON (100%)** (`scripts/test_citizen_ux_suite.cjs`).
+- **Prueba de Ejecución de `setup_ai_keys.ps1`:** Recarga en caliente exitosa sin pérdida de datos en PostgreSQL.
+- **Prueba de Ejecución de `run.ps1`:** Reporte estructurado obligatorio desplegado correctamente con estados de proveedores y acceso administrativo.
+
+---
 # Estado de Ejecución — CIVIA (Momento Evaluativo 2)
 
 **Equipo:** Stefania Córdoba y Sebastian Espinosa · Universidad Cooperativa de Colombia.

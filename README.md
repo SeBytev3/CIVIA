@@ -42,8 +42,10 @@ cd CIVIA
   - Puertos de red libres en el host: `8000` (API Backend) y `5173` (Frontend PWA).
 - **Aislamiento absoluto:** **No se requiere** instalar Node.js, npm ni Python globalmente en el computador evaluador. Toda la compilación, dependencias y ejecución ocurren estrictamente dentro de los contenedores Docker oficiales (`node:22-alpine`, `python:3.13-slim`, `postgres:17-alpine`, `nginx:1.27-alpine`).
 - **Claves API de Inteligencia Artificial (OPCIONALES):**
-  - **El sistema funciona 100% en modo local (MVP) sin requerir ninguna clave de API externa.** La captura de cámara, subida de fotos, georreferenciación en Cali, radicación, persistencia en PostgreSQL 17, catálogo de evidencias fotorrealistas y la suite completa de 155 pruebas herméticas no requieren conexión externa.
-  - Si se proporcionan claves en `.env` (`GOOGLE_API_KEY_PRIMARY`, `GOOGLE_API_KEY_SECONDARY`, `GROQ_API_KEY`), el agente multimodal y el análisis automático en vivo se activan automáticamente.
+  - **El sistema funciona 100% en modo local (MVP) sin requerir ninguna clave de API externa.** La captura de cámara web en vivo, subida de fotos, georreferenciación en Cali, radicación única, persistencia transaccional en PostgreSQL 17, catálogo de evidencias fotorrealistas y la suite completa de 168 pruebas herméticas no requieren conexión externa.
+  - Al ejecutar `.\scripts\run.ps1` o `./scripts/run.sh`, el script detecta si las claves de IA están presentes en `.env`. Si no están configuradas y la sesión es interactiva, permite ingresarlas mediante entrada oculta (`Read-Host -AsSecureString` / `read -s`) o presionar Enter para iniciar de inmediato en **Modo MVP Local**.
+  - Si se desean configurar o actualizar las credenciales después de la instalación inicial, **no es necesario reinstalar PostgreSQL ni reiniciar todos los contenedores**: basta con ejecutar `.\scripts\setup_ai_keys.ps1` (o `./scripts/setup_ai_keys.sh`), el cual actualiza `.env` de forma protegida y recrea únicamente el contenedor `api` (`docker compose up -d --no-deps api`) en menos de 3 segundos sin pérdida de datos.
+  - Los scripts comprueban el estado exacto de cada proveedor (`CONFIGURADA`, `PENDIENTE` o `VALIDADA`) mediante el validador interno seguro `backend/app/validate_providers.py`, sin exponer nunca secretos en pantalla ni logs.
 
 ---
 
@@ -77,7 +79,20 @@ Si prefieres no usar los scripts automáticos:
    ```powershell
    python -c "import pathlib, re, secrets; p=pathlib.Path('.env'); p.write_text(re.sub(r'(?m)^ADMIN_TOKEN=.*$', f'ADMIN_TOKEN={secrets.token_urlsafe(32)}', p.read_text()))"
    ```
-   > **Política de `ADMIN_TOKEN`:** No existe ninguna credencial predeterminada ni modo demo predecible. El sistema exige una cadena generada por CSPRNG (`secrets.token_urlsafe(32)`, `>= 32` caracteres, `>= 12` caracteres únicos, sin secuencias ni términos contextuales como "demo", "admin", "test" o "2026"). Si falta o es débil, el backend falla inmediatamente al iniciar (*fail-closed*).
+   > **Política y Recuperación Segura de `ADMIN_TOKEN`:**  
+> No existe ninguna credencial predeterminada ni modo demo predecible. El sistema exige una cadena generada por CSPRNG (`secrets.token_urlsafe(32)`, `>= 32` caracteres, `>= 12` caracteres únicos).  
+> **Para acceder a Administración:**  
+> 1. Abre CIVIA en tu navegador: `http://localhost:5173` e ingresa a la pestaña **Administración**.  
+> 2. La clave administrativa se encuentra resguardada en tu archivo `.env` local.  
+> 3. Para copiarla directamente al portapapeles **sin imprimirla en pantalla ni exponerla en logs**, ejecuta:  
+>    - En Windows PowerShell:  
+>      ```powershell
+>      powershell -Command "Get-Content .env | Select-String '^ADMIN_TOKEN=' | ForEach-Object { $_.Line.Split('=',2)[1].Trim() } | Set-Clipboard; Write-Host 'ADMIN_TOKEN copiado al portapapeles.'"
+>      ```  
+>    - En Linux / macOS / WSL:  
+>      ```bash
+>      grep '^ADMIN_TOKEN=' .env | cut -d'=' -f2- | tr -d '\r\n' | (pbcopy 2>/dev/null || xclip -selection clipboard 2>/dev/null || wl-copy 2>/dev/null || echo "[Copie la línea ADMIN_TOKEN de .env]")
+>      ```
 3. **Levantar los contenedores:**
    ```powershell
    docker compose up --build -d
@@ -147,13 +162,13 @@ Todas las variables se configuran en el archivo `.env` en la raíz del proyecto.
 ## Ejecución de pruebas automatizadas y suite de evaluación
 
 ### 1. Suite Hermética de Backend (`pytest`)
-Ejecuta la suite hermética de 155 pruebas automáticas (contratos de seguridad F1-F8, invariantes A-L de almacenamiento inmutable, procedencia ética de servidor, ledger de auditoría, resiliencia `429`/`503`/`TIMEOUT`/`TOTAL`, y los 4 límites del agente):
+Ejecuta la suite hermética de 168 pruebas automáticas (contratos de seguridad F1-F8, invariantes A-L de almacenamiento inmutable, procedencia ética de servidor, ledger de auditoría, resiliencia `429`/`503`/`TIMEOUT`/`TOTAL`, y los 4 límites del agente):
 
 ```powershell
 docker compose exec -T api pytest -m "not live" -v
 ```
 
-*(Resultado verificado: **155 passed, 1 deselected, 0 failed**).*
+*(Resultado verificado: **168 passed, 1 deselected, 0 failed**).*
 
 ### 2. Pruebas E2E de Interfaz de Usuario y Experiencia Ciudadana (Playwright)
 La plataforma incluye dos suites completas de pruebas de interfaz en navegador:
@@ -283,3 +298,31 @@ Para garantizar transparencia y rigor técnico ante la evaluación docente, las 
 ## Estado Oficial de Despliegue en la Nube
 > **DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA**  
 > Ver análisis detallado en [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). La aplicación es 100% reproducible en local o VM mediante un solo comando, garantizando la persistencia íntegra de PostgreSQL 17 y la privacidad de las evidencias sin incurrir en costos privados ni depender de capas gratuitas efímeras.
+
+---
+
+## 🤖 Protocolo Guiado para Agentes Evaluadores Autónomos (Claude, Gemini, ChatGPT, Codex)
+
+Si estás operando como un agente evaluador autónomo en una máquina independiente, sigue estrictamente este flujo de 7 pasos:
+
+1. **Verificar variables de entorno cargadas:**
+   ```powershell
+   docker compose exec -T api python -m app.validate_providers
+   ```
+2. **Si las claves están en estado `[PENDIENTE]`:**  
+   Informa claramente al evaluador: *"CIVIA está operando en Modo MVP Local 100% funcional. Si deseas habilitar el análisis multimodal y el asistente de IA en vivo, introduce tus claves en `.env` o ejecuta `.\scripts\setup_ai_keys.ps1`."*  
+   > ⚠️ **REGLA DE PRIVACIDAD:** **NUNCA** solicites al usuario que pegue sus claves de API ni su `ADMIN_TOKEN` en el chat.
+3. **Actualizar `.env` de forma aislada:**  
+   Si el usuario suministra claves o edita `.env`, nunca alteres `POSTGRES_PASSWORD`, `DATABASE_URL` ni `ADMIN_TOKEN`.
+4. **Recargar el contenedor de la API sin tocar la base de datos:**
+   ```powershell
+   docker compose up -d --no-deps api
+   ```
+5. **Comprobar la conectividad con los proveedores:**
+   ```powershell
+   docker compose exec -T api python -m app.validate_providers --live
+   ```
+6. **Guiar al evaluador para obtener el acceso administrativo:**  
+   Proporciona el comando de copia al portapapeles documentado arriba para que ingrese a `http://localhost:5173` pestaña **Administración**.
+7. **Entregar el resultado estructurado:**  
+   Entrega la URL web lista para uso (`http://localhost:5173`) junto con el resumen de estado del sistema (Frontend, PostgreSQL, API, Google Primaria, Google Secundaria y Groq).

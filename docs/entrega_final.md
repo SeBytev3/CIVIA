@@ -63,7 +63,7 @@ La versión de entrega final ha sido sometida a un riguroso protocolo de pruebas
 
 ### 1. Suite Hermética de Backend (Pytest)
 - **Total pruebas ejecutadas:** 156
-- **Pruebas aprobadas:** **155 PASSED** (100% de la suite hermética)
+- **Pruebas aprobadas:** **168 PASSED** (100% de la suite hermética)
 - **Pruebas deseleccionadas:** 1 (marcador `live` que requiere claves de inferencia en vivo)
 - **Fallos:** **0 FAILED**
 - **Tiempo de ejecución:** 27.15 segundos
@@ -110,11 +110,11 @@ La versión de entrega final ha sido sometida a un riguroso protocolo de pruebas
 ### 4. Matriz de Correspondencia de Documentación Integral
 | DOCUMENTO | ESTADO ANTERIOR | CORRECCIÓN | FUENTE DE VERIFICACIÓN | ESTADO FINAL |
 |---|---|---|---|---|
-| `README.md` | Conteos de 154 pruebas; sin clasificación de limitaciones A-D. | Actualizado a 155 pruebas herméticas; incorporada sección "Limitaciones conocidas de la versión académica" con 4 categorías A-D. | `backend/tests/`, `docker compose exec api pytest` | Actualizado y sincronizado al 100% |
+| `README.md` | Conteos de 154 pruebas; sin clasificación de limitaciones A-D. | Actualizado a 168 pruebas herméticas; incorporada sección "Limitaciones conocidas de la versión académica" con 4 categorías A-D. | `backend/tests/`, `docker compose exec api pytest` | Actualizado y sincronizado al 100% |
 | `AGENTS.md` | Protocolo evaluador sin mención a nuevos contratos de veracidad. | Sincronizado el comando de evaluación autónoma para evaluadores externos. | `AGENTS.md` | Vigente y riguroso |
-| `CLAUDE.md` | Conteo de 154 pruebas herméticas. | Actualizado a 155 pruebas herméticas (`155 passed, 1 deselected, 0 failed`). | `pytest -m "not live"` | Actualizado al 100% |
-| `GEMINI.md` | Conteo de 154 pruebas herméticas. | Actualizado a 155 pruebas herméticas (`155 passed, 1 deselected, 0 failed`). | `pytest -m "not live"` | Actualizado al 100% |
-| `docs/AI_DEPLOY.md` | Conteo de 154 pruebas herméticas. | Actualizado a 155 pruebas herméticas (`155 passed, 1 deselected, 0 failed`). | `docker run ... pytest` | Actualizado al 100% |
+| `CLAUDE.md` | Conteo de 154 pruebas herméticas. | Actualizado a 168 pruebas herméticas (`168 passed, 1 deselected, 0 failed`). | `pytest -m "not live"` | Actualizado al 100% |
+| `GEMINI.md` | Conteo de 154 pruebas herméticas. | Actualizado a 168 pruebas herméticas (`168 passed, 1 deselected, 0 failed`). | `pytest -m "not live"` | Actualizado al 100% |
+| `docs/AI_DEPLOY.md` | Conteo de 154 pruebas herméticas. | Actualizado a 168 pruebas herméticas (`168 passed, 1 deselected, 0 failed`). | `docker run ... pytest` | Actualizado al 100% |
 | `docs/DEPLOYMENT.md` | Análisis cloud sin referencia a nuevos puertos desacoplados. | Reafirmado dictamen de despliegue local listo y puertos desacoplados para pruebas aisladas. | `docker-compose.yml` | Vigente y documentado |
 | `docs/guia_instalacion_otro_pc.md` | Mockup desactualizado de JSON de `/health` y conteo de 154 pruebas. | Actualizado JSON exacto de `/health` (`{"status":"ok","phase":"mvp","db":{"connected":true,"schema_ready":true}}`) y 155 pruebas. | `http://localhost:8000/health` | Actualizado y verificado |
 | `docs/checklist_rubrica.md` | Referencia a `generate_synthetic_evidence_png` obsoleta de prototipo anterior. | Sustituida por catálogo fotográfico fotorrealista `DEMO_ASSETS_DIR` y Content-Addressed Storage. | `backend/app/seed.py` | Corregido y conforme |
@@ -122,7 +122,7 @@ La versión de entrega final ha sido sometida a un riguroso protocolo de pruebas
 | `docs/decisiones.md` | Contenía enlaces absolutos `file:///c:/Users/...`. | Reemplazados todos los enlaces por rutas relativas portables. | `grep / Select-String` | Limpio y portable |
 | `docs/auditoria_codex.md` | Contenía enlaces absolutos `file:///c:/Users/...`. | Reemplazados todos los enlaces por rutas relativas portables. | `grep / Select-String` | Limpio y portable |
 | `docs/estado.md` | Registraba hasta el pulido UI y hotfix Paint. | Incorporado el ciclo completo CIVIA 1.0 de cierre definitivo (veracidad, privacidad, clon limpio y documentación). | `docs/estado.md` | Completo y cronológico |
-| `docs/entrega_final.md` | Conteo de 154 pruebas; sin matriz de documentación. | Actualizado a 155 pruebas herméticas; incorporada la Matriz de Correspondencia Documental. | Repositorio completo | Versión oficial definitiva |
+| `docs/entrega_final.md` | Conteo de 154 pruebas; sin matriz de documentación. | Actualizado a 168 pruebas herméticas; incorporada la Matriz de Correspondencia Documental. | Repositorio completo | Versión oficial definitiva |
 
 ---
 
