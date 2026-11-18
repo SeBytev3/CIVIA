@@ -1,0 +1,80 @@
+name: CIVIA
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker:
+    name: Docker ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: AMD64
+            host_arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: ARM64
+            host_arch: aarch64
+    env:
+      COMPOSE_PROJECT_NAME: civia_ci
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Verificar entorno limpio y arrancar
+        shell: bash
+        run: |
+          test "$(uname -m)" = "${{ matrix.host_arch }}"
+          test "$(docker info --format '{{.Architecture}}')" = "${{ matrix.host_arch }}"
+          test ! -e .env
+          test ! -e .civia
+          test ! -e frontend/node_modules
+          ./scripts/run.sh
+          curl --fail --silent --show-error http://127.0.0.1:5173/build.json | grep -F "$GITHUB_SHA"
+
+      - name: Recorrer API y verificar persistencia
+        shell: bash
+        run: |
+          proof=$(docker compose run --rm --no-deps -T \
+            --volume "$PWD/.civia/access:/bootstrap:ro" \
+            --volume "$PWD/eval/aceptacion_v111.py:/app/acceptance.py:ro" \
+            api python /app/acceptance.py --credentials-file /bootstrap/admin-access.json)
+          printf '%s\n' "$proof"
+          code=$(sed -nE 's/.*"radicado_sintetico": "(CIV-[0-9]{4}-[A-Z0-9]+)".*/\1/p' <<<"$proof")
+          test -n "$code"
+          before=$(curl --fail --silent --show-error http://127.0.0.1:5173/api/meta)
+          ./scripts/run.sh --stop
+          ./scripts/run.sh
+          test "$before" = "$(curl --fail --silent --show-error http://127.0.0.1:5173/api/meta)"
+          stored=$(docker compose exec -T db psql -U civia -d civia -Atc \
+            "SELECT status FROM reports WHERE tracking_code = '$code'")
+          test "$stored" = IN_REVIEW
+
+      - name: Ejecutar suite hermética
+        run: docker compose --profile test run --rm --build tests pytest -m "not live" -q --tb=short
+
+      - name: Verificar proxy en la red del despliegue
+        run: |
+          docker run --rm --network civia_ci_civia_net civia_ci-tests python -c \
+            "import runpy; runpy.run_path('tests/test_e2e_frontend_proxy.py')['test_frontend_pwa_and_nginx_reverse_proxy_e2e']()"
+
+      - name: Detener el proyecto de pruebas
+        if: always()
+        run: |
+          if test -f .env; then docker compose --profile test down --remove-orphans; fi
