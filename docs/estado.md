@@ -19,6 +19,15 @@ El preflight de cierre se ejecutó con cuota autorizada en una base aislada. Gem
 | Clon paralelo y arranque sin claves | `code-review-and-quality`, `verification-before-completion` | Valores aislados persistentes y configuración interactiva separada de inferencia en vivo | Clon Windows coexistió con la instalación habitual. Linux ARM64 comprobó el modo aislado. |
 | Seguridad y recuperación | `backend-security-coder`, `api-security`, `postgres-best-practices` | Revisar controles de autorización, cola, privilegios y límites de red con datos sintéticos | Suite hermética, tres roles, rechazo fuera de alcance, revisión de egreso y de la credencial histórica. [Semana 12](seguridad.md) |
 
+## Verificación del protocolo de instalación
+
+La revisión documental es posterior a la etiqueta `v1.1.1`. El ensayo siguió el nuevo README desde un clon desechable de GitHub en Windows AMD64. El clon arrancó en modo aislado con claves vacías y verificó los tres perfiles, radicación con foto y audio, reintento del worker, revocación y persistencia tras reiniciar. La suite obtuvo 204 aprobadas, una omitida en la red hermética y una prueba en vivo deseleccionada. El comando documentado del proxy pasó por separado. Se comprobaron 41 operaciones en OpenAPI. [Protocolo](../README.md#despliegue-autónomo-con-tu-agente-de-ia-favorito)
+
+| Guía aplicada | Comprobación |
+| --- | --- |
+| `code-documentation-doc-generate` y `code-review-and-quality` | Comparación con el README histórico, los scripts y la configuración vigente. Se comprobaron enlaces relativos, variables, opciones, Markdown GFM y el diagrama Mermaid. |
+| `verification-before-completion` | Clon sin `.env`, dependencias ni almacenamiento preexistentes, aislamiento del proyecto habitual y pruebas del procedimiento publicado. El workflow verificó ejecución real en Linux AMD64 y ARM64. [CI del ensayo](https://github.com/SeBytev3/CIVIA/actions/runs/44323465055) |
+
 ## Evidencia anterior al cierre
 
 Validación del [PR #1](https://github.com/SeBytev3/CIVIA/pull/1) en Windows 11, Docker Desktop, PostgreSQL 17 y Android Emulator API 35.
@@ -68,9 +77,9 @@ Una ejecución autorizada con fixtures sintéticos después de aplicar las 15 mi
 | Conexión y captura Android | `systematic-debugging`, `test-driven-development`, `frontend-api-integration-patterns` | Confirmar identidad antes de transmitir, mantener alcance de cuenta y repetir desde el entorno real | Rechazo de huella, cambio de dirección y radicación tras corte. El micrófono WebView falló en RED; la grabación WAV nativa se verificó en GREEN. |
 | Gemini con catálogo visible | `systematic-debugging`, `test-driven-development` | Distinguir rechazo de autenticación y permiso de generación | RED antes de la clasificación 403. GREEN con catálogo visible y generación denegada en el preflight. |
 
-## Estado de publicación
+## Estado previo al cierre de 1.1.1
 
-El candidato se mantiene en el PR #1 sin fusionar. El despliegue comprobado es local. El emparejamiento entre dos dispositivos físicos en Wi-Fi, una prueba iOS y el arranque Docker completo en Linux nativo, macOS y ARM64 requieren confirmación en esos entornos.
+En esa etapa, el candidato seguía en el PR #1 sin fusionar. El despliegue comprobado es local. El emparejamiento entre dos dispositivos físicos en Wi-Fi, una prueba iOS y el arranque Docker completo en Linux nativo, macOS y ARM64 requieren confirmación en esos entornos.
 
 ---
 

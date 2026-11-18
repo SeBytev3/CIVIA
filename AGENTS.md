@@ -26,13 +26,10 @@ Equipo: Stefania Córdoba y Sebastian Espinosa. Proyecto de Ingeniería de Aplic
 - Documentar explícitamente en cada ciclo la matriz de correspondencia: hallazgo/tarea -> skill utilizada -> instrucción aplicada -> verificación adversarial realizada.
 - Verificar invariantes mediante TDD adversarial: reproducir y confirmar el fallo exacto (RED) antes de implementar (GREEN) y proteger regresiones con suites herméticas.
 
-## Protocolo de Evaluación Autónoma para Agentes
-- Para cualquier agente evaluador (Claude, Gemini, ChatGPT):
-  1. Clonar desde la rama predeterminada `main`, salvo evaluación explícita de un PR. Trabajar en `dev` para cambios futuros. [Flujo Git](docs/FLUJO_GIT.md)
-  2. Ejecutar `.\scripts\run.ps1` (PowerShell) o `./scripts/run.sh` (Bash).
-  3. Comprobar salud en `http://localhost:8000/health` y acceso a frontend en `http://localhost:5173`.
-  4. Ejecutar `docker compose --profile test run --rm --build tests` en la red de pruebas aislada.
-  5. Consultar `docker compose exec -T api python -m app.validate_providers`. Si falta una clave, indicar el configurador privado o el arranque interactivo. Pedir autorización de cuota antes de `--live` y registrar sólo las modalidades comprobadas.
-  6. Recuperar el acceso creado por el bootstrap en `.civia/access/admin-access.json` en privado. Ejecutar el [recorrido de caja negra](eval/README.md) con un clon desechable y claves vacías.
-  7. Informar las URLs que mostró el bootstrap. Radicación en `/`, PWA ciudadana en `/app/` y portal en `/admin/`. Comparar `/build.json` y `/api/meta`. Consultar [estado](docs/estado.md) para conocer límites comprobados.
-  8. La API está en [docs/API.md](docs/API.md) y en `http://localhost:8000/docs`. Sustituir conteos sólo con evidencia de ejecución.
+## Contrato de instalación autónoma
+
+- El README es el procedimiento canónico. Con terminal y Docker, ejecuta el protocolo y verifica el resultado. Cuando falte acceso o autorización indispensable, indica el impedimento y entrega comandos exactos para ese entorno. [Protocolo universal](README.md#despliegue-autónomo-con-tu-agente-de-ia-favorito)
+- Instala desde `main` para evaluación ordinaria y desarrolla en `dev`. Usa las URLs y el proyecto que declara el bootstrap. Antes de actuar, identifica instalaciones existentes y reserva un clon aislado con claves vacías para datos sintéticos, mutaciones y simulaciones. [Flujo Git](docs/FLUJO_GIT.md)
+- Resuelve problemas ordinarios mediante los comandos documentados. Conserva volúmenes y secretos de otras instalaciones, la lógica de negocio y los controles de seguridad.
+- Usa el configurador privado para claves y el acceso administrativo generado sólo en el equipo autorizado. Nunca pidas secretos por chat, uses credenciales de los desarrolladores ni imprimas sus valores. Obtén autorización expresa antes de usar cuota externa. Separa claves configuradas de modalidades validadas.
+- Limita las solicitudes al usuario a permisos indispensables, secretos privados, cuota, certificados o acciones físicas. Informa versión y commit, URLs, mecanismo privado de acceso, verificaciones ejecutadas y limitaciones. Distingue radicación de análisis y navegador de dispositivo físico.
