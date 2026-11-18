@@ -28,11 +28,11 @@ Equipo: Stefania Córdoba y Sebastian Espinosa. Proyecto de Ingeniería de Aplic
 
 ## Protocolo de Evaluación Autónoma para Agentes
 - Para cualquier agente evaluador (Claude, Gemini, ChatGPT):
-  1. La rama oficial es `main`.
+  1. Evaluar la rama candidata indicada en [README](README.md) mientras el PR #1 siga en revisión.
   2. Ejecutar `.\scripts\run.ps1` (PowerShell) o `./scripts/run.sh` (Bash).
   3. Comprobar salud en `http://localhost:8000/health` y acceso a frontend en `http://localhost:5173`.
   4. Ejecutar `docker compose --profile test run --rm --build tests` en la red de pruebas aislada.
   5. Consultar `docker compose exec -T api python -m app.validate_providers`. Configurar claves privadas con el script indicado en README. El preflight en vivo requiere autorización de cuota.
-  6. Crear las cuentas administrativas en terminal privada con `docker compose exec api python -m app.bootstrap_admins`. Portal en `http://localhost:5173/admin/`.
+  6. Recuperar el acceso creado por el bootstrap en `.civia/access/admin-access.json` en privado. Radicación en `/`, PWA ciudadana en `/app/` y portal en `/admin/`. Comparar identidad en `/build.json` y `/api/meta`.
   7. Consultar [estado](docs/estado.md) para saber qué versión se verificó o publicó y qué sigue pendiente.
   8. La API está en [docs/API.md](docs/API.md) y en `http://localhost:8000/docs`. Sustituir conteos sólo con evidencia de ejecución.

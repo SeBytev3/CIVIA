@@ -1,5 +1,9 @@
 # Decisiones de arquitectura
 
+## CIVIA 1.1.1 · Identidad y transporte de instalación
+
+Elegimos una identidad persistente de PostgreSQL, una huella fijada desde el QR y anuncios mDNS informativos. Permite conservar el perfil frente a cambios de IP. El navegador usa HTTPS con nombre y CA confiables. No duplicamos el backend ni las tablas por cliente. [Conectividad](CONECTIVIDAD_LAN.md)
+
 ## CIVIA 1.1.0 · SQL directo
 
 Los reportes, estados, roles, eventos, escenas sintéticas y conteos están estructurados en PostgreSQL. Consultas parametrizadas y vistas de alcance permiten responder con datos actuales, autorizados y reproducibles. Un índice vectorial no aporta a la consulta por radicado, categoría, estado o comuna. Replicaría datos con obligaciones de sincronización y privacidad. Se reserva RAG para una futura necesidad validada de consultar documentos autorizados.

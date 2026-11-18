@@ -1,11 +1,11 @@
-# CIVIA 1.1.0 · Entrega académica
+# CIVIA 1.1.1 · Entrega académica
 
 Stefania Córdoba y Sebastian Espinosa · Universidad Cooperativa de Colombia · Ingeniería de Aplicaciones con IA · Profesor Julián Garzón · Momento 3.
 
 | Área | Documento canónico |
 | --- | --- |
 | Arquitectura, capacidad, presupuesto y diagrama | [arquitectura_escala.md](arquitectura_escala.md) |
-| Android y PWA | [APLICACION_MOVIL.md](APLICACION_MOVIL.md), [ANDROID_BUILD.md](ANDROID_BUILD.md) |
+| Android, web y PWA | [APLICACION_MOVIL.md](APLICACION_MOVIL.md), [ANDROID_BUILD.md](ANDROID_BUILD.md), [CONECTIVIDAD_LAN.md](CONECTIVIDAD_LAN.md) |
 | Identidad y administración | [ROLES_Y_PERMISOS.md](ROLES_Y_PERMISOS.md) |
 | Inferencia, cola, worker y fallas | [AI_DEPLOY.md](AI_DEPLOY.md), [RESILIENCIA.md](RESILIENCIA.md) |
 | Seguridad y riesgos residuales | [seguridad.md](seguridad.md) |

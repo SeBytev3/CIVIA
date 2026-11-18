@@ -1,6 +1,6 @@
 # Resiliencia y radicación
 
-FastAPI autentica al ciudadano y valida los campos y evidencias. Crea el reporte, el evento, la notificación y el trabajo de análisis en una transacción. La evidencia se publica de forma inmutable y se verifica por tamaño y SHA-256. El worker accede al volumen de evidencias en lectura. El cliente conserva la clave de idempotencia durante el reenvío.
+FastAPI autentica al ciudadano y valida los campos y evidencias. Crea el reporte, el evento, la notificación y el trabajo de análisis en una transacción. La evidencia se publica de forma inmutable y se verifica por tamaño y SHA-256. El worker accede al volumen de evidencias en lectura. El cliente conserva la clave de idempotencia durante el reenvío. El borrador se identifica por instalación y cuenta. El backend rechaza la recepción si los encabezados de alcance del navegador difieren de la instalación o la sesión autorizada.
 
 PostgreSQL es la fuente de verdad. El worker reclama filas con `FOR UPDATE SKIP LOCKED` y una concesión temporal. Libera la transacción antes de inferencia. La entrega de trabajo puede repetirse tras un reinicio. La versión de reporte y el fencing token impiden la publicación de resultados tardíos por un worker desplazado. La revisión humana prevalece.
 

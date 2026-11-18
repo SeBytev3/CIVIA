@@ -1,6 +1,6 @@
 # Evaluación formal de CIVIA (Fase E)
 
-El diseño y la evaluación 1.0 se conserva como referencia histórica. Los resultados vigentes del candidato están en `docs/estado.md`.
+El diseño y la evaluación de la versión 1.0 se conservan como referencia histórica. Los resultados vigentes del candidato están en [estado.md](../docs/estado.md).
 
 Este directorio contiene los artefactos reproducibles de evaluación del Momento Evaluativo 2:
 
@@ -9,14 +9,24 @@ Este directorio contiene los artefactos reproducibles de evaluación del Momento
 3. `resultados/reporte_evaluacion.json` y `resultados/reporte_evaluacion.md`: reportes reproducibles generados por la ejecución real de `evaluar.py`.
 4. `plantilla_usabilidad.md`: protocolo de 3 tareas sin instrucciones verbales para evaluador externo (dejado honestamente como pendiente de ejecución presencial).
 
-## Cómo ejecutar la evaluación
+## Caja negra de CIVIA 1.1.1
 
-Con los contenedores activos (`docker compose up -d`):
+Usa un clon desechable con su propio proyecto Compose, puertos y red. Arráncalo con el procedimiento del README y deja vacías las claves de proveedores. El smoke crea cuentas y reportes sintéticos, consulta los tres perfiles y cambia temporalmente el modo de fallas. Monta las credenciales sólo en lectura. Desde ese clon, en PowerShell:
 
 ```powershell
-# Evaluación completa (SQL determinista + 15 consultas en vivo)
-docker compose exec -T api python eval/evaluar.py --mode all
-
-# Solo verificación determinista SQL (sin llamadas a proveedores externos)
-docker compose exec -T api python eval/evaluar.py --mode deterministic
+$root = (Get-Location).Path
+docker compose run --rm --no-deps -T `
+    --volume "${root}/.civia/access:/bootstrap:ro" `
+    --volume "${root}/eval/aceptacion_v111.py:/app/acceptance.py:ro" `
+    api python /app/acceptance.py --credentials-file /bootstrap/admin-access.json
 ```
+
+## Casos dorados
+
+La comprobación determinista emplea PostgreSQL desechable y escribe sus resultados en el contenedor de pruebas:
+
+```powershell
+docker compose --profile test run --rm -T tests python -c 'from pathlib import Path; from eval import evaluar as e; e.RESULTS_DIR=Path("/tmp/civia-results"); r=e.run_evaluation("deterministic"); print([(x["id"], x["sql_verificado"]) for x in r["golden_sql_verification"]]); assert all(x["sql_verificado"] for x in r["golden_sql_verification"])'
+```
+
+La evaluación histórica de 15 consultas necesita un despliegue de evaluación con credenciales autorizadas, capacidades verificadas, cuotas disponibles y PostgreSQL desechable. Conserva los informes publicados para comparar resultados de su versión y fecha.

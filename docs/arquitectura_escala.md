@@ -16,6 +16,10 @@ flowchart LR
   T --> V[Vista SQL minimizada]
 ```
 
+## Fronteras de instalación
+
+La versión 1.1.1 agrega identidad y protocolo a la instalación, PWA ciudadana y gateway HTTPS para LAN. Conserva una sola cola PostgreSQL y los mismos presupuestos de inferencia. Las mediciones anteriores de una instalación local sin inferencia remota se preservan en [estado](estado.md).
+
 ## Escenario de dimensionamiento
 
 Supuesto de evaluación, sin demanda histórica de producción: 120 reportes por día. La media de veinticuatro horas es 0,083 reportes/minuto. Se evalúa un pico sostenido hipotético de 4 reportes/minuto. Con un tiempo medio de servicio supuesto de 8 s, la Ley de Little en régimen estable da `L = (4/60) × 8 = 0,53` trabajos activos. Con 30 % de margen, `L ≈ 0,69`. Un worker sirve 7,5 reportes/minuto bajo esa hipótesis. Su ritmo neto frente al pico sería 3,5/min. La relación no garantiza SLA ante esperas del proveedor, leases o errores de modalidad.

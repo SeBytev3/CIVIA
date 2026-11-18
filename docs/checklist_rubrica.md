@@ -2,7 +2,7 @@
 
 | Requisito | Evidencia |
 | --- | --- |
-| Ciudadanía móvil y PWA administrativa | [Experiencias](APLICACION_MOVIL.md), [Android](ANDROID_BUILD.md) y resultados en [estado](estado.md) |
+| Web de radicación, Android y dos PWA | [Experiencias](APLICACION_MOVIL.md), [Android](ANDROID_BUILD.md), [LAN](CONECTIVIDAD_LAN.md) y resultados en [estado](estado.md) |
 | Tres perfiles, permisos y sesiones | [Roles](ROLES_Y_PERMISOS.md) y suite auth/RBAC |
 | Radicación, diagnóstico asíncrono y gestión | [Resiliencia](RESILIENCIA.md), Swagger y pruebas de colas |
 | Gemini y respaldo Groq | [Preflight](AI_DEPLOY.md), pruebas herméticas y estado de credenciales |

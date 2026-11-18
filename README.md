@@ -1,43 +1,56 @@
-# CIVIA 1.1.0 · Momento 3
+# CIVIA 1.1.1 · Momento 3
 
-Plataforma académica de reportes ciudadanos viales y ambientales para Cali y el Valle del Cauca. Desarrollada por Stefania Córdoba y Sebastian Espinosa, Universidad Cooperativa de Colombia, para Ingeniería de Aplicaciones con IA con Julián Garzón.
+CIVIA es una plataforma académica de reportes viales y ambientales para Cali y el Valle del Cauca. Fue desarrollada por Stefania Córdoba y Sebastian Espinosa para Ingeniería de Aplicaciones con IA, Universidad Cooperativa de Colombia, con el profesor Julián Garzón.
 
-La experiencia ciudadana usa React y Capacitor en Android y tiene una contingencia web móvil. El portal web PWA sirve a la administración de casos y del sistema. FastAPI y PostgreSQL comparten reportes, evidencias e historial. Un worker separado procesa la cola con Gemini y respaldo Groq. El radicado se confirma al guardar el reporte y su trabajo de análisis.
+## Requisitos e instalación
 
-## Arranque local
+Para iniciar el servidor se requiere Git, Docker con contenedores Linux, Docker Compose y acceso a los registros de imágenes y dependencias durante la primera construcción. Docker Desktop proporciona estos componentes en Windows y macOS. En Linux instala Docker Engine y el complemento Compose. Python, Node, PostgreSQL y Nginx se ejecutan en contenedores.
 
-Instala Git y Docker Desktop con contenedores Linux. Desde PowerShell en Windows 11:
+La rama candidata es `feature/civia-v1.1-mobile-security-resilience` del [PR #1](https://github.com/SeBytev3/CIVIA/pull/1). El estado comprobado por plataforma está en [docs/estado.md](docs/estado.md).
+
+**Windows, PowerShell**
 
 ```powershell
 git clone --branch feature/civia-v1.1-mobile-security-resilience https://github.com/SeBytev3/CIVIA.git
 cd CIVIA
-.\scripts
-un.ps1
+./scripts/run.ps1
 ```
 
-En Linux o macOS ejecuta `./scripts/run.sh`. El script inicializa `.env` local y espera la salud de los servicios. Revisa la versión y la rama publicadas antes de evaluar el candidato 1.1.0. El estado del candidato y los resultados están en [docs/estado.md](docs/estado.md).
+**Linux y macOS, Bash**
 
-| Acceso | Dirección |
+```bash
+git clone --branch feature/civia-v1.1-mobile-security-resilience https://github.com/SeBytev3/CIVIA.git
+cd CIVIA
+./scripts/run.sh
+```
+
+El bootstrap muestra el estado de PostgreSQL, migraciones, API, worker, Nginx, versión y proveedores. Genera los secretos internos y las dos cuentas iniciales para una instalación nueva. Abre `.civia/access/admin-access.json` en privado para recuperar las credenciales de `WEB_ADMIN` y `CASE_ADMIN`. El ciudadano se registra desde la web. Los cambios de rol y contraseña los gestiona la administración web.
+
+| Acceso local | Uso |
 | --- | --- |
-| Ciudadanía móvil web | [localhost:5173](http://localhost:5173/) |
-| Portal administrativo | [localhost:5173/admin](http://localhost:5173/admin/) |
-| Swagger | [localhost:8000/docs](http://localhost:8000/docs) |
-| Salud básica | [localhost:8000/health](http://localhost:8000/health) |
+| [http://localhost:5173/](http://localhost:5173/) | Radicar un reporte desde web en escritorio o móvil |
+| [http://localhost:5173/app/](http://localhost:5173/app/) | Aplicación ciudadana instalable, mapa, historial y asistente |
+| [http://localhost:5173/admin/](http://localhost:5173/admin/) | Portal administrativo por rol |
+| [http://localhost:8000/docs](http://localhost:8000/docs) | Swagger |
+| [http://localhost:5173/health](http://localhost:5173/health) | Salud a través de Nginx |
 
-Crea las dos primeras cuentas administrativas desde una terminal privada con `docker compose exec api python -m app.bootstrap_admins`. Usa credenciales distintas para ambos perfiles y conserva las contraseñas en un gestor. La ciudadanía se registra en la aplicación.
+## Inteligencia artificial
 
-Usa `.\scripts\setup_ai_keys.ps1` o `./scripts/setup_ai_keys.sh` para ingresar las dos claves en privado. Una clave configurada se marca como **CONFIGURADA**. Con autorización de cuota, `docker compose exec -T api python -m app.validate_providers --live` verifica y habilita las modalidades de los modelos configurados. En modo local los reportes conservan su radicado y evidencias aunque la inferencia esté pendiente.
+Ingresa las claves con `./scripts/setup_ai_keys.ps1` en Windows o `./scripts/setup_ai_keys.sh` en Bash. El sistema admite Gemini y Groq. Con autorización de cuota, ejecuta `docker compose exec -T api python -m app.validate_providers --live`. La radicación conserva el reporte y las evidencias si se omiten las claves o falla la inferencia. [Configuración y resultados](docs/AI_DEPLOY.md)
 
-## Evaluación
+## Android, PWA y red local
 
-```text
-docker compose --profile test run --rm --build tests
-```
+Consulta el APK, su firma y SHA-256 en [docs/ANDROID_BUILD.md](docs/ANDROID_BUILD.md). En el teléfono autoriza la fuente del APK e instala el paquete. CIVIA Android empareja el servidor desde un QR o código de confianza.
 
-La suite usa un servicio PostgreSQL descartable y una red interna. Usa el estado de la rama en [docs/estado.md](docs/estado.md) para interpretar los resultados. El catálogo está identificado como sintético. CIVIA opera como proyecto académico. El envío de correo institucional permanece deshabilitado.
+Inicia la conexión remota con `./scripts/run.ps1 -Lan` en Windows o `./scripts/run.sh --lan` en Bash. Si hay varias interfaces, selecciona la IPv4 local con `-LanAddress` o `--lan-address`. El gateway HTTPS publica el puerto indicado, 5443 por defecto. Abre `.civia/lan/pairing.svg` para escanear el QR, o usa el código de `pairing.txt`. Si falla el descubrimiento, empareja con ese mismo código. [Conectividad LAN y certificados](docs/CONECTIVIDAD_LAN.md)
 
-- [Instalación en otro computador](docs/guia_instalacion_otro_pc.md) y [despliegue local](docs/DEPLOYMENT.md).
-- [Aplicación móvil](docs/APLICACION_MOVIL.md), [compilación Android](docs/ANDROID_BUILD.md) y [roles](docs/ROLES_Y_PERMISOS.md).
-- [API REST](docs/API.md), [proveedores de IA](docs/AI_DEPLOY.md), [resiliencia](docs/RESILIENCIA.md) y [decisión de SQL directo](docs/decisiones.md).
-- [Semana 12, seguridad](docs/seguridad.md) y [semana 13, capacidad](docs/arquitectura_escala.md).
-- [Sustentación](docs/guion_sustentacion.md), [rúbrica](docs/checklist_rubrica.md) y [entrega](docs/entrega_final.md).
+Desde un navegador compatible abre la aplicación ciudadana y usa su opción de instalación o el menú del navegador. En iOS usa **Compartir → Agregar a pantalla de inicio**. En un teléfono utiliza un origen HTTPS de LAN que el navegador reconozca como confiable. [PWA ciudadana](http://localhost:5173/app/)
+
+## Verificar, detener y actualizar
+
+- Compara versión y commit en [build.json](http://localhost:5173/build.json) y [api/meta](http://localhost:5173/api/meta). Una compilación con cambios locales lleva el sufijo `-dirty`.
+- Ejecuta `docker compose --profile test run --rm --build tests pytest -m "not live" -q --tb=short` para la suite hermética. El recorrido de caja negra y los resultados están en [estado](docs/estado.md).
+- Si hay un puerto o una subred en uso, revisa el diagnóstico del bootstrap y elige valores libres. Si CIVIA 1.0 sigue visible, vuelve a abrir la raíz con el gateway activo. El navegador retirará el Service Worker legado durante la actualización. Si en 1.1.0 quedó un borrador de esa cuenta, usa **Recuperar borrador anterior** cuando aparezca. [Despliegue y fallas](docs/DEPLOYMENT.md)
+- Para detener ejecuta `./scripts/run.ps1 -Stop` o `./scripts/run.sh --stop`. Para actualizar, respalda la base y las evidencias, actualiza el checkout y vuelve a ejecutar el bootstrap. Los volúmenes persisten al detener.
+
+[API REST](docs/API.md) · [Roles](docs/ROLES_Y_PERMISOS.md) · [Resiliencia](docs/RESILIENCIA.md) · [Semana 12](docs/seguridad.md) · [Semana 13](docs/arquitectura_escala.md) · [Sustentación](docs/guion_sustentacion.md)

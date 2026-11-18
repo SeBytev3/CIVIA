@@ -1,7 +1,7 @@
-# Guía del evaluador · CIVIA 1.1.0
+# Guía de evaluación · CIVIA 1.1.1
 
-Consulta [README](README.md) para el arranque desde un checkout limpio y [estado](docs/estado.md) para las comprobaciones del candidato. Usa `.\scripts\run.ps1` en Windows y `./scripts/run.sh` en Bash. `main` es la rama oficial. Para evaluar 1.1.0 confirma el estado de publicación registrado.
+Sigue [README](README.md) para un checkout limpio de la rama candidata del PR #1. Usa `./scripts/run.ps1` en Windows y `./scripts/run.sh` en Bash. El bootstrap prepara el esquema y las cuentas administrativas. Recupera el acceso en privado desde `.civia/access/admin-access.json`. Registra la cuenta ciudadana en la web.
 
-La ciudadanía accede desde la app Android o desde [la contingencia web móvil](http://localhost:5173/). El portal [administrativo](http://localhost:5173/admin/) recibe sesiones CASE_ADMIN y WEB_ADMIN. Inicializa las cuentas locales con `docker compose exec api python -m app.bootstrap_admins`. Usa `docker compose exec -T api python -m app.validate_providers` para consultar la configuración. La validación en vivo requiere autorización de cuota y sólo usa fixtures sintéticos.
+Comprueba `/health`, `/build.json`, `/api/meta` y Swagger. La raíz es la radicación web, `/app/` sirve la PWA de ciudadanía y `/admin/` el portal por rol. En Android sigue [el emparejamiento LAN](docs/CONECTIVIDAD_LAN.md). El modo local se puede evaluar con claves vacías. El preflight real requiere autorización de cuota.
 
-Prueba la salud con [health](http://localhost:8000/health), revisa [Swagger](http://localhost:8000/docs) y ejecuta la suite en aislamiento con `docker compose --profile test run --rm --build tests`. Los volúmenes de la instalación habitual se conservan. Nunca se deben copiar claves ni contraseñas a chats o evidencias. El Autopilot queda fuera del procedimiento.
+Ejecuta la suite indicada en README y consulta [estado](docs/estado.md) para conocer el entorno y alcance de cada comprobación. Mantén secretos, credenciales, trazas privadas y respaldos fuera de la entrega. Las pruebas usan proyectos aislados. El Autopilot queda fuera del procedimiento.

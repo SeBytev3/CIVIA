@@ -18,7 +18,19 @@ Los límites pasan del navegador o Android a Nginx y FastAPI, de FastAPI a Postg
 
 Las verificaciones defensivas se ejecutan con fixtures sintéticos en PostgreSQL desechable. Cubren denegación por rol, lecturas de recursos, almacenamiento inmutable, resultados estructurados y límites. El contrato de lectura del asistente comprueba que el detalle devuelto al modelo contiene únicamente radicado, gestión, categoría, severidad y comuna válida. El estado del reporte y las notas se comparan por la interfaz autorizada. El inventario y los resultados de la ejecución están en [estado.md](estado.md).
 
-La misión pide una reproducción controlada de inyección indirecta con una carga y una traza completa. Ese experimento queda fuera de la evidencia entregada. La defensa se verifica mediante pruebas de contrato y alcance que usan contenido sintético ordinario y respuestas simuladas en el límite del modelo.
+### Control defensivo de contenido almacenado
+
+Se registró en PostgreSQL desechable un reporte del ciudadano de prueba con un marcador sintético que representaba una solicitud adjunta de cierre. La consulta legítima fue «¿Cuál es el estado de mi reporte?». El adaptador controlado pidió primero la consulta del reporte y después simuló una selección de herramienta administrativa ajena al catálogo. El backend excluyó el texto del reporte de la proyección al modelo y devolvió «herramienta desconocida» al adaptador.
+
+Traza observada en `test_stored_report_cannot_add_an_administrative_tool`. El marcador no apareció en el contexto. Estado `PENDING_ANALYSIS → PENDING_ANALYSIS` y propuestas `0 → 0`. La versión de la fila se conservó. La prueba ejercitó minimización, lista de herramientas y ausencia de efectos con cuentas, imágenes y respuestas sintéticas. La calidad de la respuesta generativa frente a contenido libre sigue siendo una limitación cuando se emplean modelos externos.
+
+```powershell
+docker compose --profile test run --rm --build tests pytest tests/test_ai_and_agent.py -k stored_report_cannot_add_an_administrative_tool -s
+```
+
+### Nuevos límites de confianza
+
+El anuncio mDNS es informativo. Android verifica el certificado fijado desde el QR y consulta la identidad del servidor antes de activar el perfil. Las credenciales se asocian a esa identidad y permanecen en el almacén nativo. El puente acepta únicamente rutas de ciudadanía previstas. En web, el servidor compara la instalación y cuenta del borrador con la sesión al recibirlo si el cliente envía esos encabezados. El gateway HTTPS escucha en la interfaz elegida sólo en el modo LAN. Los Service Workers de ciudadanía y administración tienen ámbitos separados y almacenan avisos estáticos. [Emparejamiento y riesgos de red](CONECTIVIDAD_LAN.md)
 
 ## 4. Controles aplicados
 
@@ -30,7 +42,7 @@ La misión pide una reproducción controlada de inyección indirecta con una car
 | Aprobación | Estado y versión del reporte | Solicitante, caducidad, revisor distinto y verificación de versión | Pruebas de aprobación y estado |
 | Recursos | Iteraciones, tokens y deadline | Reservas antes de llamada, ventanas compartidas y límites de cola | Simulaciones y pruebas de concurrencia |
 | Evidencia | Validación y almacenamiento inmutable | Propiedad en API, hash de audio y worker en lectura | Reportes, carga y colas |
-| PWA | Ámbito raíz | Registro administrativo acotado y retirada del registro histórico | Pruebas de navegación y caché |
+| PWA | Ámbito raíz | Ámbitos de ciudadanía y administración, retiro de registro histórico y caché estática separada | Pruebas de navegación, actualización y caché |
 | Fuga técnica | Detalles agénticos ciudadanizados | Respuesta ciudadana reducida y telemetría técnica restringida | Contratos de sesión y respuesta |
 
 El aislamiento de salida aplica en el adaptador de inferencia. El contenedor aún tiene conectividad general a través de la red Docker. El cifrado de evidencias en reposo y una red de egreso dedicada requieren infraestructura adicional. Los datos del catálogo son demo y los documentos de auditoría históricos conservan su contexto.

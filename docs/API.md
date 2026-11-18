@@ -1,10 +1,12 @@
-# API REST · CIVIA 1.1.0
+# API REST · CIVIA 1.1.1
 
 Consulta [Swagger](http://localhost:8000/docs) y [OpenAPI JSON](http://localhost:8000/openapi.json) en la instalación local. La API mantiene una sola base PostgreSQL para los tres perfiles. La respuesta de alta distingue la persistencia de la evidencia del diagnóstico asíncrono.
 
 La sesión web usa cookie HttpOnly y header `X-CSRF-Token` en mutaciones posteriores al login. Android usa el modo `X-Session-Mode: bearer` y `Authorization: Bearer …`. Las sesiones de administración usan cookie. Los roles y permisos constan en [ROLES_Y_PERMISOS.md](ROLES_Y_PERMISOS.md).
 
-`POST /api/reports` recibe multipart con descripción, latitud, longitud y fotografía. Admite título y nota de voz opcionales. Usa `Idempotency-Key` con la misma carga al reintentar. Los datos propios y el catálogo identificado se consultan bajo sesión. Para el mapa público usa únicamente las rutas minimizadas.
+`POST /api/reports` recibe multipart con descripción, latitud, longitud y fotografía. Admite título y nota de voz opcionales. Usa `Idempotency-Key` con la misma carga al reintentar. Los clientes de CIVIA también envían `X-Civia-Account` y `X-Civia-Installation` para vincular el borrador al usuario y al servidor. Si el par ya no corresponde a la sesión activa, la API devuelve `409 REPORT_SCOPE_CHANGED` antes de guardar evidencia. Los datos propios y el catálogo identificado se consultan bajo sesión. El mapa público usa las rutas minimizadas.
+
+`GET /api/meta` identifica el servidor con `version`, `commit`, `installation_id` y `protocol`. El identificador de instalación se conserva al reiniciar o actualizar PostgreSQL. Esta ruta se complementa con `/build.json` en el gateway para validar la procedencia del frontend.
 
 `POST /api/agent/query` acepta una pregunta de dominio y devuelve la respuesta, la referencia de aprobación si corresponde y el estado de operación propio cuando aplique. Los detalles de proveedor y tokens están en observabilidad WEB_ADMIN.
 
@@ -40,6 +42,7 @@ La sesión web usa cookie HttpOnly y header `X-CSRF-Token` en mutaciones posteri
 | POST | `/api/auth/logout` | Sesión y alcance del recurso | 204 |
 | POST | `/api/auth/register` | Público | 201 |
 | GET | `/api/auth/session` | Sesión y alcance del recurso | 200 |
+| GET | `/api/meta` | Público | 200 |
 | GET | `/api/operations/{operation_id}` | Sesión y alcance del recurso | 200 |
 | GET | `/api/public/reports` | Público | 200 |
 | GET | `/api/public/reports/stats` | Público | 200 |
@@ -55,6 +58,6 @@ La sesión web usa cookie HttpOnly y header `X-CSRF-Token` en mutaciones posteri
 | GET | `/api/reports/{report_id}/events` | Sesión y alcance del recurso | 200 |
 | GET | `/api/reports/{report_id}/photo` | Sesión y alcance del recurso | 200 |
 | PATCH | `/api/reports/{report_id}/status` | CASE_ADMIN o WEB_ADMIN | 200 |
-| GET | `/health` | Público | 200 |
+| GET | `/health` | Público | 200 o 503 |
 
-**40 operaciones**.
+**41 operaciones**.

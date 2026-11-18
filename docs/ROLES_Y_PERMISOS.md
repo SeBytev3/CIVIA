@@ -11,9 +11,9 @@
 | Usuarios y roles | — | — | Crea, cambia rol, activa, desactiva y restablece |
 | Auditoría, cola y simulación | — | — | Acceso técnico |
 
-Las contraseñas se almacenan con Argon2id. FastAPI resuelve el rol vigente desde la sesión y la cuenta activa. El portal usa cookies HttpOnly y SameSite con validación CSRF en las mutaciones. Activa `AUTH_COOKIE_SECURE=1` detrás de HTTPS. Android usa una credencial opaca revocable guardada con Android Keystore. La revocación y desactivación cortan el acceso. Los identificadores de recurso se verifican en servidor.
+Las contraseñas se almacenan con Argon2id. FastAPI resuelve el rol vigente desde la sesión y la cuenta activa. El portal usa cookies HttpOnly y SameSite con validación CSRF en las mutaciones. La API aplica `Secure` cuando el gateway de confianza recibe la sesión por HTTPS. Android usa una credencial opaca revocable guardada con Android Keystore. La revocación y desactivación cortan el acceso. Los identificadores de recurso se verifican en servidor.
 
-El asistente lee una vista PostgreSQL minimizada con filtros de propiedad. Las solicitudes de cambio tienen solicitante, versión del reporte y vencimiento. Otra persona con rol administrativo decide. Las filas históricas sin propietario siguen conservadas bajo administración. El mapa público redondea ubicación y omite descripción, contacto, evidencia, notas e identificadores privados.
+El asistente lee una vista PostgreSQL minimizada con filtros de propiedad. Los listados y conteos usan por defecto los reportes de la cuenta. El catálogo sintético se consulta explícitamente como un alcance separado. Las solicitudes de cambio tienen solicitante, versión del reporte y vencimiento. Otra persona con rol administrativo decide. Las filas históricas sin propietario siguen conservadas bajo administración. El mapa público redondea ubicación y omite descripción, contacto, evidencia, notas e identificadores privados.
 
 `ADMIN_TOKEN` conserva su presencia en instalaciones existentes y carece de autoridad en las rutas RBAC. Para copiarlo localmente durante mantenimiento histórico, sin escribir su valor en la terminal:
 
@@ -21,4 +21,4 @@ El asistente lee una vista PostgreSQL minimizada con filtros de propiedad. Las s
 Get-Content .env | Select-String '^ADMIN_TOKEN=' | ForEach-Object { $_.Line.Split('=', 2)[1].Trim() } | Set-Clipboard
 ```
 
-Para evaluar el portal se usan las cuentas generadas por `python -m app.bootstrap_admins`.
+En una instalación nueva el bootstrap prepara las cuentas. Recupera el acceso en `.civia/access/admin-access.json` en privado. El esquema TLS del gateway se acepta desde la dirección explícita configurada.

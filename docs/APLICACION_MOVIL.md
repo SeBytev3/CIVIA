@@ -1,11 +1,14 @@
-# Aplicación móvil ciudadana
+# Interfaces de CIVIA 1.1.1
 
-CIVIA empaqueta el frontend ciudadano React y TypeScript con Capacitor. Las secciones son Inicio, Reportar, Mis reportes, Asistente y Perfil. El usuario elige cámara o galería, usa geolocalización o un punto manual, y puede incluir una nota de voz de hasta 60 s y 5 MB. El servidor valida los archivos y devuelve el radicado después de persistir el reporte.
+| Entrada | Alcance |
+| --- | --- |
+| `/` | Web de radicación con encabezado institucional. Incluye autenticación, selección de ubicación, foto, audio opcional, confirmación y radicado. Funciona en escritorio y móvil. |
+| `/app/` | Ciudadanía instalable. Inicio, mapa, reportes propios, seguimiento, asistente y perfil. Manifiesto, iconos y Service Worker propios. |
+| Android | Empaqueta la experiencia ciudadana y establece el destino de red tras el emparejamiento. |
+| `/admin/` | Portal administrativo con su propio ámbito PWA. |
 
-El borrador se conserva por cuenta en IndexedDB con los archivos y su clave de idempotencia. Ante una interrupción, la interfaz mantiene explícito el envío pendiente y conserva la clave hasta confirmar la recepción. El reintento requiere abrir la aplicación y mantener una sesión válida.
+Los indicadores de modo nativo e instalado seleccionan la presentación. La API autoriza por sesión, rol y propiedad. Web y PWA usan el API del mismo origen. Android guarda su sesión en Android Keystore y limita sus peticiones a la instalación emparejada.
 
-La contingencia web está en `/`. En escritorio el formulario muestra «Para registrar un reporte, utiliza CIVIA desde tu dispositivo móvil». Esto es una regla de experiencia de usuario. La autorización efectiva del backend se basa en sesión CITIZEN y propiedad. Una pantalla pequeña o el User-Agent carecen de valor como atestación.
+Los borradores se guardan en IndexedDB con archivos y clave de idempotencia, bajo la cuenta y la instalación correspondientes. El borrador se mantiene hasta recibir confirmación. El fallo de red permite reintentar al recuperar la sesión y la conexión.
 
-La PWA está bajo `/admin/`. Su service worker se limita a ese ámbito y la raíz retira el registro histórico. La experiencia administrativa tiene login, bandeja de casos y acciones según rol. El caché omite sesiones, API, evidencia privada y telemetría. Una operación sólo se confirma con respuesta del servidor.
-
-Consulta [ANDROID_BUILD.md](ANDROID_BUILD.md) para el APK y conectividad.
+La PWA ciudadana se instala desde `/app/` en un contexto seguro. La raíz enlaza el flujo de instalación. El Service Worker legado se retira al actualizar CIVIA y conserva los borradores. Los ámbitos instalables almacenan sólo su aviso estático de desconexión. [Conectividad](CONECTIVIDAD_LAN.md) · [Pruebas y límites](estado.md)
