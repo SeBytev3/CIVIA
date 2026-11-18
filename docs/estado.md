@@ -6,7 +6,7 @@ Registro del candidato de Momento 3 · 17 de noviembre de 2026 · hora de Bogot�
 
 - Base verificada al comenzar en `main` y `origin/main` con SHA `0180b82a2a6a2b53f76bb3f648d66ffe12c92293`. Rama candidata `feature/civia-v1.1-mobile-security-resilience`. La referencia histórica `v1.0.0-academic` apuntaba a `3b74a580949d240d44f9fa92c48f6a8a1fcfc442`.
 - Windows 11, Docker Desktop y PostgreSQL 17. Primera copia fresca compiló y detectó una colisión entre la IP reservada de Nginx y la asignación automática de Docker. Se asignó un rango dinámico separado. Segunda copia fresca con volúmenes nuevos confirmó migraciones, API, PostgreSQL, Nginx y worker saludables mediante `.\scripts\run.ps1`.
-- Smoke real en esa instalación. Registro y sesiones de tres roles, lectura administrativa autorizada, radicación durante simulación TOTAL, fotografía accesible al dueño, reenvío idempotente con un único reporte y trabajo reprogramado. La recepción observada de un reporte fue 186,95 ms. Se restauró el modo NONE. Inferencia externa pendiente de validación privada.
+- Smoke real en esa instalación. Registro y sesiones de tres roles, lectura administrativa autorizada, radicación durante simulación TOTAL, fotografía accesible al dueño, reenvío idempotente con un único reporte y trabajo reprogramado. La recepción observada de un reporte fue 186,95 ms. Se restauró el modo NONE. Este smoke se ejecutó en modo local.
 - En integración web, Playwright cubrió sesión real, GPS de navegador, imagen sintética, radicado, lectura como titular y revocación al cerrar sesión. Seis pruebas herméticas de interfaz cubrieron rutas de roles, aislamiento de PWA y borradores. Consulta el [frontend](../frontend/README.md).
 - Las pruebas herméticas de worker comprobaron retoma de lease, ausencia de efecto tardío, backoff, DLQ, reencolado por WEB_ADMIN, deduplicación, contrapresión y roles PostgreSQL separados. La recuperación de análisis empleó adaptadores simulados.
 - El inventario generado contiene 40 operaciones de [API](API.md). El formulario y el protocolo de autenticación se verificaron por las rutas normales de FastAPI.
@@ -20,6 +20,18 @@ Registro del candidato de Momento 3 · 17 de noviembre de 2026 · hora de Bogot�
 - `npm run typecheck`, `npm run build` y `npm run test:e2e` pasaron. Seis pruebas de Playwright y un smoke de navegador conectado a la API. Compilación de Python y revisión de espacios Git pasaron.
 - `pip check` y `pip-audit` de las dependencias Python resueltas pasaron tras corregir FastAPI/Starlette, Pillow, python-multipart y pytest. Pytest queda sólo en la imagen de pruebas.
 - `npm audit --omit=dev` reportó cero hallazgos. La auditoría completa reportó cuatro entradas vinculadas a Picomatch y la cadena de Vite. La dependencia afectada queda en la construcción y el servidor de desarrollo en loopback. Nginx sirve el resultado estático. El aviso [GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf) no indicaba una versión corregida al verificar.
+
+## Preflight autorizado con proveedores reales
+
+Se ejecutó `python -m app.validate_providers --live --json` en el clon aislado y se hizo una prueba complementaria de visión con una imagen sintética. Los registros de validación quedaron en PostgreSQL de ese clon.
+
+| Proveedor y modelo | Resultado |
+| --- | --- |
+| Gemini · `gemini-3.8-flash` | El catálogo autenticado incluyó el modelo. El ping de texto agotó su plazo y el proveedor denegó las solicitudes de herramientas, JSON estructurado y visión. Sin capacidades de generación habilitadas en el preflight. |
+| Groq · `qwen/qwen3.8-27b` | Texto, tool calling, JSON estructurado y visión más JSON validados. El modelo identificó el color de la imagen sintética. |
+| Groq · `whisper-large-v3-turbo` | El endpoint aceptó el WAV sintético y devolvió el campo de texto esperado. La calidad de transcripción de habla queda pendiente de prueba. |
+
+El respaldo visual se configura con `AI_GROQ_VISION_MODEL=qwen/qwen3.8-27b` y requiere registrar la modalidad mediante el preflight autorizado en la base del despliegue correspondiente. La recuperación del worker y el recorrido de radicación se verificaron en las pruebas herméticas. El costo de la inferencia del preflight no se midió.
 
 ## Mediciones locales
 
@@ -49,7 +61,7 @@ La suite dorada repitió tres veces cinco preguntas. Se revisaron manualmente la
 
 Se retiró la conexión PostgreSQL predeterminada que coincidía con una configuración histórica local. El candidato fresco usa secretos aleatorios para cada identidad de servicio. La rotación de la credencial existente queda pendiente de una migración privada con respaldo.
 
-La validación en vivo de Gemini, Groq y sus modelos requiere aprobación de cuota. Los resultados locales usan fixtures. Las comprobaciones defensivas verificaron permisos, minimización, límites y efectos en un entorno de datos sintéticos. La reproducción de explotación queda fuera de la evidencia. La prueba de Android en un teléfono físico y el despliegue público quedan pendientes. Los resultados históricos se conservan a continuación.
+Queda pendiente habilitar y verificar la generación de Gemini en el proyecto de Google. Las mediciones de capacidad locales usan fixtures. Las comprobaciones defensivas verificaron permisos, minimización, límites y efectos en un entorno de datos sintéticos. La reproducción de explotación queda fuera de la evidencia. La prueba de Android en un teléfono físico y el despliegue público quedan pendientes. Los resultados históricos se conservan a continuación.
 
 ---
 
