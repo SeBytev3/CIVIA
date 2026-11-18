@@ -15,6 +15,7 @@ from PIL import Image, UnidentifiedImageError
 from starlette.requests import Request
 
 from app.config import settings
+from app.observability import sanitize_secret_text
 
 
 class CitizenValidationError(Exception):
@@ -31,6 +32,7 @@ _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _CO_PHONE_RE = re.compile(r"\b(?:3\d{2}[\s.-]?\d{3}[\s.-]?\d{4})\b")
+_EXTERNAL_LINK_RE = re.compile(r"(?i)(?:https?://|www\.|mailto:)[^\s<>\])]+")
 
 
 def sanitize_text(
@@ -62,6 +64,14 @@ def sanitize_text(
             f"El campo '{field_name}' supera el máximo permitido de {max_len} caracteres."
         )
     return cleaned
+
+
+def sanitize_generated_text(value: str | None, max_length: int) -> str:
+    """Deja texto plano minimizado para diagnósticos y transcripciones."""
+    cleaned = sanitize_secret_text(value) or ""
+    cleaned = _EXTERNAL_LINK_RE.sub("[ENLACE_OMITIDO]", cleaned)
+    cleaned = sanitize_text(cleaned, field_name="texto generado", max_len=5000, required=False)
+    return cleaned[:max_length].strip()
 
 
 def validate_coordinates(latitude: float, longitude: float) -> tuple[float, float, bool]:
@@ -339,6 +349,7 @@ def validate_and_store_audio(
         "audio_mime": mime_type,
         "audio_size_bytes": len(raw_bytes),
         "audio_duration_seconds": max(0.1, duration_seconds),
+        "audio_sha256": hashlib.sha256(raw_bytes).hexdigest(),
     }
 
 

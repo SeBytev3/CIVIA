@@ -1,0 +1,18 @@
+{
+  "id": "/app/",
+  "name": "CIVIA Ciudadano",
+  "short_name": "CIVIA",
+  "description": "Registra y consulta reportes ciudadanos en Cali y el Valle del Cauca.",
+  "start_url": "/app/",
+  "scope": "/app/",
+  "display": "standalone",
+  "background_color": "#f1f5f4",
+  "theme_color": "#0f4c5c",
+  "lang": "es-CO",
+  "icons": [
+    { "src": "/app/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/app/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/app/maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "/app/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

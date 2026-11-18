@@ -1,60 +1,127 @@
+x-backend: &backend
+  image: ${COMPOSE_PROJECT_NAME:-civia}-backend:local
+  build:
+    context: ./backend
+    args:
+      CIVIA_BUILD_SHA: ${CIVIA_BUILD_SHA:-unknown}
+  restart: unless-stopped
+
+x-inference: &inference
+  GOOGLE_API_KEY_PRIMARY: ${GOOGLE_API_KEY_PRIMARY:-}
+  GROQ_API_KEY: ${GROQ_API_KEY:-}
+  AI_PRIMARY_MODEL: ${AI_PRIMARY_MODEL:-gemini-3.8-flash}
+  AI_FALLBACK_MODEL: ${AI_FALLBACK_MODEL:-qwen/qwen3.8-27b}
+  AI_GROQ_VISION_MODEL: ${AI_GROQ_VISION_MODEL-qwen/qwen3.8-27b}
+  AI_GROQ_AUDIO_MODEL: ${AI_GROQ_AUDIO_MODEL:-whisper-large-v3-turbo}
+  AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-15}
+  AI_PROVIDER_RPM: ${AI_PROVIDER_RPM:-12}
+  AI_PROVIDER_TPM: ${AI_PROVIDER_TPM:-120000}
+  AI_DAILY_REQUESTS: ${AI_DAILY_REQUESTS:-300}
+  AI_DAILY_TOKENS: ${AI_DAILY_TOKENS:-1800000}
+  AI_SHARED_RUNTIME: "1"
+
 services:
   db:
     image: postgres:17-alpine
+    restart: unless-stopped
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-civia}
       POSTGRES_USER: ${POSTGRES_USER:-civia}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_dev_change_me}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Ejecute el script de arranque}
     volumes:
       - civia_postgres:/var/lib/postgresql/data
     networks:
-      civia_net:
-        ipv4_address: ${CIVIA_DB_IP:-172.28.0.10}
+      - civia_net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
       timeout: 3s
       retries: 12
-  api:
-    build: ./backend
+
+  migrate:
+    <<: *backend
+    restart: "no"
+    command: ["python", "-m", "app.db_bootstrap"]
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://civia:local_dev_change_me@db:5432/civia}
-      GOOGLE_API_KEY_PRIMARY: ${GOOGLE_API_KEY_PRIMARY:-}
-      GOOGLE_API_KEY_SECONDARY: ${GOOGLE_API_KEY_SECONDARY:-}
-      GROQ_API_KEY: ${GROQ_API_KEY:-}
-      AI_PRIMARY_MODEL: ${AI_PRIMARY_MODEL:-gemini-3.8-flash}
-      AI_FALLBACK_MODEL: ${AI_FALLBACK_MODEL:-qwen/qwen3.8-27b}
-      AI_TERTIARY_MODEL: ${AI_TERTIARY_MODEL:-gemini-3.5-flash-lite}
-      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-15}
-      AI_MAX_RETRIES: ${AI_MAX_RETRIES:-2}
-      AGENT_MAX_ITERATIONS: ${AGENT_MAX_ITERATIONS:-5}
-      AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-6000}
-      FALLA_FORZADA: ${FALLA_FORZADA:-}
-      AUTO_SEED_SYNTHETIC: ${AUTO_SEED_SYNTHETIC:-true}
-      FORWARDED_ALLOW_IPS: ""
-      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-172.28.0.2}
-      ADMIN_TOKEN: ${ADMIN_TOKEN:?Configure ADMIN_TOKEN en .env con un secreto robusto (>=24 caracteres)}
-    volumes:
-      - civia_uploads:/app/data/uploads
-      - ./eval:/app/eval
-      - ./frontend:/frontend:ro
-    ports:
-      - "${API_PORT_BINDING:-127.0.0.1:8000}:8000"
+      MIGRATION_DATABASE_URL: ${DATABASE_URL:?Ejecute el script de arranque}
+      DATABASE_URL: ${APP_DATABASE_URL:?Ejecute el script de arranque}
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Ejecute el script de arranque}
+      WORKER_DATABASE_URL: ${WORKER_DATABASE_URL:?Ejecute el script de arranque}
     depends_on:
       db:
         condition: service_healthy
     networks:
-      civia_net:
-        ipv4_address: ${CIVIA_API_IP:-172.28.0.11}
+      - civia_net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  api:
+    <<: *backend
+    environment:
+      <<: *inference
+      DATABASE_URL: ${APP_DATABASE_URL:?Ejecute el script de arranque}
+      AGENT_DATABASE_URL: ${AGENT_DATABASE_URL:?Ejecute el script de arranque}
+      CIVIA_EXTERNAL_MIGRATIONS: "1"
+      AGENT_MAX_ITERATIONS: ${AGENT_MAX_ITERATIONS:-5}
+      AGENT_MAX_TOKENS: ${AGENT_MAX_TOKENS:-6000}
+      AUTO_SEED_SYNTHETIC: ${AUTO_SEED_SYNTHETIC:-true}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173,https://localhost,http://localhost}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-0}
+      TRUSTED_PROXIES: ${CIVIA_FRONTEND_IP:-172.28.0.2}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:?Ejecute el script de arranque}
+    volumes:
+      - civia_uploads:/app/data/uploads
+    ports:
+      - "127.0.0.1:${CIVIA_API_PORT:-8000}:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - civia_net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health',timeout=3)"]
       interval: 10s
       timeout: 4s
       retries: 8
+
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.analysis_worker"]
+    environment:
+      <<: *inference
+      DATABASE_URL: ${WORKER_DATABASE_URL:?Ejecute el script de arranque}
+      WORKER_DATABASE_URL: ${WORKER_DATABASE_URL:?Ejecute el script de arranque}
+    volumes:
+      - civia_uploads:/app/data/uploads:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - civia_net
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.analysis_worker", "--healthcheck"]
+      interval: 10s
+      timeout: 4s
+      retries: 8
+
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        CIVIA_BUILD_SHA: ${CIVIA_BUILD_SHA:-unknown}
+    restart: unless-stopped
     ports:
-      - "${FRONTEND_PORT_BINDING:-127.0.0.1:5173}:80"
+      - "127.0.0.1:${CIVIA_HTTP_PORT:-5173}:80"
     depends_on:
       api:
         condition: service_healthy
@@ -67,6 +134,39 @@ services:
       timeout: 4s
       retries: 6
 
+  test-db:
+    profiles: ["test"]
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: civia_test_owner
+      POSTGRES_PASSWORD: disposable_test_only
+      POSTGRES_DB: postgres
+    tmpfs:
+      - /var/lib/postgresql/data
+    networks: [test_net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U civia_test_owner -d postgres"]
+      interval: 3s
+      timeout: 2s
+      retries: 15
+
+  tests:
+    profiles: ["test"]
+    build:
+      context: ./backend
+      target: test
+    command: ["pytest", "-m", "not live", "-v"]
+    environment:
+      DATABASE_URL: postgresql://civia_test_owner:disposable_test_only@test-db:5432/postgres
+      AI_SHARED_RUNTIME: "0"
+    depends_on:
+      test-db:
+        condition: service_healthy
+    networks: [test_net]
+    volumes:
+      - ./frontend:/frontend:ro
+      - ./eval:/app/eval:ro
+
 networks:
   civia_net:
     driver: bridge
@@ -75,6 +175,9 @@ networks:
       config:
         - subnet: ${CIVIA_SUBNET:-172.28.0.0/16}
           gateway: ${CIVIA_GATEWAY:-172.28.0.1}
+          ip_range: ${CIVIA_DYNAMIC_RANGE:-172.28.1.0/24}
+  test_net:
+    internal: true
 volumes:
   civia_postgres:
   civia_uploads:

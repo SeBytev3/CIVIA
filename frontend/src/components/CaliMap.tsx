@@ -1,9 +1,10 @@
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
-import type { ReportCategory, ReportItem } from '../types';
+import type { PublicMapItem, ReportCategory, ReportItem } from '../types';
 
 interface CaliMapProps {
   reports: ReportItem[];
+  publicPoints?: PublicMapItem[];
   onSelectReport?: (report: ReportItem) => void;
   selectable?: boolean;
   selectedLat?: number;
@@ -54,6 +55,7 @@ const PICKER_ICON = L.divIcon({
 
 export function CaliMap({
   reports,
+  publicPoints,
   onSelectReport,
   selectable = false,
   selectedLat,
@@ -72,7 +74,7 @@ export function CaliMap({
     const map = L.map(containerRef.current, {
       center: [3.4372, -76.5225],
       zoom: 12,
-      scrollWheelZoom: true,
+      scrollWheelZoom: false,
     });
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -83,8 +85,11 @@ export function CaliMap({
     const layerGroup = L.layerGroup().addTo(map);
     mapRef.current = map;
     markersLayerRef.current = layerGroup;
+    const resize = new ResizeObserver(() => map.invalidateSize({ pan: false, debounceMoveend: true }));
+    resize.observe(containerRef.current);
 
     return () => {
+      resize.disconnect();
       map.remove();
       mapRef.current = null;
       markersLayerRef.current = null;
@@ -114,6 +119,13 @@ export function CaliMap({
     const layer = markersLayerRef.current;
     if (!layer) return;
     layer.clearLayers();
+
+    publicPoints?.forEach((point) => {
+      const category = point.category || 'PENDIENTE';
+      L.marker([point.latitude, point.longitude], { icon: createPinIcon(CATEGORY_COLORS[category] || CATEGORY_COLORS.PENDIENTE, false) })
+        .bindTooltip({ HUECO: 'Hueco vial', BASURAS: 'Basuras o escombros', TALA: 'Tala arbórea', QUEMA: 'Quema', OTRO: 'Otro incidente', PENDIENTE: 'Incidente' }[category] || 'Incidente')
+        .addTo(layer);
+    });
 
     reports.forEach((rep) => {
       const cat = rep.effective_category || 'PENDIENTE';
@@ -152,7 +164,7 @@ export function CaliMap({
       marker.bindPopup(wrapper);
       marker.addTo(layer);
     });
-  }, [reports, onSelectReport]);
+  }, [reports, publicPoints, onSelectReport]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -187,9 +199,16 @@ export function CaliMap({
       <div
         ref={containerRef}
         style={{ height, width: '100%' }}
-        aria-label="Mapa interactivo de reportes ciudadanos en Santiago de Cali"
+        role="region"
+        aria-label={selectable ? 'Mapa para elegir la ubicación del incidente' : 'Mapa interactivo de reportes ciudadanos en Santiago de Cali'}
       />
-      <div className="civia-map-legend" aria-label="Convenciones del mapa">
+      {selectable ? <div className="map-picker-controls actions">
+        <p>Elige un punto o desplaza el mapa para usar su centro.</p>
+        <button type="button" className="secondary" onClick={() => {
+          const center = mapRef.current?.getCenter();
+          if (center) onPickCoords?.(Number(center.lat.toFixed(6)), Number(center.lng.toFixed(6)));
+        }}>Usar centro del mapa</button>
+      </div> : <div className="civia-map-legend" aria-label="Convenciones del mapa">
         <span>
           <i style={{ background: CATEGORY_COLORS.HUECO }} /> Huecos viales
         </span>
@@ -205,7 +224,7 @@ export function CaliMap({
         <span>
           <i style={{ background: CATEGORY_COLORS.PENDIENTE }} /> En análisis / Otro
         </span>
-      </div>
+      </div>}
     </div>
   );
 }

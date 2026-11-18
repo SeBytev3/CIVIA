@@ -86,6 +86,58 @@ def cleanup_tracked_test_records() -> None:
             conn.commit()
 
 
+def create_authenticated_client(role="CITIZEN", *, mode="cookie", raise_server_exceptions=True):
+    """Crea una identidad sintética y usa el mismo inicio de sesión que el cliente real."""
+    import secrets
+
+    from fastapi.testclient import TestClient
+
+    from app.identity import AccountRegistration, Role, hash_password, insert_user
+    from app.main import app
+
+    assert_disposable_test_db(settings.DATABASE_URL)
+    account = AccountRegistration(
+        name="Cuenta sintética de prueba",
+        email=f"{uuid.uuid4().hex}@example.test",
+        password=secrets.token_urlsafe(24),
+    )
+    with get_conn() as conn, conn.cursor() as cur:
+        insert_user(cur, account, hash_password(account.password), Role(role))
+        conn.commit()
+    client = TestClient(
+        app,
+        client=(f"2001:db8::{secrets.token_hex(2)}", 50000),
+        raise_server_exceptions=raise_server_exceptions,
+    )
+    result = client.post(
+        "/api/auth/login",
+        json={"email": account.email, "password": account.password},
+        headers={"X-Session-Mode": mode},
+    )
+    assert result.status_code == 200
+    session = result.json()
+    if mode == "bearer":
+        client.headers["Authorization"] = f"Bearer {session['token']}"
+    else:
+        client.headers["X-CSRF-Token"] = session["csrf_token"]
+    return client, session["user"]
+
+
+@pytest.fixture
+def citizen_client():
+    return create_authenticated_client()[0]
+
+
+@pytest.fixture
+def case_admin_client():
+    return create_authenticated_client("CASE_ADMIN")[0]
+
+
+@pytest.fixture
+def web_admin_client():
+    return create_authenticated_client("WEB_ADMIN")[0]
+
+
 @pytest.fixture(scope="session", autouse=True)
 def initialize_isolated_test_db():
     assert_disposable_test_db(settings.DATABASE_URL)
@@ -167,13 +219,15 @@ def guard_no_external_network_calls(monkeypatch, request):
     orig_send = httpx.Client.send
     unexpected_attempts = []
 
-    def guarded_send(self, req, *args, **kwargs):
-        host = getattr(req.url, "host", "")
+    test_name = request.node.name
+
+    def guarded_send(self, request, *args, **kwargs):
+        host = getattr(request.url, "host", "")
         if host in ("generativelanguage.googleapis.com", "api.groq.com"):
             if not isinstance(getattr(self, "_transport", None), httpx.MockTransport):
-                unexpected_attempts.append({"test": request.node.name, "host": host, "url": str(req.url)})
+                unexpected_attempts.append({"test": test_name, "host": host})
                 raise RuntimeError(f"Intento de llamada HTTP externa no permitida hacia {host} en prueba hermética.")
-        return orig_send(self, req, *args, **kwargs)
+        return orig_send(self, request, *args, **kwargs)
 
     monkeypatch.setattr(httpx.Client, "send", guarded_send)
     yield

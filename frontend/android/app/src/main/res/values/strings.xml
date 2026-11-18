@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">CIVIA</string>
+    <string name="title_activity_main">CIVIA</string>
+    <string name="package_name">co.edu.ucc.civia</string>
+    <string name="custom_url_scheme">co.edu.ucc.civia</string>
+</resources>

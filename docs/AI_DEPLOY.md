@@ -1,117 +1,20 @@
-# CIVIA — Protocolo de Despliegue y Verificación Asistido por IA
+# Configuración de IA
 
-**Proyecto Académico de Ingeniería de Aplicaciones con IA — Universidad Cooperativa de Colombia**  
-**Equipo:** Stefania Córdoba y Sebastian Espinosa (Momento Evaluativo 2)  
-**Entorno Oficial:** Local Docker Orquestado (`main`) · **API REST:** FastAPI 0.115+ / Python 3.13 / PostgreSQL 17
-
-Este documento describe el procedimiento operativo estándar para agentes de inteligencia artificial y evaluadores automáticos (**Claude Code, Gemini CLI, Antigravity, ChatGPT, Codex**) que requieran clonar, desplegar y auditar la plataforma CIVIA sin intervención humana.
-
----
-
-## 1. Verificación de Pre-requisitos del Sistema Anfitrión
-El anfitrión debe contar con Docker y Git:
-```powershell
-docker --version
-git --version
-```
-*No se requiere tener instalados Python ni Node.js en la máquina anfitriona.*
-
----
-
-## 2. Despliegue en un Solo Paso
-Desde la raíz del repositorio en la rama `main`:
+CIVIA usa Gemini como principal y Groq como respaldo. Configura `GOOGLE_API_KEY_PRIMARY` y `GROQ_API_KEY` mediante el configurador privado. Las variables antiguas pueden quedar en tu `.env` personal por compatibilidad de archivo. Compose sólo transmite las dos vigentes.
 
 ```powershell
-# En Windows 11 (PowerShell):
-.\scripts\run.ps1
+.\scripts\setup_ai_keys.ps1
+docker compose exec -T api python -m app.validate_providers
 ```
 
-```bash
-# En Linux / macOS / Bash:
-chmod +x ./scripts/run.sh && ./scripts/run.sh
-```
+Autoriza el uso de cuota antes de ejecutar `docker compose exec -T api python -m app.validate_providers --live`. El preflight comprueba texto y, con fixtures generados, tool calling, JSON y visión cuando exista modelo configurado. Groq audio usa una entrada WAV de prueba. La comprobación de audio mide compatibilidad con la modalidad. La calidad de transcripción requiere habla real autorizada. Las capacidades exitosas quedan vinculadas a proveedor, modelo y huella de credencial en PostgreSQL. La rotación obliga a repetirlas. La validación normal informa configuración sin consumir cuota.
 
-El script se encarga de forma completamente autónoma de:
-- Verificar que el motor de Docker esté en ejecución y que los puertos `8000` y `5173` estén libres.
-- Inicializar `.env` a partir de `.env.example` si no existe.
-- Generar contraseñas seguras y un `ADMIN_TOKEN` criptográfico único mediante CSPRNG de 32 bytes (base64url) sin imprimir secretos en pantalla.
-- Construir las imágenes Docker de backend (`civia-api`) y frontend (`civia-frontend`).
-- Levantar la base de datos `civia-db` en PostgreSQL 17.
-- Aplicar migraciones SQL automáticas e idempotentes.
-- Sembrar de forma inmutable el catálogo de 10 reportes sintéticos de prueba con evidencias fotorrealistas en Cali (`CIV-2026-DEMO0001` a `CIV-2026-DEMO0010`).
+`AI_GROQ_VISION_MODEL` propone `qwen/qwen3.8-27b`, validado previamente con una imagen sintética. Para activar cada modalidad con la propia credencial, completa el preflight autorizado en la instalación de evaluación. Un valor explícitamente vacío en `.env` desactiva ese modelo de visión. Un trabajo con foto queda pendiente de proveedor apto o va a revisión conforme a la causa y al presupuesto de reintentos.
 
----
+Si el catálogo autenticado lista el modelo de Gemini, el preflight aún requiere una generación exitosa para registrar la capacidad de texto. Si esa primera generación falla, omite modalidades adicionales en ese proveedor. [Resultados por modalidad](estado.md)
 
-## 3. Matriz de Endpoints y Verificación de Servicios
-| Componente | Dirección | Validación esperada |
-|---|---|---|
-| Frontend PWA | `http://localhost:5173` | Código HTTP 200, interfaz React con mapa interactivo de Cali |
-| Backend API | `http://localhost:8000/health` | `{"status":"ok","phase":"mvp","db":{"connected":true,"schema_ready":true}}` |
-| Documentación Swagger | `http://localhost:8000/docs` | Código HTTP 200, esquema OpenAPI interactivo (ver [docs/API.md](API.md)) |
+El `403 PERMISSION_DENIED` observado también se repitió durante el cierre de 1.1.1. Verifica en Google AI Studio el tipo de credencial, el proyecto asociado y sus permisos de generación. Google documenta el cambio a Auth keys y posibles restricciones de proyecto. El catálogo visible no identifica qué política produjo el rechazo. El recorrido de caja negra con Groq verificó transcripción de habla sintética, persistencia de diagnóstico y una consulta con herramientas además del preflight. [Errores de Gemini](https://ai.google.dev/gemini-api/docs/generate-content/api-errors) · [Credenciales de Gemini](https://ai.google.dev/gemini-api/docs/api-key)
 
----
+Los adaptadores restringen los destinos y rutas de red, usan TLS, deshabilitan redirecciones y acotan el tamaño de la respuesta. El worker envía fotografía y contexto de incidente minimizado. La consulta agéntica usa herramientas tipadas con lecturas minimizadas. PostgreSQL registra reservas compartidas antes de cada llamada. Las referencias de modalidad están en [Gemini](https://ai.google.dev/api/generate-content), [visión de Groq](https://console.groq.com/docs/vision) y [voz de Groq](https://console.groq.com/docs/speech-to-text).
 
-## 4. Validación Automatizada del Flujo Ciudadano (Playwright E2E)
-Un agente evaluador puede verificar el flujo de extremo a extremo de forma desatendida:
-
-```powershell
-cd frontend
-npm install
-npm run test:e2e
-```
-
-Este script ejecuta dos pruebas completas:
-1. **Flujo de Fotografía Real de Cámara en Vivo:** Activa cámara web emulada (`getUserMedia`), captura fotograma a canvas, envía la foto real JPEG del dispositivo a la API, recibe radicado, verifica `is_synthetic = false`, comprueba que la imagen se sirva por HTTP 200 y confirma persistencia en PostgreSQL tras recarga del navegador.
-2. **Flujo de Muestra Sintética Oficial:** Selecciona muestra oficial del catálogo, comprueba el distintivo exterior de simulación ética, envía a la API, recibe radicado, verifica que el backend impone `is_synthetic = true`, comprueba que se visualice con `objectFit: contain` sin recortes, y confirma persistencia tras recarga.
-
-**Resultado esperado:**
-`2 passed (100%)`.
-
----
-
-## 5. Ejecución de la Suite Hermética de Pruebas Backend
-Para verificar los contratos de seguridad F1–F8, el almacenamiento inmutable de catálogo, la procedencia ética forzada en servidor y la resiliencia a fallos:
-
-```powershell
-docker compose exec -T api pytest -m "not live" -v
-```
-
-*(En Linux / macOS / Bash: `docker compose exec -T api pytest -m "not live" -v`)*
-
-Este procedimiento canónico utiliza la red interna y las credenciales seguras generadas localmente en `.env`, sin exponer contraseñas predecibles ni depender de nombres de red manuales.
-
-**Resultado esperado:**
-`168 passed, 1 deselected, 0 failed`.
-
----
-
-## 6. Especificación Canónica de la API REST y Swagger
-La documentación exhaustiva de los 23 endpoints clasificados en 8 categorías temáticas, validación Pydantic v2, comunicación React-FastAPI, persistencia PostgreSQL 17 y controles de seguridad se encuentra en [`docs/API.md`](API.md).
-
----
-
-## 7. Gestión Segura de Credenciales de IA y Acceso Administrativo
-1. **Detección y Comprobación de Proveedores:**
-   ```powershell
-   docker compose exec -T api python -m app.validate_providers
-   # O con verificación real de conectividad:
-   docker compose exec -T api python -m app.validate_providers --live
-   ```
-2. **Configuración Posterior sin Reiniciar PostgreSQL:**
-   Si las claves se suministran tras el arranque inicial, aplíquelas en menos de 3 segundos con:
-   ```powershell
-   .\scripts\setup_ai_keys.ps1
-   ```
-   *(En Linux / macOS: `./scripts/setup_ai_keys.sh`)*
-   Este comando actualiza exclusivamente `.env` y recrea la API con `docker compose up -d --no-deps api` preservando los datos de PostgreSQL.
-3. **Acceso Administrativo Seguro al Panel Web:**
-   El agente debe instruir al evaluador a abrir `http://localhost:5173`, dirigirse a la pestaña **Administración**, y copiar el `ADMIN_TOKEN` al portapapeles sin exponerlo en pantalla ni logs:
-   ```powershell
-   powershell -Command "Get-Content .env | Select-String '^ADMIN_TOKEN=' | ForEach-Object { $_.Line.Split('=',2)[1].Trim() } | Set-Clipboard; Write-Host 'ADMIN_TOKEN copiado al portapapeles.'"
-   ```
-
----
-
-## 8. Estado Oficial de Despliegue en la Nube
-> **DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA**  
-> Ver justificación detallada en [`docs/DEPLOYMENT.md`](DEPLOYMENT.md).
+Estado real de la cuenta y de la evaluación en [estado.md](estado.md).

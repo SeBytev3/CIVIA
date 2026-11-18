@@ -6,13 +6,11 @@ import secrets
 
 class Settings:
     PROJECT_NAME: str = "CIVIA API"
-    VERSION: str = "0.2.0"
+    VERSION: str = "1.1.1"
+    BUILD_SHA: str = os.getenv("CIVIA_BUILD_SHA", "unknown").lower()
     PHASE: str = os.getenv("CIVIA_PHASE", "mvp")
 
-    DATABASE_URL: str = os.getenv(
-        "DATABASE_URL",
-        "postgresql://civia:local_dev_change_me@db:5432/civia",
-    )
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
 
     UPLOAD_DIR: Path = Path(os.getenv("UPLOAD_DIR", "/app/data/uploads"))
     MIGRATIONS_DIR: Path = Path(
@@ -46,13 +44,18 @@ class Settings:
 
     # Configuración de proveedores IA (Fase D)
     GOOGLE_API_KEY_PRIMARY: str = os.getenv("GOOGLE_API_KEY_PRIMARY", "")
-    GOOGLE_API_KEY_SECONDARY: str = os.getenv("GOOGLE_API_KEY_SECONDARY", "")
     GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
     AI_PRIMARY_MODEL: str = os.getenv("AI_PRIMARY_MODEL", "gemini-3.8-flash")
     AI_FALLBACK_MODEL: str = os.getenv("AI_FALLBACK_MODEL", "qwen/qwen3.8-27b")
-    AI_TERTIARY_MODEL: str = os.getenv("AI_TERTIARY_MODEL", "gemini-3.5-flash-lite")
+    AI_GROQ_VISION_MODEL: str = os.getenv("AI_GROQ_VISION_MODEL", "").strip()
+    AI_GROQ_AUDIO_MODEL: str = os.getenv("AI_GROQ_AUDIO_MODEL", "whisper-large-v3-turbo")
+    AI_PROVIDER_RPM: int = int(os.getenv("AI_PROVIDER_RPM", "12"))
+    AI_PROVIDER_TPM: int = int(os.getenv("AI_PROVIDER_TPM", "120000"))
+    AI_DAILY_REQUESTS: int = int(os.getenv("AI_DAILY_REQUESTS", "300"))
+    AI_DAILY_TOKENS: int = int(os.getenv("AI_DAILY_TOKENS", "1800000"))
+    AI_SHARED_RUNTIME: bool = os.getenv("AI_SHARED_RUNTIME", "0") == "1"
+    AI_REQUIRE_PREFLIGHT: bool = os.getenv("AI_REQUIRE_PREFLIGHT", "1") == "1"
     AI_TIMEOUT_SECONDS: float = float(os.getenv("AI_TIMEOUT_SECONDS", "15"))
-    AI_MAX_RETRIES: int = int(os.getenv("AI_MAX_RETRIES", "2"))
     AGENT_MAX_ITERATIONS: int = int(os.getenv("AGENT_MAX_ITERATIONS", "5"))
     AGENT_MAX_TOKENS: int = int(os.getenv("AGENT_MAX_TOKENS", "6000"))
 

@@ -17,6 +17,7 @@ import uuid
 
 import psycopg
 from psycopg import sql
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import dict_row
 
 from app.config import settings
@@ -1094,6 +1095,50 @@ def get_conn(statement_timeout_ms: int | None = None) -> Generator[psycopg.Conne
         conn.close()
 
 
+@contextmanager
+def get_agent_conn(owner_id: uuid.UUID | None = None) -> Generator[psycopg.Connection[dict[str, Any]], None, None]:
+    """Abre una transacción de lectura con el rol limitado a la vista del agente."""
+    check_execution_capability_or_raise("lectura de contexto del agente")
+    timeout_ms = 5000
+    deadline = get_deadline_context()
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("El tiempo de consulta del agente se agotó.")
+        timeout_ms = max(1, min(timeout_ms, int(remaining * 1000)))
+
+    configured_dsn = os.getenv("AGENT_DATABASE_URL")
+    target = conninfo_to_dict(settings.DATABASE_URL)
+    restricted = conninfo_to_dict(configured_dsn) if configured_dsn else {}
+    same_database = bool(configured_dsn) and all(
+        restricted.get(key) == target.get(key) for key in ("host", "port", "dbname")
+    )
+    emulate_role = not same_database and is_disposable_test_or_eval_db(settings.DATABASE_URL)
+    if not same_database and not emulate_role:
+        raise RuntimeError("Falta la conexión PostgreSQL de lectura del agente.")
+    dsn = settings.DATABASE_URL if emulate_role else configured_dsn
+
+    with psycopg.connect(dsn, row_factory=dict_row, connect_timeout=5) as conn:
+        conn.read_only = True
+        register_active_conn(conn)
+        try:
+            if emulate_role:
+                conn.execute("SET LOCAL ROLE civia_agent")
+            if conn.execute("SELECT current_user AS name").fetchone()["name"] != "civia_agent":
+                raise RuntimeError("La conexión del agente requiere el rol PostgreSQL restringido.")
+            conn.execute(
+                """
+                SELECT set_config('statement_timeout', %s, true),
+                       set_config('lock_timeout', %s, true),
+                       set_config('civia.agent_owner', %s, true)
+                """,
+                (str(timeout_ms), str(timeout_ms), str(owner_id) if owner_id else ""),
+            )
+            yield conn
+        finally:
+            unregister_active_conn(conn)
+
+
 def run_migrations(migrations_dir: Path | None = None, database_url: str | None = None) -> list[str]:
     """Ejecuta migraciones SQL en orden alfabético de forma idempotente."""
     mdir = migrations_dir or settings.MIGRATIONS_DIR
@@ -1103,8 +1148,10 @@ def run_migrations(migrations_dir: Path | None = None, database_url: str | None 
 
     applied: list[str] = []
     target_url = database_url or settings.DATABASE_URL
-    with psycopg.connect(target_url, autocommit=True, row_factory=dict_row) as conn:
+    with psycopg.connect(target_url, autocommit=True, row_factory=dict_row, connect_timeout=5) as conn:
         with conn.cursor() as cur:
+            # El bloqueo de sesión se libera al cerrar la conexión, incluso al fallar.
+            cur.execute("SELECT pg_advisory_lock(6110, 3);")
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1120,15 +1167,15 @@ def run_migrations(migrations_dir: Path | None = None, database_url: str | None 
             sql_files = sorted(mdir.glob("*.sql"))
             for sql_file in sql_files:
                 version = sql_file.name
-                sql_text = sql_file.read_text(encoding="utf-8")
-                # Ejecutamos el DDL idempotente (CREATE TABLE/INDEX IF NOT EXISTS)
-                cur.execute(sql_text)
-                if version not in existing:
+                if version in existing:
+                    continue
+                with conn.transaction():
+                    cur.execute(sql_file.read_text(encoding="utf-8"))
                     cur.execute(
-                        "INSERT INTO schema_migrations (version) VALUES (%s) ON CONFLICT DO NOTHING;",
+                        "INSERT INTO schema_migrations (version) VALUES (%s);",
                         (version,),
                     )
-                    applied.append(version)
+                applied.append(version)
     return applied
 
 
@@ -1139,13 +1186,17 @@ def check_db_health() -> dict[str, Any]:
                 cur.execute("SELECT 1 AS ok;")
                 row = cur.fetchone()
                 cur.execute(
-                    "SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'reports';"
+                    """
+                    SELECT COUNT(*) = 3 AS ready
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name IN ('reports', 'users', 'installation_metadata');
+                    """
                 )
                 tbl = cur.fetchone()
-                has_reports = bool(tbl and tbl["count"] > 0)
                 return {
                     "connected": bool(row and row["ok"] == 1),
-                    "schema_ready": has_reports,
+                    "schema_ready": bool(tbl and tbl["ready"]),
                 }
     except Exception as exc:
         logger.error("Error de salud de BD: %s", type(exc).__name__)

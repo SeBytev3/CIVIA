@@ -1,3 +1,146 @@
+# Estado de CIVIA 1.1.1
+
+## Cierre de aceptación de Momento 3
+
+La entrega móvil se centra en la PWA ciudadana. El proyecto Android y sus pruebas anteriores quedan como evidencia histórica. [Publicación](https://github.com/SeBytev3/CIVIA/releases/tag/v1.1.1) · [Flujo Git](FLUJO_GIT.md)
+
+| Entorno | Verificación observada |
+| --- | --- |
+| Windows AMD64 | Clon limpio con selección automática de proyecto, subred y puertos. Caja negra con tres roles y reinicio que conservó el reporte y los accesos. |
+| Linux AMD64 y ARM64 | Runners nativos de GitHub, arranque real Compose, caja negra, reinicio, proxy y suite hermética por arquitectura. [CI del candidato](https://github.com/SeBytev3/CIVIA/actions/runs/44240321004) |
+| PWA | Chromium instaló y abrió `/app/` en ventana independiente en Windows. Un navegador Linux con perfil desechable y la CA de prueba confiable verificó el origen HTTPS, la instalabilidad, el GPS emulado, la radicación y consulta real en viewport móvil. Las 13 pruebas web pasaron. |
+| Plataformas pendientes | macOS con Docker Desktop y PWA en un teléfono físico. |
+
+El preflight de cierre se ejecutó con cuota autorizada en una base aislada. Gemini volvió a mostrar su modelo en el catálogo autenticado y denegó generación con 403. Groq validó texto, herramientas, JSON y visión. En el recorrido funcional, Groq clasificó como `HUECO` la imagen sintética y transcribió una frase de habla sintética. El worker persistió el diagnóstico y la transcripción. La primera consulta del asistente recibió 429 y respondió por SQL. En una repetición acotada después de la pausa, la traza mostró una llamada exitosa a la herramienta y un segundo turno de respuesta de Groq. [Configuración y diagnóstico](AI_DEPLOY.md)
+
+| Hallazgo o tarea | Skill | Aplicación | Verificación |
+| --- | --- | --- | --- |
+| Portabilidad y archivos administrativos privados | `github-actions-advanced`, `systematic-debugging` | Runners nativos, credenciales sólo en lectura y el UID/GID del propietario | RED por permiso de lectura. GREEN con permisos privados y prueba de persistencia en ambas arquitecturas. |
+| Clon paralelo y arranque sin claves | `code-review-and-quality`, `verification-before-completion` | Valores aislados persistentes y configuración interactiva separada de inferencia en vivo | Clon Windows coexistió con la instalación habitual. Linux ARM64 comprobó el modo aislado. |
+| Seguridad y recuperación | `backend-security-coder`, `api-security`, `postgres-best-practices` | Revisar controles de autorización, cola, privilegios y límites de red con datos sintéticos | Suite hermética, tres roles, rechazo fuera de alcance, revisión de egreso y de la credencial histórica. [Semana 12](seguridad.md) |
+
+## Evidencia anterior al cierre
+
+Validación del [PR #1](https://github.com/SeBytev3/CIVIA/pull/1) en Windows 11, Docker Desktop, PostgreSQL 17 y Android Emulator API 35.
+
+## Instalación habitual
+
+- El checkout partió del candidato 1.1.0 `4b245fcbb182b6739bfe05e6d1d6daafc28d04b9`. La instalación detenida contenía FastAPI 1.0.0, un bundle anterior y el Service Worker `civia-pwa-v1`. Faltaban las tres cadenas de conexión de mínimo privilegio y el worker. Los puertos 8000 y 5173 no respondían.
+- El proyecto habitual tenía siete migraciones. Se respaldaron PostgreSQL y el volumen de evidencias de forma privada. La primera actualización migró la base pero Docker retuvo la red anterior, sin rango dinámico. El contenedor de base de datos recibió la IPv4 reservada para Nginx y el gateway no pudo iniciar. El bootstrap reconcilia sólo la red etiquetada del proyecto que arranca.
+- El arranque posterior confirmó PostgreSQL, API, worker y gateway saludables, con 15 migraciones y 41 operaciones de Swagger. Un restore desechable del respaldo confirmó que los 80 reportes coinciden campo por campo en la proyección de todas sus columnas originales. Se conservaron los volúmenes de datos y de evidencias.
+- El experimento de Edge emulado reprodujo 567 píxeles de ancho de documento en una pantalla de 360, así como las consultas del cliente anterior. Con el gateway 1.1.1, el recorrido real de registro, GPS emulado, foto y radicación dio 360 píxeles de ancho, cero excepciones JavaScript sin gestionar y permitió abrir el mismo radicado desde `/app/`. Los dos perfiles administrativos iniciaron sesión y sus secciones correspondieron a sus permisos.
+
+[Reproducción responsive y Service Workers](pruebas_web_1_1_1.md) · [Despliegue](DEPLOYMENT.md)
+
+## Aceptación y pruebas
+
+- **Backend**. `204` pruebas herméticas aprobadas, una integración de proxy omitida en la red hermética y ejecutada con éxito en la red de la aplicación. Una prueba con consumo de cuota fue deseleccionada. Dos avisos de obsolescencia provienen de las dependencias de prueba. `pip check` no encontró dependencias rotas.
+- **Caja negra**. Se clonó el candidato desde GitHub sin `.env`, dependencias frontend, builds locales ni volúmenes anteriores. El arranque generó accesos administrativos y coincidencia de revisión en API y frontend. `eval/aceptacion_v111.py` verificó los tres perfiles, carga multipart de foto y audio, idempotencia, visibilidad propia, fallo total, reprogramación del worker, asignación de caso, notas públicas y privadas, consulta por radicado y revocación. Tras detener y arrancar se conservaron la instalación, las cuentas y el reporte con su trabajo. En otro clon independiente de la revisión `9949ee550a1363263a35698a0643aa4b8dbffbc7` pasó de nuevo el recorrido y el conteo de reportes propios. Las operaciones de auditoría, cola y usuarios quedaron restringidas a administración web. [Comando de aceptación](../eval/README.md)
+- **Web y PWA**. `npm ci`, TypeScript, Vite y 13 pruebas de Edge completaron la verificación. Se revisaron nueve tamaños, zoom real al 200 %, los ámbitos de Service Workers, retiro de caché legado, recuperación de borrador previo y reenvío idempotente. Chrome for Testing instaló y abrió las dos PWA en ventanas standalone independientes de escritorio. `npm audit --omit=dev` devolvió cero hallazgos. La auditoría completa señaló una alerta de Picomatch y tres entradas derivadas en dependencias de construcción. Nginx sirve el build estático y Vite sólo se usa para desarrollo en loopback. El uso de iOS o un navegador móvil por HTTPS requiere una comprobación física independiente. [Aviso de Picomatch](https://github.com/advisories/GHSA-fc5q-39xc-vjpf)
+- **LAN**. El arranque normal dejó HTTP en loopback. El clon limpio publicó HTTPS únicamente en la IPv4 privada seleccionada, confirmó la identidad por TLS y registró el anuncio DNS-SD mediante la API nativa de Windows. PostgreSQL quedó sin puertos publicados. La prueba aislada rechazó CA y nombre incorrectos y verificó conservación de la huella al regenerar el código para otra IPv4. Cuatro pruebas herméticas de LAN, análisis de sintaxis y conflictos de puerto/bridge pasaron. La matriz de sistemas incluye inicialización privada en PowerShell 5.1 y Bash de Ubuntu 24.04 bajo WSL. El motor Docker dentro de Ubuntu WSL no estaba conectado.
+- **Android API 35**. El APK de evaluación se compiló y verificó con firma v2. Pasó la actualización sobre 1.1.0 con la misma firma, el emparejamiento QR, registro, acceso y revocación de sesión en el gateway TLS directo. El emulador rechazó una huella TLS incorrecta, obtuvo GPS, capturó y sustituyó la foto, grabó y reprodujo la nota WAV y reconectó a otra dirección HTTPS de la misma instalación sin reinstalar. Al cortar el transporte, la app conservó el borrador tras reiniciar y mostró envío pendiente. Al restablecerlo, el backend confirmó un radicado con foto, audio e historial y un único registro PostgreSQL. La ruta ADB reverse fue intermitente durante la prueba de reconexión. En una desconexión el cierre limpia la sesión local. Si el servidor es inaccesible en ese momento, su copia del token expira conforme a su vigencia. [APK, firma y pasos](ANDROID_BUILD.md)
+- **Pruebas Android**. Ensamblado debug y release, `lintDebug`, 5 pruebas JVM y 3 instrumentadas en API 35. Incluyeron registro y resolución DNS-SD nativos, contexto local seguro, bloqueo de tráfico HTTP y ausencia de un puente genérico de red.
+- **Borrador Android de 1.1.0**. Se redactó en el APK anterior y se confirmó su persistencia al reabrirlo. `adb install -r` instaló el APK 1.1.1 firmado con el mismo certificado. La versión nueva solicitó emparejamiento e inicio de sesión. Con la misma cuenta se recuperaron explícitamente título, descripción, coordenadas y foto del borrador anterior. El contenido recuperado se mantuvo tras otro reinicio. La base de prueba confirmó cero radicaciones de ese borrador.
+- **Evaluación**. Los seis casos dorados se contrastaron con las filas SQL y las respuestas esperadas, incluido el caso irresoluble. Los resultados de las 15 consultas en `eval/resultados/` corresponden a la evaluación académica histórica. En esta ejecución se autorizó un preflight sintético, por lo que no se presentan métricas de latencia, precisión o costo en vivo nuevas.
+
+## Preflight de la instalación habitual
+
+Una ejecución autorizada con fixtures sintéticos después de aplicar las 15 migraciones. La cola habitual estaba vacía. Las cuatro modalidades comprobadas de Groq quedaron en PostgreSQL para la credencial y el modelo correspondientes.
+
+| Modelo | Resultado |
+| --- | --- |
+| Gemini `gemini-3.8-flash` | Visible en catálogo autenticado. La denegación de generación impidió probar herramientas, JSON y visión. El resultado distingue acceso al catálogo y permiso de generación. La causa específica a nivel cuenta o proyecto permanece sin determinar. |
+| Groq `qwen/qwen3.8-27b` | Generación, herramienta tipada, JSON y reconocimiento del color de una imagen sintética aprobados. |
+| Groq `whisper-large-v3-turbo` | Admitió el WAV de prueba y devolvió el campo de transcripción esperado. Se usó silencio sintético para verificar compatibilidad. |
+
+[Configurar y verificar IA en otra instalación](AI_DEPLOY.md)
+
+## Matriz de cambios y verificación defensiva
+
+| Hallazgo o tarea | Skill | Aplicación | Verificación observada |
+| --- | --- | --- | --- |
+| Redes y versiones desalineadas tras actualizar | `systematic-debugging`, `verification-before-completion` | Contrastar contenedores, IPAM, versiones y almacenamiento con observaciones directas | Fallo de asignación confirmado. Arranque posterior saludable y comparación de los 80 registros con el respaldo. |
+| Instancia y roles iniciales | `postgres-best-practices`, `test-driven-development` | Identidad persistente y creación serializada de cuentas, con permisos SQL mínimos | Sin identidad ni comando automático en RED. En GREEN, acceso de ambos roles, archivo privado y arranque repetible. |
+| Cookies proxy y alcance del envío | `api-security`, `backend-security-coder` | Validar proxy exacto, origen, cuenta e instalación antes de persistir | HTTPS reconocido sólo desde Nginx confiable. La carga con sesión cambiada pasó en RED y quedó bloqueada en GREEN. |
+| Contenido no confiable y controles de roles | `code-review-and-quality`, `api-security` | Contexto minimizado, catálogo tipado y comparación de estado | Marcador sintético excluido del contexto. La selección de herramienta administrativa desconocida no alteró estado, versión o propuestas. [Semana 12](seguridad.md) |
+| Conteo del asistente incluyó la semilla de demostración | `systematic-debugging`, `test-driven-development` | Acotar listados con SQL parametrizado y alcance tipado | RED observado en APK y pytest. GREEN confirmó un reporte propio sin radicados del catálogo y la consulta independiente de demostración. |
+| Radicación, transición y ámbitos | `frontend-api-integration-patterns`, `react-patterns`, `playwright-skill` | Entradas independientes, persistencia, reintentos y controles por ámbito | Pruebas de Edge, instalación Chromium y navegación real en Nginx. [Matriz de frontend](pruebas_web_1_1_1.md) |
+| Conexión y captura Android | `systematic-debugging`, `test-driven-development`, `frontend-api-integration-patterns` | Confirmar identidad antes de transmitir, mantener alcance de cuenta y repetir desde el entorno real | Rechazo de huella, cambio de dirección y radicación tras corte. El micrófono WebView falló en RED; la grabación WAV nativa se verificó en GREEN. |
+| Gemini con catálogo visible | `systematic-debugging`, `test-driven-development` | Distinguir rechazo de autenticación y permiso de generación | RED antes de la clasificación 403. GREEN con catálogo visible y generación denegada en el preflight. |
+
+## Estado de publicación
+
+El candidato se mantiene en el PR #1 sin fusionar. El despliegue comprobado es local. El emparejamiento entre dos dispositivos físicos en Wi-Fi, una prueba iOS y el arranque Docker completo en Linux nativo, macOS y ARM64 requieren confirmación en esos entornos.
+
+---
+
+# Archivo histórico · CIVIA 1.1.0
+
+Registro del candidato de Momento 3 · 17 de noviembre de 2026 · hora de Bogotá.
+
+## Entorno y resultados
+
+- Base verificada al comenzar en `main` y `origin/main` con SHA `0180b82a2a6a2b53f76bb3f648d66ffe12c92293`. Rama candidata `feature/civia-v1.1-mobile-security-resilience`. La referencia histórica `v1.0.0-academic` apuntaba a `3b74a580949d240d44f9fa92c48f6a8a1fcfc442`.
+- Windows 11, Docker Desktop y PostgreSQL 17. Primera copia fresca compiló y detectó una colisión entre la IP reservada de Nginx y la asignación automática de Docker. Se asignó un rango dinámico separado. Segunda copia fresca con volúmenes nuevos confirmó migraciones, API, PostgreSQL, Nginx y worker saludables mediante `.\scripts\run.ps1`.
+- Smoke real en esa instalación. Registro y sesiones de tres roles, lectura administrativa autorizada, radicación durante simulación TOTAL, fotografía accesible al dueño, reenvío idempotente con un único reporte y trabajo reprogramado. La recepción observada de un reporte fue 186,95 ms. Se restauró el modo NONE. Este smoke se ejecutó en modo local.
+- En integración web, Playwright cubrió sesión real, GPS de navegador, imagen sintética, radicado, lectura como titular y revocación al cerrar sesión. Seis pruebas herméticas de interfaz cubrieron rutas de roles, aislamiento de PWA y borradores. Consulta el [frontend](../frontend/README.md).
+- Las pruebas herméticas de worker comprobaron retoma de lease, ausencia de efecto tardío, backoff, DLQ, reencolado por WEB_ADMIN, deduplicación, contrapresión y roles PostgreSQL separados. La recuperación de análisis empleó adaptadores simulados.
+- El inventario generado contiene 40 operaciones de [API](API.md). El formulario y el protocolo de autenticación se verificaron por las rutas normales de FastAPI.
+- **Android.** JDK 21, SDK y emulador API 35. `gradlew.bat assembleDebug lintDebug` terminó correctamente, con 0 errores y 21 advertencias de lint de Android. `apksigner` confirmó la firma debug v2. El APK `frontend/android/app/build/outputs/apk/debug/CIVIA-1.1.0-android-debug.apk` tiene SHA-256 `c5c8aa058a20588b7895a15805f1464907760fc46640236bcf9074eaf3c08cdb`. Instalación ADB y arranque verificados en Android 35 con mapa y conteo desde el API mediante `adb reverse`. Login, cámara, GPS y audio nativos quedan pendientes de prueba integral. El navegador sí cubrió registro y GPS.
+
+## Pruebas y dependencias
+
+- El clon del commit de implementación `21c73ec2321ce1863b4abf101cc167da0b18d524` arrancó sin `.env` preexistente, con una subred aislada por coexistencia de proyectos Compose. `/health` confirmó conexión y esquema, OpenAPI reportó 1.1.0 y el smoke de PWA, proxy y rutas privadas pasó.
+- La actualización de un PostgreSQL desechable con migraciones 001–007 a 014 preservó UUID, radicado, estado, fecha y huella de la evidencia de un reporte legado sintético. La fila conservó el propietario vacío. Una segunda ejecución quedó sin migraciones pendientes.
+- `docker compose --profile test run --rm --build tests pytest -m "not live" -q --tb=short` en PostgreSQL desechable. **196 aprobadas, 1 omitida y 1 deseleccionada**. La prueba de proxy pasó por separado en la red de un despliegue real desde clon limpio. La prueba deseleccionada consume cuota externa. Hubo dos avisos de obsolescencia de las bibliotecas para pruebas.
+- `npm run typecheck`, `npm run build` y `npm run test:e2e` pasaron. Seis pruebas de Playwright y un smoke de navegador conectado a la API. Compilación de Python y revisión de espacios Git pasaron.
+- `pip check` y `pip-audit` de las dependencias Python resueltas pasaron tras corregir FastAPI/Starlette, Pillow, python-multipart y pytest. Pytest queda sólo en la imagen de pruebas.
+- `npm audit --omit=dev` reportó cero hallazgos. La auditoría completa reportó cuatro entradas vinculadas a Picomatch y la cadena de Vite. La dependencia afectada queda en la construcción y el servidor de desarrollo en loopback. Nginx sirve el resultado estático. El aviso [GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf) no indicaba una versión corregida al verificar.
+
+## Preflight autorizado con proveedores reales
+
+Se ejecutó `python -m app.validate_providers --live --json` en el clon aislado y se hizo una prueba complementaria de visión con una imagen sintética. Los registros de validación quedaron en PostgreSQL de ese clon.
+
+| Proveedor y modelo | Resultado |
+| --- | --- |
+| Gemini · `gemini-3.8-flash` | El catálogo autenticado incluyó el modelo. El ping de texto agotó su plazo y el proveedor denegó las solicitudes de herramientas, JSON estructurado y visión. Sin capacidades de generación habilitadas en el preflight. |
+| Groq · `qwen/qwen3.8-27b` | Texto, tool calling, JSON estructurado y visión más JSON validados. El modelo identificó el color de la imagen sintética. |
+| Groq · `whisper-large-v3-turbo` | El endpoint aceptó el WAV sintético y devolvió el campo de texto esperado. La calidad de transcripción de habla queda pendiente de prueba. |
+
+El respaldo visual se configura con `AI_GROQ_VISION_MODEL=qwen/qwen3.8-27b` y requiere registrar la modalidad mediante el preflight autorizado en la base del despliegue correspondiente. La recuperación del worker y el recorrido de radicación se verificaron en las pruebas herméticas. El costo de la inferencia del preflight no se midió.
+
+## Mediciones locales
+
+| Muestra | P50 | P90 | P95 | Alcance |
+| --- | ---: | ---: | ---: | --- |
+| 15 consultas al asistente | 485,38 ms | 983,93 ms | — | PostgreSQL determinista sobre Nginx, sin llamadas externas, P90 por rango entero superior |
+| 15 radicaciones sintéticas | 74,98 ms | 86,75 ms | 89,34 ms | PNG 64 × 64, validación, archivo y transacción |
+| 15 trabajos del worker | 174,11 ms | 221,12 ms | 231,64 ms | Worker serial y adaptador simulado, sin llamadas externas |
+| Desde radicación hasta diagnóstico | 2,129 s | 2,621 s | 2,668 s | Recepciones precargadas, luego drenaje serial |
+
+El worker drenó 15 trabajos en 2,651 s (5,66 trabajos/s). La muestra del asistente se ejecutó de forma serial a 1,80 consultas/s. El costo externo observado fue USD 0 en estas mediciones. La capacidad de proveedores y el TCO se tratan como supuestos en [arquitectura_escala.md](arquitectura_escala.md).
+
+La suite dorada repitió tres veces cinco preguntas. Se revisaron manualmente la existencia y el estado del radicado sintético de la corrida, los 3 casos de huecos, los 3 casos de basuras, la ausencia de casos en Comuna 99 y la ausencia de mediciones NDVI. Las salidas pertenecen al catálogo y a la base desechable. Los resultados no miden la exactitud de proveedores externos.
+
+## Matriz de skills y verificación
+
+| Área | Skills aplicadas | Instrucción aplicada | Comprobación |
+| --- | --- | --- | --- |
+| Proveedores y secretos | backend-security-coder, test-driven-development | Destinos fijos, encabezado de clave y preflight por modalidad | RED obtuvo tres niveles y clave en query. GREEN usa dos destinos y encabezado. La llamada bloqueada por política termina el ciclo. |
+| Identidad y propiedad | api-security, backend-security-coder | Autorizar cada recurso y resolver rol y dueño desde la sesión | RED obtuvo 404 en autenticación y acceso anónimo a reportes. GREEN verificó permisos, revocación, scopes e idempotencia. |
+| Radicación y pérdida de confirmación | postgres-best-practices, test-driven-development | Compartir transacción para reporte y trabajo. Conservar evidencias inmutables ante confirmación incierta. | Rollback al fallar la cola. Reenvío recupera un solo radicado y preserva evidencia. |
+| Cola, leasing y decisiones | postgres-best-practices, code-review-and-quality | Lock, publicación cercada, extensión de estado y auditoría autorizada | Reclamo concurrente, recuperación de lease, Retry-After, DLQ, rechazo de reencolado CASE_ADMIN y decisión humana prevalente. |
+| Interfaces y caché | react-patterns, frontend-api-integration-patterns, playwright-skill | Sesión autoritativa, carga autenticada, borradores por cuenta y ámbito PWA | Cuatro casos RED iniciales en el frontend anterior. GREEN con pruebas de roles, navegación, registro y reenvío. |
+| Arranque | systematic-debugging, verification-before-completion | Distinguir fallo de red y salud del proceso | Choque de IP constatado y corregido. Arranque fresco confirmado con servicios saludables. |
+
+## Límites
+
+Se retiró la conexión PostgreSQL predeterminada que coincidía con una configuración histórica local. El candidato fresco usa secretos aleatorios para cada identidad de servicio. La rotación de la credencial existente queda pendiente de una migración privada con respaldo.
+
+Queda pendiente habilitar y verificar la generación de Gemini en el proyecto de Google. Las mediciones de capacidad locales usan fixtures. Las comprobaciones defensivas verificaron permisos, minimización, límites y efectos en un entorno de datos sintéticos. La reproducción de explotación queda fuera de la evidencia. La prueba de Android en un teléfono físico y el despliegue público quedan pendientes. Los resultados históricos se conservan a continuación.
+
+---
+
 
 ## CIVIA 1.0 — Hotfix Urgente: Credenciales de IA y Acceso Administrativo (2026-11-06)
 

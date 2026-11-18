@@ -122,11 +122,13 @@ def _percentile(sorted_vals: list[int], pct: float) -> float:
 
 
 def get_observability_summary(limit: int = 80) -> dict[str, Any]:
-    with get_conn() as conn:
+    with get_conn(statement_timeout_ms=3000) as conn:
         with conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT *
+                SELECT id, trace_group_id, operation, provider, model, attempt_number,
+                       success, latency_ms, prompt_tokens, completion_tokens, total_tokens,
+                       estimated_cost_usd, error_code, created_at
                 FROM ai_traces
                 ORDER BY created_at DESC
                 LIMIT %s;
@@ -135,8 +137,22 @@ def get_observability_summary(limit: int = 80) -> dict[str, Any]:
             )
             traces = cur.fetchall()
 
-            cur.execute("SELECT latency_ms, success, total_tokens, estimated_cost_usd, provider, model FROM ai_traces;")
+            cur.execute(
+                """
+                SELECT latency_ms, success, total_tokens, estimated_cost_usd, provider, model
+                FROM ai_traces WHERE created_at >= now() - interval '24 hours'
+                ORDER BY created_at DESC LIMIT 5000
+                """
+            )
             all_rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT scope, calls, estimated_tokens FROM ai_quota_windows
+                WHERE window_start = date_trunc('minute', now()) AND scope IN ('google-minute', 'groq-minute')
+                ORDER BY scope
+                """
+            )
+            quota_rows = cur.fetchall()
 
     latencies = sorted(int(r["latency_ms"]) for r in all_rows)
     ok_latencies = sorted(int(r["latency_ms"]) for r in all_rows if r["success"])
@@ -167,12 +183,16 @@ def get_observability_summary(limit: int = 80) -> dict[str, Any]:
             "success_rate_pct": round((success_calls / total_calls) * 100.0, 2) if total_calls else 0.0,
             "p50_latency_ms": _percentile(latencies, 50.0),
             "p90_latency_ms": _percentile(latencies, 90.0),
+            "p95_latency_ms": _percentile(latencies, 95.0),
             "p50_success_latency_ms": _percentile(ok_latencies, 50.0),
             "p90_success_latency_ms": _percentile(ok_latencies, 90.0),
             "total_tokens": total_tokens,
             "total_estimated_cost_usd": total_cost,
             "avg_cost_per_event_usd": round(total_cost / total_calls, 6) if total_calls else 0.0,
+            "window_hours": 24,
+            "max_sample_events": 5000,
         },
         "by_provider_model": list(by_provider.values()),
+        "current_minute_reservations": quota_rows,
         "recent_traces": traces,
     }

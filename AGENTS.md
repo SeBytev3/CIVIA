@@ -1,13 +1,13 @@
 # CIVIA — contrato para agentes de desarrollo
 
-Equipo: Stefania Córdoba y Sebastian Espinosa. Proyecto de Ingeniería de Aplicaciones con IA, Momento 2.
+Equipo: Stefania Córdoba y Sebastian Espinosa. Proyecto de Ingeniería de Aplicaciones con IA, Momento 3.
 
 ## Prioridad
 1. Mantener aplicación desplegable desde un checkout limpio según README; comprobarlo, no presumirlo.
 2. Completar flujo vertical ciudadano: alta de reporte, foto, GPS, almacenamiento, análisis multimodal y consulta.
 3. Agente genuino con herramientas tipadas y descripciones claras; cuatro límites efectivos: vueltas, tokens, timeout y aprobación humana para escritura crítica. La IA NO escribe directamente en BD.
 4. Estrategia de datos: PostgreSQL/SQL directo; justificar NO RAG en docs/decisiones.md.
-5. Resiliencia: Gemini -> Groq (proveedor independiente) -> segundo Gemini cuando corresponda; solo modelos accesibles tras preflight; registrar fallos técnicos solo en observabilidad protegida. No revelar error API, código HTTP interno, traceback ni nombres de proveedores al ciudadano. No simular éxito.
+5. Resiliencia: Gemini -> Groq (proveedor independiente) con cola durable ante indisponibilidad; solo modelos accesibles tras preflight; registrar fallos técnicos solo en observabilidad protegida. No revelar error API, código HTTP interno, traceback ni nombres de proveedores al ciudadano. No simular éxito.
 6. Pruebas 429/timeout/JSON inválido/caída total, suite dorada mínima 5 preguntas verificadas a mano (una sin respuesta) y 15 consultas para latencia P50/P90, costo, precisión y trazas.
 7. README para equipo Windows 11 y otro computador limpio; scripts de arranque un comando y .env.example completo. No subir secretos, .venv, node_modules ni dumps privados.
 
@@ -28,11 +28,11 @@ Equipo: Stefania Córdoba y Sebastian Espinosa. Proyecto de Ingeniería de Aplic
 
 ## Protocolo de Evaluación Autónoma para Agentes
 - Para cualquier agente evaluador (Claude, Gemini, ChatGPT):
-  1. La rama oficial es `main`.
+  1. Clonar desde la rama predeterminada `main`, salvo evaluación explícita de un PR. Trabajar en `dev` para cambios futuros. [Flujo Git](docs/FLUJO_GIT.md)
   2. Ejecutar `.\scripts\run.ps1` (PowerShell) o `./scripts/run.sh` (Bash).
   3. Comprobar salud en `http://localhost:8000/health` y acceso a frontend en `http://localhost:5173`.
-  4. La suite hermética se valida mediante el comando canónico sin secretos incrustados: `docker compose exec -T api pytest -m "not live" -v` (168 contratos herméticos verificados).
-  5. Comprobar el estado de credenciales de IA con: `docker compose exec -T api python -m app.validate_providers`. Si están pendientes, guiar al usuario a configurarlas con `.\scripts\setup_ai_keys.ps1` (o `./scripts/setup_ai_keys.sh`) sin reiniciar PostgreSQL. NUNCA solicitar claves por el chat.
-  6. Para acceder a Administración en `http://localhost:5173`, guiar al evaluador a copiar `ADMIN_TOKEN` directamente al portapapeles con el comando de PowerShell documentado, sin imprimirlo en pantalla ni en logs.
-  7. El estado oficial de nube es "DESPLIEGUE LOCAL LISTO; URL PÚBLICA PENDIENTE DE INFRAESTRUCTURA", asegurando reproducibilidad completa en máquina local o VM sin costos no presupuestados.
-  8. La especificación técnica completa de la API REST y Swagger UI (`http://localhost:8000/docs`) está documentada canónicamente en `docs/API.md` (23 endpoints en 8 categorías temáticas).
+  4. Ejecutar `docker compose --profile test run --rm --build tests` en la red de pruebas aislada.
+  5. Consultar `docker compose exec -T api python -m app.validate_providers`. Si falta una clave, indicar el configurador privado o el arranque interactivo. Pedir autorización de cuota antes de `--live` y registrar sólo las modalidades comprobadas.
+  6. Recuperar el acceso creado por el bootstrap en `.civia/access/admin-access.json` en privado. Ejecutar el [recorrido de caja negra](eval/README.md) con un clon desechable y claves vacías.
+  7. Informar las URLs que mostró el bootstrap. Radicación en `/`, PWA ciudadana en `/app/` y portal en `/admin/`. Comparar `/build.json` y `/api/meta`. Consultar [estado](docs/estado.md) para conocer límites comprobados.
+  8. La API está en [docs/API.md](docs/API.md) y en `http://localhost:8000/docs`. Sustituir conteos sólo con evidencia de ejecución.

@@ -1,18 +1,8 @@
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import { App } from './App';
+import { createRoot } from 'react-dom/client';
+import 'leaflet/dist/leaflet.css';
 import './styles.css';
+import { PublicReport } from './PublicReport';
+import { retireLegacyWorker } from './service-worker';
 
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {
-      // Fallo silencioso de SW en entornos restringidos
-    });
-  });
-}
-
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+void retireLegacyWorker();
+createRoot(document.getElementById('root')!).render(<PublicReport />);

@@ -1,0 +1,15 @@
+{
+  "id": "/admin/",
+  "name": "CIVIA · Portal administrativo",
+  "short_name": "CIVIA Admin",
+  "start_url": "/admin/",
+  "scope": "/admin/",
+  "display": "standalone",
+  "background_color": "#f1f5f4",
+  "theme_color": "#0f4c5c",
+  "lang": "es-CO",
+  "icons": [
+    { "src": "/admin/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/admin/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

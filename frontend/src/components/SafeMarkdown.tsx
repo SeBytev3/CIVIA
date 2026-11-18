@@ -7,33 +7,12 @@ interface SafeMarkdownProps {
   className?: string;
 }
 
-function isSafeUrl(url?: string): boolean {
-  if (!url) return false;
-  const trimmed = url.trim().toLowerCase();
-  // Disallow script schemes and dangerous protocols
-  if (
-    trimmed.startsWith('javascript:') ||
-    trimmed.startsWith('vbscript:') ||
-    trimmed.startsWith('data:') ||
-    trimmed.startsWith('file:')
-  ) {
-    return false;
-  }
-  // Allow safe protocols or relative links
-  return (
-    trimmed.startsWith('http://') ||
-    trimmed.startsWith('https://') ||
-    trimmed.startsWith('mailto:') ||
-    trimmed.startsWith('/') ||
-    trimmed.startsWith('#')
-  );
-}
-
 export const SafeMarkdown: React.FC<SafeMarkdownProps> = ({ content, className = '' }) => {
   return (
     <div className={`safe-markdown-root ${className}`.trim()}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        skipHtml
         components={{
           // Bound headings so AI output cannot dominate page typography
           h1: ({ children }) => <h3 className="markdown-heading markdown-h1">{children}</h3>,
@@ -78,23 +57,7 @@ export const SafeMarkdown: React.FC<SafeMarkdownProps> = ({ content, className =
             );
           },
 
-          // Safe links: validate scheme and sandbox
-          a: ({ href, children }) => {
-            if (isSafeUrl(href)) {
-              const isExternal = href?.startsWith('http://') || href?.startsWith('https://');
-              return (
-                <a
-                  href={href}
-                  className="markdown-link"
-                  target={isExternal ? '_blank' : undefined}
-                  rel={isExternal ? 'noopener noreferrer' : undefined}
-                >
-                  {children}
-                </a>
-              );
-            }
-            return <span className="markdown-text-link">{children}</span>;
-          },
+          a: ({ children }) => <span>{children}</span>,
 
           // Disallow unauthorized remote images from AI Markdown output
           img: ({ alt }) => (

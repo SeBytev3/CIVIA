@@ -33,6 +33,7 @@ from app.security import rate_limiter
 from app.seed import seed_synthetic_reports
 from tests.conftest import (
     cleanup_tracked_test_records,
+    create_authenticated_client,
     register_test_approval_id,
     register_test_report_id,
 )
@@ -91,8 +92,7 @@ def _make_png_bytes(color: tuple[int, int, int] = (90, 120, 150)) -> bytes:
 
 def test_c01_admin_token_mandatory_and_rejects_weak_or_default(monkeypatch):
     """
-    C-01: El backend debe rechazar arranque y peticiones admin si ADMIN_TOKEN falta,
-    es corto o coincide con tokens débiles/por defecto conocidos.
+    C-01: La validación local rechaza secretos débiles. La administración HTTP requiere sesión.
     """
     for weak in ("", "civia-admin-demo-2026", "admin", "1234567890", "short_token_123"):
         assert is_strong_admin_token(weak) is False
@@ -125,7 +125,7 @@ def test_g1_1_c01_rejects_sequential_and_repeated_tokens(monkeypatch):
     """
     G1.1 C-01 (contraejemplo exacto de Codex):
     Secuencias numéricas/alfabéticas y patrones periódicos repetidos como '0123456789' * 3
-    deben ser rechazados en validación, en el arranque de FastAPI y en endpoints admin.
+    deben ser rechazados en la validación del secreto local.
     """
     predictable_tokens = [
         "0123456789" * 3,
@@ -142,11 +142,7 @@ def test_g1_1_c01_rejects_sequential_and_repeated_tokens(monkeypatch):
         with pytest.raises(RuntimeError):
             validate_admin_token_or_raise(bad_tok)
 
-    # Verificar que el lifespan de FastAPI falla al iniciar si ADMIN_TOKEN es '0123456789' * 3
     monkeypatch.setattr(settings, "ADMIN_TOKEN", "0123456789" * 3)
-    with pytest.raises(RuntimeError):
-        with TestClient(app):
-            pass
 
     # Y aun si se inyecta en caliente en settings, el endpoint devuelve 401
     r_obs = client.get(
@@ -155,7 +151,7 @@ def test_g1_1_c01_rejects_sequential_and_repeated_tokens(monkeypatch):
     )
     assert r_obs.status_code == 401
 
-    # Token generado con CSPRNG (secrets.token_urlsafe(32)) sí es aceptado
+    # Un secreto fuerte sirve para mantenimiento local y no concede una sesión HTTP.
     strong_csprng = generate_admin_token(32)
     assert is_strong_admin_token(strong_csprng) is True
     monkeypatch.setattr(settings, "ADMIN_TOKEN", strong_csprng)
@@ -163,7 +159,7 @@ def test_g1_1_c01_rejects_sequential_and_repeated_tokens(monkeypatch):
         "/api/admin/observability",
         headers={"X-Admin-Token": strong_csprng},
     )
-    assert r_ok.status_code == 200
+    assert r_ok.status_code == 401
 
 
 def test_g1_2_c01_rejects_contextual_project_role_year_demo_token(monkeypatch):
@@ -172,7 +168,7 @@ def test_g1_2_c01_rejects_contextual_project_role_year_demo_token(monkeypatch):
     El patrón construido con nombre público del proyecto, rol administrativo, año y etiqueta
     Demo/Test ('_'.join(('Civia', 'AdminToken', '2026', 'Demo')) + '!') y sus variantes
     (incluso extendidas a >= 32 caracteres o con ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT=true)
-    no permiten iniciar el servidor ni acceder a /api/admin/observability.
+    se rechazan durante la validación local y no conceden sesión HTTP.
     """
     codex_pattern = "_".join(("Civia", "AdminToken", "2026", "Demo")) + "!"
     contextual_variants = [
@@ -194,11 +190,7 @@ def test_g1_2_c01_rejects_contextual_project_role_year_demo_token(monkeypatch):
         assert is_strong_admin_token(candidate) is False
     monkeypatch.delenv("ADMIN_TOKEN_ALLOW_CUSTOM_FORMAT", raising=False)
 
-    # Reproductor exacto de Codex: el lifespan completo rechaza iniciar con codex_pattern
     monkeypatch.setattr(settings, "ADMIN_TOKEN", codex_pattern)
-    with pytest.raises(RuntimeError):
-        with TestClient(app):
-            pass
 
     # Y ante cualquier petición al endpoint administrativo devuelve 401
     r_ctx = client.get(
@@ -210,169 +202,51 @@ def test_g1_2_c01_rejects_contextual_project_role_year_demo_token(monkeypatch):
     r_no_tok = client.get("/api/admin/observability")
     assert r_no_tok.status_code == 401
 
-    # Un secreto nuevo generado mediante CSPRNG permite iniciar la aplicación y acceder a /api/admin/observability
+    # Un secreto CSPRNG válido se acepta en la validación local.
     csprng_secret = generate_admin_token(32)
     monkeypatch.setattr(settings, "ADMIN_TOKEN", csprng_secret)
-    with TestClient(app) as fresh_client:
-        r_valid = fresh_client.get(
-            "/api/admin/observability",
-            headers={"X-Admin-Token": csprng_secret},
-        )
-        assert r_valid.status_code == 200
+    validate_admin_token_or_raise(csprng_secret)
 
 
-def test_a01_confirm_requires_report_edit_token_and_blocks_post_admin_mutation():
-    """
-    A-01:
-    1) PATCH /api/reports/{id}/status exige X-Admin-Token válido (human_approved=true no basta).
-    2) PATCH /api/reports/{id}/confirm exige X-Citizen-Edit-Token válido del reporte.
-    3) Una vez confirmado o gestionado administrativamente (ej. RESOLVED/IN_REVIEW), un tercero
-       anónimo o incluso el ciudadano sin token admin no puede sobreescribir el reporte (409).
-    """
-    # 1. Crear reporte nuevo
-    r_create = client.post(
+def test_a01_only_owner_confirms_and_managed_case_is_immutable(citizen_client, case_admin_client):
+    created = citizen_client.post(
         "/api/reports",
-        data={
-            "title": "Reporte para prueba A-01 de autorización",
-            "description": "DATO SINTÉTICO A-01: Bache profundo frente a estación para probar control de acceso.",
-            "latitude": "3.4510",
-            "longitude": "-76.5310",
-            "comuna": "Comuna 2",
-            "auto_analyze": "false",
-        },
-        files={"photo": ("a01.png", _make_png_bytes(), "image/png")},
+        data={"description": "Bache sintético para comprobar control de acceso.", "latitude": "3.45", "longitude": "-76.53"},
+        files={"photo": ("evidencia.png", _make_png_bytes(), "image/png")},
     )
-    assert r_create.status_code == 201
-    created = r_create.json()
-    rid = created["id"]
-    edit_token = created["citizen_edit_token"]
-    assert edit_token and len(edit_token) >= 32
+    assert created.status_code == 201
+    report_id = created.json()["id"]
+    report = f"/api/reports/{report_id}"
+    resolution = {"status": "RESOLVED", "human_approved": True}
+    confirmation = {"final_category": "HUECO", "final_severity": "ALTA"}
 
-    # 2. Intento de cambio de estado administrativo sin X-Admin-Token pero con human_approved=True -> 401
-    r_status_unauth = client.patch(
-        f"/api/reports/{rid}/status",
-        json={"status": "RESOLVED", "human_approved": True, "note": "Intento anónimo"},
-    )
-    assert r_status_unauth.status_code == 401
+    assert client.patch(f"{report}/status", json=resolution).status_code == 401
+    assert citizen_client.patch(f"{report}/status", json=resolution).status_code == 403
+    assert client.patch(f"{report}/confirm", json=confirmation).status_code == 401
+    assert citizen_client.patch(f"{report}/confirm", json=confirmation).status_code == 200
+    assert case_admin_client.patch(f"{report}/status", json=resolution).status_code == 200
+    again = citizen_client.patch(f"{report}/confirm", json={"final_category": "BASURAS"})
+    assert again.status_code == 409
+    assert again.json()["error"] == "REPORT_ALREADY_MANAGED"
 
-    # 3. Intento de confirmación ciudadana sin edit_token o con edit_token falso -> 403
-    r_confirm_no_tok = client.patch(
-        f"/api/reports/{rid}/confirm",
-        json={"final_category": "QUEMA", "final_severity": "CRITICA"},
-    )
-    assert r_confirm_no_tok.status_code == 403
-    assert r_confirm_no_tok.json()["error"] == "CONFIRMATION_UNAUTHORIZED"
-
-    r_confirm_bad_tok = client.patch(
-        f"/api/reports/{rid}/confirm",
-        headers={"X-Citizen-Edit-Token": "token_falso_invalido_000000000000"},
-        json={"final_category": "QUEMA", "final_severity": "CRITICA"},
-    )
-    assert r_confirm_bad_tok.status_code == 403
-
-    # 4. Confirmación legítima con el edit_token devuelto al creador -> 200 CONFIRMED
-    r_confirm_ok = client.patch(
-        f"/api/reports/{rid}/confirm",
-        headers={"X-Citizen-Edit-Token": edit_token},
-        json={"final_category": "HUECO", "final_severity": "ALTA", "human_override_note": "Confirmado por autor"},
-    )
-    assert r_confirm_ok.status_code == 200
-    assert r_confirm_ok.json()["status"] == "CONFIRMED"
-
-    # 5. Gestión administrativa pasa el reporte a RESOLVED
-    r_admin_resolve = client.patch(
-        f"/api/reports/{rid}/status",
-        headers={"X-Admin-Token": settings.ADMIN_TOKEN},
-        json={"status": "RESOLVED", "human_approved": True, "note": "Atendido por cuadrilla."},
-    )
-    assert r_admin_resolve.status_code == 200
-    assert r_admin_resolve.json()["status"] == "RESOLVED"
-
-    # 6. Intento posterior de volver a confirmar o alterar categoría sin ser admin -> 409 REPORT_ALREADY_MANAGED
-    r_reconfirm = client.patch(
-        f"/api/reports/{rid}/confirm",
-        headers={"X-Citizen-Edit-Token": edit_token},
-        json={"final_category": "BASURAS", "final_severity": "BAJA", "human_override_note": "Sabotaje post-resolución"},
-    )
-    assert r_reconfirm.status_code == 409
-    assert r_reconfirm.json()["error"] == "REPORT_ALREADY_MANAGED"
-
-    # Verificar que en BD sigue RESOLVED y HUECO
-    current = client.get(f"/api/reports/{rid}").json()
+    current = citizen_client.get(report).json()
     assert current["status"] == "RESOLVED"
     assert current["final_category"] == "HUECO"
 
 
-def test_g1_1_a01_public_replay_cannot_recover_citizen_edit_token():
-    """
-    G1.1 A-01 (contraejemplo exacto de Codex):
-    Dos clientes independientes:
-    - El cliente 1 crea un reporte (con PNG público).
-    - El cliente 2 descarga título, descripción, coordenadas y fotografía públicos desde GET /api/reports/{id}
-      y GET /api/reports/{id}/photo, y reconstruye el POST /api/reports.
-    - El cliente 2 NO recupera el reporte original ni su citizen_edit_token, y al intentar confirmar el reporte
-      del cliente 1 recibe 403 CONFIRMATION_UNAUTHORIZED.
-    """
-    c1 = TestClient(app)
-    c2 = TestClient(app)
-
-    png_bytes = _make_png_bytes((20, 40, 60))
-    r1 = c1.post(
-        "/api/reports",
-        data={
-            "title": "Reporte original cliente 1",
-            "description": "DATO SINTÉTICO G1.1 A01: Reporte creado por cliente 1 para probar aislamiento de token.",
-            "latitude": "3.4525",
-            "longitude": "-76.5325",
-            "auto_analyze": "false",
-        },
-        files={"photo": ("c1.png", png_bytes, "image/png")},
-    )
-    assert r1.status_code == 201
-    b1 = r1.json()
-    orig_id = b1["id"]
-    orig_token = b1["citizen_edit_token"]
-    assert orig_token and len(orig_token) >= 32
-
-    # Cliente 2 consulta únicamente endpoints públicos
-    pub = c2.get(f"/api/reports/{orig_id}").json()
-    assert pub.get("citizen_edit_token") is None
-    pub_photo = c2.get(pub["photo_url"]).content
-
-    # Cliente 2 reconstruye el POST con los datos y foto públicos descargados
-    r2 = c2.post(
-        "/api/reports",
-        data={
-            "title": pub["title"],
-            "description": pub["description"],
-            "latitude": str(pub["latitude"]),
-            "longitude": str(pub["longitude"]),
-            "auto_analyze": "false",
-        },
-        files={"photo": ("replay.png", pub_photo, "image/png")},
-    )
-    assert r2.status_code == 201
-    b2 = r2.json()
-    assert b2["id"] != orig_id
-    assert b2["citizen_edit_token"] != orig_token
-
-    # Cliente 2 intenta usar el token de su POST reconstruido para alterar el reporte original del Cliente 1 -> 403
-    r_hijack = c2.patch(
-        f"/api/reports/{orig_id}/confirm",
-        headers={"X-Citizen-Edit-Token": b2["citizen_edit_token"]},
-        json={
-            "final_category": "QUEMA",
-            "final_severity": "CRITICA",
-            "human_override_note": "Hijacked by reconstructed public post",
-        },
-    )
-    assert r_hijack.status_code == 403
-    assert r_hijack.json()["error"] == "CONFIRMATION_UNAUTHORIZED"
-
-    # El reporte del Cliente 1 permanece intacto y sin confirmar
-    after_orig = c1.get(f"/api/reports/{orig_id}").json()
-    assert after_orig["human_confirmed"] is False
-    assert after_orig["final_category"] is None
+def test_a01_idempotency_keys_are_scoped_to_authenticated_owner(citizen_client):
+    other_client, _ = create_authenticated_client()
+    form = {"description": "Bache en cruce, datos sintéticos para idempotencia.", "latitude": "3.45", "longitude": "-76.53"}
+    files = {"photo": ("evidencia.png", _make_png_bytes(), "image/png")}
+    headers = {"Idempotency-Key": f"same-key-{uuid.uuid4().hex}"}
+    own = citizen_client.post("/api/reports", headers=headers, data=form, files=files)
+    replay = citizen_client.post("/api/reports", headers=headers, data=form, files=files)
+    other = other_client.post("/api/reports", headers=headers, data=form, files=files)
+    assert own.status_code == replay.status_code == other.status_code == 201
+    assert own.json()["id"] == replay.json()["id"]
+    assert own.json()["id"] != other.json()["id"]
+    assert citizen_client.get(f"/api/reports/{other.json()['id']}").status_code == 404
+    assert other_client.get(f"/api/reports/{own.json()['id']}/photo").status_code == 404
 
 
 def test_m07_and_n03_seed_force_reset_rejects_non_test_db():
@@ -396,7 +270,7 @@ def test_m07_and_n03_seed_force_reset_rejects_non_test_db():
     assert is_disposable_test_or_eval_db("postgresql://civia:secret@db:5432/test_civia") is True
 
 
-def test_g1_1_m07_concurrent_records_and_demo0001_survive_cleanup():
+def test_g1_1_m07_concurrent_records_and_demo0001_survive_cleanup(citizen_client):
     """
     G1.1 M-07 (contraejemplo exacto de Codex):
     Si otra conexión inserta un reporte no sintético, inserta una aprobación pendiente
@@ -460,7 +334,7 @@ def test_g1_1_m07_concurrent_records_and_demo0001_survive_cleanup():
 
     try:
         # La prueba crea su propio reporte y su propia aprobación (registrados por los hooks)
-        r_own = client.post(
+        r_own = citizen_client.post(
             "/api/reports",
             data={
                 "title": "Reporte propio de la prueba",
@@ -643,15 +517,15 @@ def test_g1_1_n03_evaluator_cleanup_preserves_concurrent_approvals(monkeypatch):
                 conn.commit()
 
 
-def test_a06_idempotency_and_post_commit_trace_failure_isolation(monkeypatch):
+def test_a06_idempotency_and_durable_analysis_enqueue(monkeypatch, citizen_client):
     """
     A-06:
     1) Enviar el mismo POST /api/reports con la misma Idempotency-Key devuelve el mismo
-       reporte y tracking_code sin duplicar filas en PostgreSQL, recuperando citizen_edit_token.
+       reporte y tracking_code sin duplicar filas en PostgreSQL.
     2) Reutilizar la misma Idempotency-Key con payload distinto devuelve 409 IDEMPOTENCY_KEY_CONFLICT.
-    3) Si record_ai_trace lanza excepción después del commit del reporte, el ciudadano igual
-       recibe 201 con su radicado y un reintento devuelve el mismo reporte.
+    3) El trabajo de análisis se persiste una sola vez y la recepción es independiente de las trazas.
     """
+    client = citizen_client
     idem_key = f"idem-g1-{uuid.uuid4().hex}"
     png_bytes = _make_png_bytes((40, 140, 90))
     form_data = {
@@ -683,7 +557,10 @@ def test_a06_idempotency_and_post_commit_trace_failure_isolation(monkeypatch):
 
     assert b1["id"] == b2["id"]
     assert b1["tracking_code"] == b2["tracking_code"]
-    assert b1["citizen_edit_token"] == b2["citizen_edit_token"]
+    assert b1["citizen_edit_token"] is None and b2["citizen_edit_token"] is None
+    with get_conn() as conn:
+        queued = conn.execute("SELECT COUNT(*) AS count FROM analysis_jobs WHERE report_id = %s", (b1['id'],)).fetchone()
+        assert queued['count'] == 1
 
     # Reutilizar la misma Idempotency-Key con otra descripción debe dar 409
     r_conflict = client.post(
@@ -727,8 +604,7 @@ def test_a06_idempotency_and_post_commit_trace_failure_isolation(monkeypatch):
     unique_ids = {str(r["id"]) for r in results}
     assert len(unique_ids) == 1
 
-    # Fallo de observabilidad post-commit: si record_ai_trace falla durante el análisis,
-    # POST /api/reports jamás debe devolver 500 ni perder el radicado ya confirmado.
+    # La recepción no depende del subsistema de trazas del worker.
     def exploding_trace(**kwargs):
         raise RuntimeError("Fallo simulado post-commit en tabla ai_traces")
 
@@ -768,13 +644,14 @@ def test_a06_idempotency_and_post_commit_trace_failure_isolation(monkeypatch):
     assert r_trace2.json()["tracking_code"] == b_trace1["tracking_code"]
 
 
-def test_g1_1_a06_canonical_fingerprint_detects_optional_field_and_audio_mutations():
+def test_g1_1_a06_canonical_fingerprint_detects_optional_field_mutations(citizen_client):
     """
     G1.1 A-06 (contraejemplo exacto de Codex):
     Reutilizar la misma Idempotency-Key cambiando comuna, neighborhood, address_hint,
-    auto_analyze o audio debe devolver 409 IDEMPOTENCY_KEY_CONFLICT y jamás retornar
-    silenciosamente el primer reporte.
+    u otros datos de negocio debe devolver 409 IDEMPOTENCY_KEY_CONFLICT.
+    El antiguo flag auto_analyze no altera la radicación.
     """
+    client = citizen_client
     idem_key = f"idem-a06-optional-fields-{uuid.uuid4().hex[:12]}"
     png_bytes = _make_png_bytes((50, 60, 70))
 
@@ -828,7 +705,7 @@ def test_g1_1_a06_canonical_fingerprint_detects_optional_field_and_audio_mutatio
     assert r_barrio.status_code == 409
     assert r_barrio.json()["error"] == "IDEMPOTENCY_KEY_CONFLICT"
 
-    # Variación 3: cambiar auto_analyze
+    # Un cliente anterior puede reenviar el mismo reporte con el flag obsoleto.
     r_auto = client.post(
         "/api/reports",
         headers={"Idempotency-Key": idem_key},
@@ -841,8 +718,8 @@ def test_g1_1_a06_canonical_fingerprint_detects_optional_field_and_audio_mutatio
         },
         files={"photo": ("p.png", png_bytes, "image/png")},
     )
-    assert r_auto.status_code == 409
-    assert r_auto.json()["error"] == "IDEMPOTENCY_KEY_CONFLICT"
+    assert r_auto.status_code == 201
+    assert r_auto.json()["id"] == orig_id
 
     # El reporte original sigue intacto sin comuna ni dirección
     stored = client.get(f"/api/reports/{orig_id}").json()
@@ -850,13 +727,13 @@ def test_g1_1_a06_canonical_fingerprint_detects_optional_field_and_audio_mutatio
     assert stored["address_hint"] is None
 
 
-def test_a07_stale_pending_approval_rejected_if_report_changed():
+def test_a07_stale_pending_approval_rejected_if_report_changed(citizen_client, case_admin_client):
     """
     A-07: Si un reporte cambia de estado o versión después de crearse una solicitud en
     pending_approvals, intentar aprobar esa solicitud obsoleta debe devolver 409 STALE_APPROVAL
     y jamás sobreescribir el estado actual del reporte.
     """
-    r_create = client.post(
+    r_create = citizen_client.post(
         "/api/reports",
         data={
             "title": "Reporte para prueba A-07 de obsolescencia",
@@ -873,40 +750,43 @@ def test_a07_stale_pending_approval_rejected_if_report_changed():
     tcode = created["tracking_code"]
 
     # 1. El agente genera una propuesta para pasar el reporte a IN_REVIEW cuando está en PENDING_ANALYSIS (v1)
-    prop = tool_proponer_actualizacion_critica(
-        {
-            "identificador": tcode,
-            "nuevo_estado": "IN_REVIEW",
-            "motivo": "Revisión inicial sugerida por el agente.",
-        }
-    )
+    owner_id = UUID(citizen_client.get('/api/auth/session').json()['user']['id'])
+    owner_scope = agent_module._AGENT_OWNER.set(owner_id)
+    try:
+        prop = tool_proponer_actualizacion_critica(
+            {
+                "identificador": tcode,
+                "nuevo_estado": "IN_REVIEW",
+                "motivo": "Revisión inicial sugerida por el agente.",
+            }
+        )
+    finally:
+        agent_module._AGENT_OWNER.reset(owner_scope)
     assert prop["creado"] is True
     approval_id = prop["approval_id"]
 
     # 2. Antes de que se decida esa propuesta, un operador resuelve directamente el reporte (v1 -> v2, RESOLVED)
-    r_resolve = client.patch(
+    r_resolve = case_admin_client.patch(
         f"/api/reports/{rid}/status",
-        headers={"X-Admin-Token": settings.ADMIN_TOKEN},
         json={"status": "RESOLVED", "human_approved": True, "note": "Resuelto directamente en terreno."},
     )
     assert r_resolve.status_code == 200
     assert r_resolve.json()["status"] == "RESOLVED"
 
     # 3. Ahora alguien intenta aprobar la solicitud vieja (que proponía IN_REVIEW sobre v1) -> 409 STALE_APPROVAL
-    r_decide = client.post(
+    r_decide = case_admin_client.post(
         f"/api/admin/approvals/{approval_id}/decide",
-        headers={"X-Admin-Token": settings.ADMIN_TOKEN},
         json={"approve": True, "decided_by": "Operador Tardío"},
     )
     assert r_decide.status_code == 409
     assert r_decide.json()["error"] == "STALE_APPROVAL"
 
     # 4. El reporte debe permanecer en RESOLVED (no retrocedió a IN_REVIEW)
-    after = client.get(f"/api/reports/{rid}").json()
+    after = citizen_client.get(f"/api/reports/{rid}").json()
     assert after["status"] == "RESOLVED"
 
 
-def test_g1_1_a07_legacy_approval_without_expected_version_rejected_after_aba_cycle():
+def test_g1_1_a07_legacy_approval_without_expected_version_rejected_after_aba_cycle(citizen_client):
     """
     G1.1 A-07 (contraejemplo exacto de Codex):
     Una propuesta PENDING heredada sin expected_version en proposed_payload debe ser
@@ -914,7 +794,7 @@ def test_g1_1_a07_legacy_approval_without_expected_version_rejected_after_aba_cy
     reporte hizo un ciclo ABA (CONFIRMED -> RESOLVED -> CONFIRMED) y volvió al mismo status.
     Además, run_migrations() invalida propuestas PENDING sin expected_version mediante 003.
     """
-    r_create = client.post(
+    r_create = citizen_client.post(
         "/api/reports",
         data={
             "title": "Reporte para ciclo ABA A-07",
@@ -977,7 +857,7 @@ def test_b03_no_orphan_files_on_db_failure_or_idempotent_replay(monkeypatch):
     2) Si un reintento idempotente llega con la misma Idempotency-Key, el archivo temporal
        escrito antes de detectar el replay se elimina y solo queda el archivo original.
     """
-    c_no_raise = TestClient(app, raise_server_exceptions=False)
+    c_no_raise, _ = create_authenticated_client(raise_server_exceptions=False)
     png_bytes = _make_png_bytes((180, 70, 70))
     before_files = set(settings.UPLOAD_DIR.glob("*"))
 
@@ -1042,7 +922,7 @@ def test_g1_1_b03_partial_file_write_oserror_leaves_zero_orphan_files(monkeypatc
     validate_and_store_photo limpia el archivo temporal/parcial antes de propagar el error
     y no queda ningún archivo huérfano en UPLOAD_DIR ni fila en reports.
     """
-    c_no_raise = TestClient(app, raise_server_exceptions=False)
+    c_no_raise, _ = create_authenticated_client(raise_server_exceptions=False)
     png_bytes = _make_png_bytes((110, 80, 140))
     before_files = set(settings.UPLOAD_DIR.glob("*"))
     with get_conn() as conn:

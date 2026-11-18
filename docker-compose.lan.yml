@@ -1,0 +1,46 @@
+services:
+  frontend:
+    ports:
+      - "${CIVIA_LAN_ADDRESS:-127.0.0.1}:${CIVIA_HTTPS_PORT:-5443}:443"
+    volumes:
+      - type: bind
+        source: ./frontend/nginx-lan.conf
+        target: /etc/nginx/civia-lan/listen.conf
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./.civia/lan/server.crt
+        target: /etc/nginx/civia-lan/server.crt
+        read_only: true
+        bind: {create_host_path: false}
+      - type: bind
+        source: ./.civia/lan/server.key
+        target: /etc/nginx/civia-lan/server.key
+        read_only: true
+        bind: {create_host_path: false}
+
+  lan-tools:
+    profiles: [lan-tools]
+    image: ${COMPOSE_PROJECT_NAME:-civia}-lan-tools:local
+    build: ./scripts/lan
+    network_mode: none
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    volumes:
+      - ./.civia/lan:/state
+
+  lan-discovery:
+    profiles: [discovery]
+    image: ${COMPOSE_PROJECT_NAME:-civia}-lan-tools:local
+    network_mode: host
+    command: [announce, "${CIVIA_LAN_ADDRESS:-127.0.0.1}", "${CIVIA_HTTPS_PORT:-5443}", "${CIVIA_INSTALLATION_ID:-00000000-0000-0000-0000-000000000000}", "${CIVIA_TLS_NAME:-unused.local}"]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    read_only: true
+    user: "${CIVIA_LAN_UID:-0}:${CIVIA_LAN_GID:-0}"
+    volumes:
+      - type: bind
+        source: ./.civia/lan/ca.crt
+        target: /state/ca.crt
+        read_only: true
+        bind: {create_host_path: false}

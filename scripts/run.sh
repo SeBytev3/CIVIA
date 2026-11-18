@@ -1,186 +1,148 @@
 #!/usr/bin/env bash
-# CIVIA — Script de Arranque y Despliegue Autónomo (Linux / macOS)
 set -euo pipefail
+cd -- "$(dirname -- "$0")/.."
+source scripts/civia-env.sh
+source scripts/civia-host.sh
 
-echo "================================================================="
-echo " CIVIA — Despliegue Autónomo Local (Santiago de Cali / UCC)"
-echo "================================================================="
-
-# 1. Comprobación de Docker CLI
-if ! command -v docker >/dev/null 2>&1; then
-    echo "ERROR: Docker no se encuentra instalado o no está en el PATH del sistema." >&2
-    exit 1
-fi
-
-# 2. Comprobación de Docker Engine activo
-if ! docker info >/dev/null 2>&1; then
-    echo "ERROR: El demonio de Docker no está respondiendo. Inicie Docker Desktop o el servicio dockerd." >&2
-    exit 1
-fi
-
-# 3. Comprobación de Docker Compose
-if ! docker compose version >/dev/null 2>&1; then
-    echo "ERROR: 'docker compose' no está disponible." >&2
-    exit 1
-fi
-
-# 4. Generación y protección de .env
-IS_FRESH_ENV=0
-if [ ! -f .env ]; then
-    if [ ! -f .env.example ]; then
-        echo "ERROR: No se encontró el archivo '.env.example' como plantilla." >&2
-        exit 1
-    fi
-    cp .env.example .env
-    IS_FRESH_ENV=1
-    echo "[OK] Archivo de configuración local .env inicializado desde .env.example."
-fi
-
-# 5. Generación CSPRNG de ADMIN_TOKEN si no cumple política
-if ! grep -qE '^ADMIN_TOKEN=[A-Za-z0-9_-]{32,256}$' .env 2>/dev/null; then
-    if command -v openssl >/dev/null 2>&1; then
-        GENERATED_TOKEN=$(openssl rand -base64 32 | tr -d '=' | tr '+/' '-_')
-    else
-        GENERATED_TOKEN=$(head -c 32 /dev/urandom | base64 | tr -d '=' | tr '+/' '-_')
-    fi
-    if grep -q '^ADMIN_TOKEN=' .env; then
-        sed -i.bak -E "s/^ADMIN_TOKEN=.*$/ADMIN_TOKEN=${GENERATED_TOKEN}/" .env && rm -f .env.bak
-    else
-        echo "ADMIN_TOKEN=${GENERATED_TOKEN}" >> .env
-    fi
-    echo "[OK] ADMIN_TOKEN robusto y único generado con CSPRNG en .env."
-fi
-
-# 6 & 7. Generación de contraseña segura de PostgreSQL para instalación nueva
-if [ "$IS_FRESH_ENV" -eq 1 ]; then
-    if command -v openssl >/dev/null 2>&1; then
-        GEN_PW=$(openssl rand -hex 16)
-    else
-        GEN_PW=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
-    fi
-    sed -i.bak -E "s/^POSTGRES_PASSWORD=.*$/POSTGRES_PASSWORD=${GEN_PW}/" .env && rm -f .env.bak
-    sed -i.bak -E "s|^DATABASE_URL=.*$|DATABASE_URL=postgresql://civia:${GEN_PW}@db:5432/civia|" .env && rm -f .env.bak
-    echo "[OK] Credenciales seguras para PostgreSQL configuradas en .env."
-fi
-
-# 7b. Detección y solicitud opcional de credenciales de IA
-KEY_PRIMARY=$(grep -E '^GOOGLE_API_KEY_PRIMARY=' .env 2>/dev/null | cut -d'=' -f2- | tr -d '\r' || true)
-KEY_SECONDARY=$(grep -E '^GOOGLE_API_KEY_SECONDARY=' .env 2>/dev/null | cut -d'=' -f2- | tr -d '\r' || true)
-KEY_GROQ=$(grep -E '^GROQ_API_KEY=' .env 2>/dev/null | cut -d'=' -f2- | tr -d '\r' || true)
-
-update_key_var() {
-    local name="$1"
-    local val="$2"
-    if grep -q "^${name}=" .env; then
-        sed -i.bak -E "s|^${name}=.*$|${name}=${val}|" .env && rm -f .env.bak
-    else
-        echo "${name}=${val}" >> .env
-    fi
-}
-
-if [ -t 0 ] && [ "${CI:-}" != "true" ] && { [ -z "$KEY_PRIMARY" ] || [ -z "$KEY_SECONDARY" ] || [ -z "$KEY_GROQ" ]; }; then
-    echo ""
-    echo "[AVISO] Credenciales de IA externas pendientes en .env."
-    echo "CIVIA opera plenamente en Modo MVP Local sin claves externas (alta, foto, GPS, mapa y catálogo sintético)."
-    read -r -p "¿Desea configurar ahora las claves de Google AI Studio / Groq? (s/N): " ASK_KEYS
-    if [ "$ASK_KEYS" = "s" ] || [ "$ASK_KEYS" = "S" ]; then
-        if [ -z "$KEY_PRIMARY" ]; then
-            read -r -s -p "Google AI Studio Primaria (gemini-3.8-flash) [entrada oculta, Enter para omitir]: " IN_P
-            echo ""
-            if [ -n "$IN_P" ]; then
-                update_key_var "GOOGLE_API_KEY_PRIMARY" "$IN_P"
-                KEY_PRIMARY="$IN_P"
-            fi
-        fi
-        if [ -z "$KEY_SECONDARY" ]; then
-            read -r -s -p "Google AI Studio Secundaria (gemini-3.5-flash-lite) [entrada oculta, Enter para omitir]: " IN_S
-            echo ""
-            if [ -n "$IN_S" ]; then
-                update_key_var "GOOGLE_API_KEY_SECONDARY" "$IN_S"
-                KEY_SECONDARY="$IN_S"
-            fi
-        fi
-        if [ -z "$KEY_GROQ" ]; then
-            read -r -s -p "Groq Cloud Fallback (qwen/qwen3.8-27b) [entrada oculta, Enter para omitir]: " IN_G
-            echo ""
-            if [ -n "$IN_G" ]; then
-                update_key_var "GROQ_API_KEY" "$IN_G"
-                KEY_GROQ="$IN_G"
-            fi
-        fi
-    fi
-elif [ -z "$KEY_PRIMARY" ] || [ -z "$KEY_GROQ" ]; then
-    echo "[INFO] Claves de IA no provistas. CIVIA iniciará en Modo MVP Local (sin inferencia remota)."
-    echo "       Para configurarlas luego sin reiniciar la base de datos: ./scripts/setup_ai_keys.sh"
-fi
-
-# 8. Despliegue con Docker Compose
-echo "Construyendo y levantando contenedores (PostgreSQL 17, FastAPI, Nginx PWA)..."
-docker compose up --build -d
-
-# 9. Verificación activa de salud
-echo "Verificando disponibilidad de servicios..."
-HEALTHY=0
-for i in $(seq 1 20); do
-    sleep 2
-    if curl -s --max-time 3 http://127.0.0.1:8000/health 2>/dev/null | grep -q '"status":"ok"'; then
-        if curl -s -I --max-time 3 http://127.0.0.1:5173 2>/dev/null | grep -qE 'HTTP/1\.[01] 200'; then
-            HEALTHY=1
-            break
-        fi
-    fi
+lan=0; stop=0; init_only=0; discovery=1; interactive=0; isolated=0; address=''; tls_name=''
+while (($#)); do
+    case $1 in
+        --lan) lan=1; shift ;;
+        --lan-address) address="${2:?Falta IPv4 LAN}"; shift 2 ;;
+        --lan-name) tls_name="${2:?Falta nombre DNS}"; shift 2 ;;
+        --no-discovery) discovery=0; shift ;;
+        --stop) stop=1; shift ;;
+        --initialize-only) init_only=1; shift ;;
+        --interactive) interactive=1; shift ;;
+        --isolated) isolated=1; shift ;;
+        *) civia_fail "Opción no reconocida: $1" ;;
+    esac
 done
+if ((!lan)) && [[ -n "$address$tls_name" || $discovery == 0 ]]; then civia_fail 'Usa --lan para estas opciones.'; fi
+if ((stop && (lan || init_only || interactive || isolated))); then civia_fail 'Usa --stop independientemente.'; fi
+if ((init_only && (interactive || isolated))); then civia_fail 'Usa --initialize-only independientemente.'; fi
+if ((interactive)) && [[ ! -t 0 ]]; then civia_fail '--interactive requiere una terminal interactiva.'; fi
+if ((isolated)); then
+    [[ ! -e .env ]] || civia_fail '--isolated corresponde al primer arranque de un clon sin .env.'
+    civia_initialize_isolated
+elif ((!stop)); then
+    civia_initialize_env
+fi
+if ((init_only)); then exit 0; fi
+if ((interactive)) && { [[ -z "$(civia_read_setting GOOGLE_API_KEY_PRIMARY)" ]] || [[ -z "$(civia_read_setting GROQ_API_KEY)" ]]; }; then
+    if IFS= read -r -p '¿Quieres ingresar las claves de IA ahora? [s/N] ' answer && [[ $answer =~ ^[sSyY]$ ]]; then
+        ./scripts/setup_ai_keys.sh --configure-only
+    fi
+fi
 
-if [ "$HEALTHY" -eq 1 ]; then
-    echo "[OK] Servicios base activos y saludables."
+civia_require_docker
+base=(docker compose -f docker-compose.yml)
+lan_compose=("${base[@]}" -f docker-compose.lan.yml)
+state="$PWD/.civia"
+access_state="$state/access"
+lan_state="$state/lan"
+rm -f -- "$lan_state/mdns.token"
+if ((stop)); then
+    if [[ -f .env ]]; then "${base[@]}" down --remove-orphans; fi
+    exit 0
+fi
+
+mkdir -p -- "$access_state"
+chmod 700 "$state" "$access_state"
+if commit=$(git rev-parse --verify HEAD 2>/dev/null); then
+    CIVIA_BUILD_SHA=$commit
+    if [[ -n "$(git status --porcelain)" ]]; then CIVIA_BUILD_SHA+=-dirty; fi
+fi
+export CIVIA_BUILD_SHA="${CIVIA_BUILD_SHA:-unknown}"
+export CIVIA_LAN_UID="$(id -u)" CIVIA_LAN_GID="$(id -g)"
+host_user="$CIVIA_LAN_UID:$CIVIA_LAN_GID"
+api_port=$(civia_port CIVIA_API_PORT 8000)
+http_port=$(civia_port CIVIA_HTTP_PORT 5173)
+if [[ $api_port == "$http_port" ]]; then civia_fail 'CIVIA_API_PORT y CIVIA_HTTP_PORT deben ser distintos.'; fi
+civia_network_check
+civia_port_check api 127.0.0.1 "$api_port" 8000
+civia_port_check frontend 127.0.0.1 "$http_port" 80
+if ((!lan || !discovery)); then "${lan_compose[@]}" rm -s -f lan-discovery >/dev/null; fi
+if ((lan)); then
+    address=$(civia_lan_address "$address")
+    https_port=$(civia_port CIVIA_HTTPS_PORT 5443)
+    civia_port_check frontend "$address" "$https_port" 443
+    export CIVIA_LAN_ADDRESS="$address"
+    mkdir -p -- "$lan_state"
+    chmod 700 "$lan_state"
+fi
+
+if ((civia_reconcile_network)); then
+    printf '%s\n' 'Actualizando la red de CIVIA. Los volúmenes y las credenciales se conservan.'
+    "${base[@]}" down --remove-orphans
+fi
+
+"${base[@]}" up --build -d --wait --wait-timeout 180 api worker
+"${base[@]}" run --rm --no-deps -T --user "$host_user" --volume "$access_state:/bootstrap" api python -m app.bootstrap_admins --automatic --credentials-file /bootstrap/admin-access.json
+api="http://127.0.0.1:$api_port"
+site="http://127.0.0.1:$http_port"
+meta=$(civia_curl "$api/api/meta")
+installation=$(civia_json_field "$meta" installation_id)
+if [[ ! "$installation" =~ ^[a-f0-9-]{36}$ || "$meta" != *'"protocol":1'* ]]; then
+    civia_fail 'La API no confirmó la identidad de la instalación.'
+fi
+
+if ((lan)); then
+    prepare=(prepare "$address" "$https_port" "$installation")
+    if [[ -n $tls_name ]]; then prepare+=("$tls_name"); fi
+    "${lan_compose[@]}" run --build --rm --no-deps -T --user "$host_user" lan-tools "${prepare[@]}"
+    "${lan_compose[@]}" up --build -d --no-deps --wait --wait-timeout 90 frontend
+    tls_name=$(cat "$lan_state/tls-name")
+    https="https://$tls_name:$https_port"
+    lan_meta=$(civia_curl --cacert "$lan_state/ca.crt" --resolve "$tls_name:$https_port:$address" "$https/api/meta")
+    if [[ "$(civia_json_field "$lan_meta" installation_id)" != "$installation" ]]; then
+        civia_fail 'El gateway HTTPS no confirmó la identidad de la instalación.'
+    fi
+    status='omitido'
+    if ((discovery)); then
+        status='no disponible'
+        docker_os=$(docker info --format '{{.OperatingSystem}}')
+        if [[ $(uname -s) == Linux && $docker_os != 'Docker Desktop' ]]; then
+            export CIVIA_INSTALLATION_ID="$installation" CIVIA_TLS_NAME="$tls_name"
+            if "${lan_compose[@]}" up -d --no-build --no-deps lan-discovery; then status='servicio iniciado'; fi
+        elif [[ $(uname -s) == Darwin ]] && command -v dns-sd >/dev/null; then
+            token=$(civia_secret)
+            printf '%s\n' "$token" >"$lan_state/mdns.token"
+            nohup bash scripts/lan/announce.sh "$address" "$https_port" "$tls_name" "$installation" "$token" </dev/null >/dev/null 2>&1 &
+            status='adaptador iniciado'
+        fi
+    fi
+    printf '%s\n' \
+        "Gateway HTTPS LAN          $https/ ($address)" \
+        "Descubrimiento LAN         _civia._tcp.local. ($status)" \
+        'Emparejamiento Android     .civia/lan/pairing.svg o pairing.txt' \
+        'CA para PWA LAN            .civia/lan/ca.crt'
 else
-    echo "AVISO: Los servicios tardaron en responder. Revise logs con: docker compose logs"
+    "${base[@]}" up --build -d --no-deps --wait --wait-timeout 90 frontend
 fi
 
-# 10. Comprobación de estado de proveedores de IA
-STATUS_PRIMARY="PENDIENTE"
-STATUS_SECONDARY="PENDIENTE"
-STATUS_GROQ="PENDIENTE"
-
-AI_JSON=$(docker compose exec -T api python3 -m app.validate_providers --json 2>/dev/null || true)
-if [ -n "$AI_JSON" ]; then
-    STATUS_PRIMARY=$(echo "$AI_JSON" | grep -o '"google_primary": *{[^}]*}' | grep -o '"status": *"[^"]*"' | cut -d'"' -f4 || echo "PENDIENTE")
-    STATUS_SECONDARY=$(echo "$AI_JSON" | grep -o '"google_secondary": *{[^}]*}' | grep -o '"status": *"[^"]*"' | cut -d'"' -f4 || echo "PENDIENTE")
-    STATUS_GROQ=$(echo "$AI_JSON" | grep -o '"groq": *{[^}]*}' | grep -o '"status": *"[^"]*"' | cut -d'"' -f4 || echo "PENDIENTE")
+for origin in "$api" "$site"; do
+    health=$(civia_curl "$origin/health")
+    [[ "$(civia_json_field "$health" status)" == ok ]] || civia_fail "El servicio $origin no confirmó el arranque."
+done
+for url in "$api/docs" "$api/openapi.json" "$site/" "$site/app/" "$site/admin/"; do civia_curl "$url" >/dev/null; done
+build=$(civia_curl "$site/build.json")
+commit=$(civia_json_field "$meta" commit)
+version=$(civia_json_field "$meta" version)
+if [[ "$(civia_json_field "$build" commit)" != "$commit" || "$(civia_json_field "$build" version)" != "$version" ]]; then
+    civia_fail 'El gateway y la API sirven builds distintos.'
 fi
 
-echo ""
-echo "================================================================="
-echo " RESULTADO OBLIGATORIO DEL ARRANQUE — CIVIA"
-echo "================================================================="
-if [ "$HEALTHY" -eq 1 ]; then
-    echo " - Frontend PWA:             DISPONIBLE (http://localhost:5173)"
-    echo " - PostgreSQL 17:            CONECTADO (Esquema listo)"
-    echo " - API REST & Swagger:       SALUDABLE (http://localhost:8000/docs)"
-else
-    echo " - Frontend PWA:             FALLIDO"
-    echo " - PostgreSQL 17:            FALLIDO"
-    echo " - API REST & Swagger:       FALLIDA"
+"${base[@]}" ps db api worker frontend
+"${base[@]}" exec -T api python -m app.validate_providers
+"${base[@]}" exec -T api python -m app.bootstrap_admins --status
+printf '%s\n' \
+    "Versión activa              $version / $commit" \
+    "Web ciudadana               $site/" \
+    "PWA ciudadana               $site/app/" \
+    "Portal administrativo      $site/admin/" \
+    "Swagger                     $api/docs"
+if [[ -f "$access_state/admin-access.json" ]]; then
+    printf '%s\n' 'Credenciales iniciales     .civia/access/admin-access.json (abre en privado)'
 fi
-echo " - Google IA primaria:       $STATUS_PRIMARY"
-echo " - Google IA secundaria:     $STATUS_SECONDARY"
-echo " - Groq Cloud:               $STATUS_GROQ"
-
-if [ "$STATUS_PRIMARY" = "PENDIENTE" ] && [ "$STATUS_GROQ" = "PENDIENTE" ]; then
-    echo ""
-    echo " [MODO MVP LOCAL ACTIVO]: Inferencia remota en vivo pendiente de claves."
-    echo " El sistema opera 100% en modo local (alta de reportes, foto, mapa, GPS y catálogo sintético)."
-    echo " Para configurar credenciales en cualquier momento sin tocar la base de datos:"
-    echo "   ./scripts/setup_ai_keys.sh"
-fi
-
-echo ""
-echo "================================================================="
-echo " INSTRUCCIONES DE ACCESO ADMINISTRATIVO"
-echo "================================================================="
-echo " 1. Abra CIVIA en su navegador: http://localhost:5173"
-echo " 2. Ingrese a la pestaña 'Administración'."
-echo " 3. La clave administrativa fue generada y guardada de forma segura en .env."
-echo " 4. Para copiarla al portapapeles sin mostrarla en pantalla ni logs, ejecute:"
-echo "    grep '^ADMIN_TOKEN=' .env | cut -d'=' -f2- | tr -d '\\r\\n' | (pbcopy 2>/dev/null || xclip -selection clipboard 2>/dev/null || wl-copy 2>/dev/null || echo \"[Copie la línea ADMIN_TOKEN de .env]\")"
-echo "================================================================="
+printf '%s\n' 'Claves de IA               ./scripts/setup_ai_keys.sh'
