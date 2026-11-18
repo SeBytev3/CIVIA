@@ -2,7 +2,7 @@
 
 Nginx sirve la radicación web, la PWA ciudadana y el portal administrativo. Android reutiliza la experiencia ciudadana instalada con descubrimiento nativo, emparejamiento y transporte acotado. FastAPI autoriza sesiones, roles y recursos. PostgreSQL es fuente única de identidad de instalación, reportes, cuentas y trabajos. El worker procesa análisis en segundo plano con Gemini y respaldo Groq.
 
-El modo local usa loopback. El modo LAN añade HTTPS al mismo gateway y un anuncio compatible según plataforma. La selección del servidor no concede permisos. [LAN y TLS](CONECTIVIDAD_LAN.md) · [Cola durable](RESILIENCIA.md)
+El modo local usa loopback. El modo LAN añade HTTPS al mismo gateway para instalar la PWA desde otro dispositivo y puede activar anuncios compatibles según plataforma. La selección del servidor no concede permisos. [LAN y TLS](CONECTIVIDAD_LAN.md) · [Cola durable](RESILIENCIA.md)
 
 ## Referencia histórica
 

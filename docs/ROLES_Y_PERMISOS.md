@@ -22,3 +22,5 @@ Get-Content .env | Select-String '^ADMIN_TOKEN=' | ForEach-Object { $_.Line.Spli
 ```
 
 En una instalación nueva el bootstrap prepara las cuentas. Recupera el acceso en `.civia/access/admin-access.json` en privado. El esquema TLS del gateway se acepta desde la dirección explícita configurada.
+
+El recorrido automatizado usa sesiones independientes de los tres perfiles y comprueba denegaciones, propiedad de evidencias y revocación. La interfaz móvil se instala desde `/app/`. [Verificación](../eval/README.md)

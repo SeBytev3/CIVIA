@@ -6,12 +6,12 @@ CIVIA es una plataforma académica de reportes viales y ambientales para Cali y 
 
 Para iniciar el servidor se requiere Git, Docker con contenedores Linux, Docker Compose y acceso a los registros de imágenes y dependencias durante la primera construcción. Docker Desktop proporciona estos componentes en Windows y macOS. En Linux instala Docker Engine y el complemento Compose. Python, Node, PostgreSQL y Nginx se ejecutan en contenedores.
 
-La rama candidata es `feature/civia-v1.1-mobile-security-resilience` del [PR #1](https://github.com/SeBytev3/CIVIA/pull/1). El estado comprobado por plataforma está en [docs/estado.md](docs/estado.md).
+`main` es la rama estable de evaluación y `dev` es la rama de desarrollo. El estado por plataforma se registra en la documentación de aceptación. [Estado](docs/estado.md) · [Flujo Git](docs/FLUJO_GIT.md)
 
 **Windows, PowerShell**
 
 ```powershell
-git clone --branch feature/civia-v1.1-mobile-security-resilience https://github.com/SeBytev3/CIVIA.git
+git clone https://github.com/SeBytev3/CIVIA.git
 cd CIVIA
 ./scripts/run.ps1
 ```
@@ -19,12 +19,14 @@ cd CIVIA
 **Linux y macOS, Bash**
 
 ```bash
-git clone --branch feature/civia-v1.1-mobile-security-resilience https://github.com/SeBytev3/CIVIA.git
+git clone https://github.com/SeBytev3/CIVIA.git
 cd CIVIA
 ./scripts/run.sh
 ```
 
 El bootstrap muestra el estado de PostgreSQL, migraciones, API, worker, Nginx, versión y proveedores. Genera los secretos internos y las dos cuentas iniciales para una instalación nueva. Abre `.civia/access/admin-access.json` en privado para recuperar las credenciales de `WEB_ADMIN` y `CASE_ADMIN`. El ciudadano se registra desde la web. Los cambios de rol y contraseña los gestiona la administración web.
+
+Para iniciar un clon adicional en la misma máquina, usa `./scripts/run.ps1 -Isolated` o `./scripts/run.sh --isolated` en su primer arranque, antes de crear `.env`. El bootstrap elige un proyecto Compose, dos puertos locales y una subred Docker disponibles. Guarda esos valores en `.env` y muestra las URLs resultantes. Usa el comando normal para los siguientes arranques.
 
 | Acceso local | Uso |
 | --- | --- |
@@ -36,20 +38,20 @@ El bootstrap muestra el estado de PostgreSQL, migraciones, API, worker, Nginx, v
 
 ## Inteligencia artificial
 
-Ingresa las claves con `./scripts/setup_ai_keys.ps1` en Windows o `./scripts/setup_ai_keys.sh` en Bash. El sistema admite Gemini y Groq. Con autorización de cuota, ejecuta `docker compose exec -T api python -m app.validate_providers --live`. La radicación conserva el reporte y las evidencias si se omiten las claves o falla la inferencia. [Configuración y resultados](docs/AI_DEPLOY.md)
+Para una instalación interactiva, añade `-Interactive` en PowerShell o `--interactive` en Bash. Se ofrece ingresar las claves en privado cuando falta alguna. También puedes usar `./scripts/setup_ai_keys.ps1` o `./scripts/setup_ai_keys.sh` después del arranque. La configuración de claves se puede evaluar sin cuota con `docker compose exec -T api python -m app.validate_providers`. Con autorización expresa, añade `--live` para validar las modalidades configuradas. La radicación conserva el reporte y las evidencias si omites las claves o falla la inferencia. [Configuración y resultados](docs/AI_DEPLOY.md)
 
-## Android, PWA y red local
+## PWA ciudadana y red local
 
-Consulta el APK, su firma y SHA-256 en [docs/ANDROID_BUILD.md](docs/ANDROID_BUILD.md). En el teléfono autoriza la fuente del APK e instala el paquete. CIVIA Android empareja el servidor desde un QR o código de confianza.
+Instala la PWA ciudadana desde `/app/` con el botón **Instalar CIVIA** o el menú del navegador. En Safari para iOS, usa **Compartir → Agregar a pantalla de inicio**. El portal `/admin/` se instala de forma independiente.
 
-Inicia la conexión remota con `./scripts/run.ps1 -Lan` en Windows o `./scripts/run.sh --lan` en Bash. Si hay varias interfaces, selecciona la IPv4 local con `-LanAddress` o `--lan-address`. El gateway HTTPS publica el puerto indicado, 5443 por defecto. Abre `.civia/lan/pairing.svg` para escanear el QR, o usa el código de `pairing.txt`. Si falla el descubrimiento, empareja con ese mismo código. [Conectividad LAN y certificados](docs/CONECTIVIDAD_LAN.md)
+En el teléfono, inicia `./scripts/run.ps1 -Lan` en Windows o `./scripts/run.sh --lan` en Bash, conecta ambos equipos a la misma red privada y abre `/app/` en la URL HTTPS que muestra el bootstrap. El dispositivo debe confiar en la CA de esa instalación o en el certificado de un gateway autorizado. En el equipo anfitrión puedes usar `http://localhost:5173/app/`. [Conectividad y certificados](docs/CONECTIVIDAD_LAN.md)
 
-Desde un navegador compatible abre la aplicación ciudadana y usa su opción de instalación o el menú del navegador. En iOS usa **Compartir → Agregar a pantalla de inicio**. En un teléfono utiliza un origen HTTPS de LAN que el navegador reconozca como confiable. [PWA ciudadana](http://localhost:5173/app/)
+La entrega móvil usa la PWA. El proyecto Android y el registro de la compilación anterior se conservan para consulta. [Android](docs/ANDROID_BUILD.md) · [CIVIA 1.1.1 — Momento 3](https://github.com/SeBytev3/CIVIA/releases/tag/v1.1.1)
 
 ## Verificar, detener y actualizar
 
 - Compara versión y commit en [build.json](http://localhost:5173/build.json) y [api/meta](http://localhost:5173/api/meta). Una compilación con cambios locales lleva el sufijo `-dirty`.
-- Ejecuta `docker compose --profile test run --rm --build tests pytest -m "not live" -q --tb=short` para la suite hermética. El recorrido de caja negra y los resultados están en [estado](docs/estado.md).
+- Ejecuta `docker compose --profile test run --rm --build tests pytest -m "not live" -q --tb=short` para la suite hermética. Para comprobar alta, gestión, cola y revocación de los tres perfiles, usa un clon desechable con claves vacías. [Recorrido de caja negra](eval/README.md) · [Resultados](docs/estado.md)
 - Si hay un puerto o una subred en uso, revisa el diagnóstico del bootstrap y elige valores libres. Si CIVIA 1.0 sigue visible, vuelve a abrir la raíz con el gateway activo. El navegador retirará el Service Worker legado durante la actualización. Si en 1.1.0 quedó un borrador de esa cuenta, usa **Recuperar borrador anterior** cuando aparezca. [Despliegue y fallas](docs/DEPLOYMENT.md)
 - Para detener ejecuta `./scripts/run.ps1 -Stop` o `./scripts/run.sh --stop`. Para actualizar, respalda la base y las evidencias, actualiza el checkout y vuelve a ejecutar el bootstrap. Los volúmenes persisten al detener.
 

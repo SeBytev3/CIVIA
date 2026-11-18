@@ -1,7 +1,7 @@
 # Guía de evaluación · CIVIA 1.1.1
 
-Sigue [README](README.md) para un checkout limpio de la rama candidata del PR #1. Usa `./scripts/run.ps1` en Windows y `./scripts/run.sh` en Bash. El bootstrap prepara el esquema y las cuentas administrativas. Recupera el acceso en privado desde `.civia/access/admin-access.json`. Registra la cuenta ciudadana en la web.
+Clona la rama predeterminada, `main`, y ejecuta el bootstrap del sistema. Si ya hay una instalación en esa máquina, usa el modo aislado en el primer arranque del nuevo clon. [README](README.md)
 
-Comprueba `/health`, `/build.json`, `/api/meta` y Swagger. La raíz es la radicación web, `/app/` sirve la PWA de ciudadanía y `/admin/` el portal por rol. En Android sigue [el emparejamiento LAN](docs/CONECTIVIDAD_LAN.md). El modo local se puede evaluar con claves vacías. El preflight real requiere autorización de cuota.
+Comprueba `/health`, `/build.json`, `/api/meta` y Swagger. Si faltan claves, indica el configurador privado o el modo interactivo. Antes del preflight real, solicita autorización de cuota. Recupera en privado los accesos administrativos generados.
 
-Ejecuta la suite indicada en README y consulta [estado](docs/estado.md) para conocer el entorno y alcance de cada comprobación. Mantén secretos, credenciales, trazas privadas y respaldos fuera de la entrega. Las pruebas usan proyectos aislados. El Autopilot queda fuera del procedimiento.
+Ejecuta la suite hermética y el recorrido de caja negra con claves vacías y un proyecto desechable. Informa las URLs que mostró el bootstrap. La raíz permite radicar, `/app/` instala la PWA ciudadana y `/admin/` sirve el portal según el rol. [Recorrido](eval/README.md) · [Estado](docs/estado.md)

@@ -47,4 +47,6 @@ El anuncio mDNS es informativo. Android verifica el certificado fijado desde el 
 
 El aislamiento de salida aplica en el adaptador de inferencia. El contenedor aún tiene conectividad general a través de la red Docker. El cifrado de evidencias en reposo y una red de egreso dedicada requieren infraestructura adicional. Los datos del catálogo son demo y los documentos de auditoría históricos conservan su contexto.
 
+En el cierre se verificó que PostgreSQL carece de puertos publicados y que su red de aplicación conserva conectividad de salida. Conviene restringir egreso a destinos de inferencia aprobados antes de un despliegue público. La instalación habitual conserva una credencial propietaria histórica corta. Su rotación debe coordinarse con el volumen existente y la configuración del migrador. Las instalaciones nuevas generan credenciales aleatorias. [Procedimiento de despliegue](DEPLOYMENT.md#credenciales-de-instalación)
+
 Material de curso consultado: [clase 12](https://ingenieria-aplicaciones-ia.netlify.app/semana12/slides), [taller guiado](https://ingenieria-aplicaciones-ia.netlify.app/semana12/exercise) y [reto](https://ingenieria-aplicaciones-ia.netlify.app/semana12/workshop).

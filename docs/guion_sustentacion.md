@@ -5,7 +5,7 @@
 | Tiempo | Acción |
 | --- | --- |
 | 0:00–1:00 | Presentar la necesidad de radicar reportes viales y ambientales y mostrar la radicación de escritorio, la PWA ciudadana y el acceso de los dos roles administrativos. |
-| 1:00–3:00 | Conectar CIVIA Android o abrir la PWA ciudadana, registrar una cuenta y radicar evidencia sintética. Mostrar el radicado en la aplicación. Consultar el estado de análisis. |
+| 1:00–3:00 | Instalar y abrir la PWA ciudadana, registrar una cuenta y radicar evidencia sintética. Mostrar el radicado en la aplicación. Consultar el estado de análisis. |
 | 3:00–4:30 | Entrar como CASE_ADMIN, ubicar el mismo radicado, asignar, registrar una nota y cambiar su gestión. Verificar el evento como ciudadano. |
 | 4:30–6:00 | Entrar como WEB_ADMIN y abrir usuarios, auditoría y cola. Interpretar los timestamps y el estado de la inferencia. |
 | 6:00–7:00 | En la instalación aislada activar TOTAL, radicar con una segunda evidencia sintética y comprobar el trabajo durable. Restaurar NONE. Mostrar recuperación hermética o una recuperación real si el preflight vigente habilitó la modalidad. |

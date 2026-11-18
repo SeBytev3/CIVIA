@@ -28,6 +28,8 @@ El tipo de servicio es `_civia._tcp.local.`. Android usa DNS-SD nativo con NSD. 
 
 ## TLS para navegador y PWA
 
+Para la entrega móvil abre `https://<nombre-o-IP>:<puerto>/app/` con el navegador del dispositivo. Si el nombre local carece de resolución en la red, usa la IP original incluida en el certificado mientras siga asignada al anfitrión. El navegador muestra la opción de instalación cuando el origen es seguro. El QR de emparejamiento del cliente Android corresponde al registro histórico del APK.
+
 El bootstrap LAN guarda una CA local y el certificado de Nginx en `.civia/lan/`. Transfiere sólo `ca.crt` por un canal autorizado cuando un navegador deba confiar en la CA de demostración. Las claves privadas permanecen en el computador. Abre el nombre DNS que figure en el certificado o la IP inicial incluida. Puedes elegir un nombre estable mediante `-LanName` o `--lan-name` al preparar el certificado. Ese nombre debe resolver a la interfaz publicada.
 
 Safari, Edge y Chromium requieren un origen confiable para instalar la PWA y usar cámara, micrófono y ubicación. En iOS autoriza la confianza de la CA conforme a la política del dispositivo. El QR de Android usa el certificado fijado en el perfil. Si el certificado se rota, comparte el QR nuevo mediante el canal autorizado y repite el emparejamiento.

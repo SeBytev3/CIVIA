@@ -1,5 +1,7 @@
 # Interfaces de CIVIA 1.1.1
 
+La vía de instalación móvil para la entrega académica es la PWA ciudadana en `/app/`. El cliente Android se conserva en el repositorio como interfaz independiente. [Instalación y HTTPS LAN](../README.md#pwa-ciudadana-y-red-local)
+
 | Entrada | Alcance |
 | --- | --- |
 | `/` | Web de radicación con encabezado institucional. Incluye autenticación, selección de ubicación, foto, audio opcional, confirmación y radicado. Funciona en escritorio y móvil. |

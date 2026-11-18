@@ -1,6 +1,27 @@
 # Estado de CIVIA 1.1.1
 
-Candidato de Momento 3 para el [PR #1](https://github.com/SeBytev3/CIVIA/pull/1). Entorno principal Windows 11, Docker Desktop con contenedores Linux, PostgreSQL 17 y Android Emulator API 35.
+## Cierre de aceptación de Momento 3
+
+La entrega móvil se centra en la PWA ciudadana. El proyecto Android y sus pruebas anteriores quedan como evidencia histórica. [Publicación](https://github.com/SeBytev3/CIVIA/releases/tag/v1.1.1) · [Flujo Git](FLUJO_GIT.md)
+
+| Entorno | Verificación observada |
+| --- | --- |
+| Windows AMD64 | Clon limpio con selección automática de proyecto, subred y puertos. Caja negra con tres roles y reinicio que conservó el reporte y los accesos. |
+| Linux AMD64 y ARM64 | Runners nativos de GitHub, arranque real Compose, caja negra, reinicio, proxy y suite hermética por arquitectura. [CI del candidato](https://github.com/SeBytev3/CIVIA/actions/runs/44240321004) |
+| PWA | Chromium instaló y abrió `/app/` en ventana independiente en Windows. Un navegador Linux con perfil desechable y la CA de prueba confiable verificó el origen HTTPS, la instalabilidad, el GPS emulado, la radicación y consulta real en viewport móvil. Las 13 pruebas web pasaron. |
+| Plataformas pendientes | macOS con Docker Desktop y PWA en un teléfono físico. |
+
+El preflight de cierre se ejecutó con cuota autorizada en una base aislada. Gemini volvió a mostrar su modelo en el catálogo autenticado y denegó generación con 403. Groq validó texto, herramientas, JSON y visión. En el recorrido funcional, Groq clasificó como `HUECO` la imagen sintética y transcribió una frase de habla sintética. El worker persistió el diagnóstico y la transcripción. La primera consulta del asistente recibió 429 y respondió por SQL. En una repetición acotada después de la pausa, la traza mostró una llamada exitosa a la herramienta y un segundo turno de respuesta de Groq. [Configuración y diagnóstico](AI_DEPLOY.md)
+
+| Hallazgo o tarea | Skill | Aplicación | Verificación |
+| --- | --- | --- | --- |
+| Portabilidad y archivos administrativos privados | `github-actions-advanced`, `systematic-debugging` | Runners nativos, credenciales sólo en lectura y el UID/GID del propietario | RED por permiso de lectura. GREEN con permisos privados y prueba de persistencia en ambas arquitecturas. |
+| Clon paralelo y arranque sin claves | `code-review-and-quality`, `verification-before-completion` | Valores aislados persistentes y configuración interactiva separada de inferencia en vivo | Clon Windows coexistió con la instalación habitual. Linux ARM64 comprobó el modo aislado. |
+| Seguridad y recuperación | `backend-security-coder`, `api-security`, `postgres-best-practices` | Revisar controles de autorización, cola, privilegios y límites de red con datos sintéticos | Suite hermética, tres roles, rechazo fuera de alcance, revisión de egreso y de la credencial histórica. [Semana 12](seguridad.md) |
+
+## Evidencia anterior al cierre
+
+Validación del [PR #1](https://github.com/SeBytev3/CIVIA/pull/1) en Windows 11, Docker Desktop, PostgreSQL 17 y Android Emulator API 35.
 
 ## Instalación habitual
 

@@ -13,6 +13,8 @@ Autoriza el uso de cuota antes de ejecutar `docker compose exec -T api python -m
 
 Si el catálogo autenticado lista el modelo de Gemini, el preflight aún requiere una generación exitosa para registrar la capacidad de texto. Si esa primera generación falla, omite modalidades adicionales en ese proveedor. [Resultados por modalidad](estado.md)
 
+El `403 PERMISSION_DENIED` observado también se repitió durante el cierre de 1.1.1. Verifica en Google AI Studio el tipo de credencial, el proyecto asociado y sus permisos de generación. Google documenta el cambio a Auth keys y posibles restricciones de proyecto. El catálogo visible no identifica qué política produjo el rechazo. El recorrido de caja negra con Groq verificó transcripción de habla sintética, persistencia de diagnóstico y una consulta con herramientas además del preflight. [Errores de Gemini](https://ai.google.dev/gemini-api/docs/generate-content/api-errors) · [Credenciales de Gemini](https://ai.google.dev/gemini-api/docs/api-key)
+
 Los adaptadores restringen los destinos y rutas de red, usan TLS, deshabilitan redirecciones y acotan el tamaño de la respuesta. El worker envía fotografía y contexto de incidente minimizado. La consulta agéntica usa herramientas tipadas con lecturas minimizadas. PostgreSQL registra reservas compartidas antes de cada llamada. Las referencias de modalidad están en [Gemini](https://ai.google.dev/api/generate-content), [visión de Groq](https://console.groq.com/docs/vision) y [voz de Groq](https://console.groq.com/docs/speech-to-text).
 
 Estado real de la cuenta y de la evaluación en [estado.md](estado.md).

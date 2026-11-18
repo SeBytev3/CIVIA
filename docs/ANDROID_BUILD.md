@@ -1,5 +1,7 @@
 # Compilación e instalación en Android
 
+La entrega móvil de Momento 3 se realiza mediante la PWA ciudadana. Este documento conserva el registro del APK debug anterior y el procedimiento para mantener el proyecto Android. [Instalación de la PWA](../README.md#pwa-ciudadana-y-red-local)
+
 El paquete de CIVIA es `co.edu.ucc.civia`. La versión 1.1.1 usa `versionCode=111`, admite Android 7.0 (API 24) en adelante y apunta a API 35. El APK de evaluación usa firma de depuración. Android permite instalarlo sobre otro paquete `co.edu.ucc.civia` únicamente si la firma coincide.
 
 | Artefacto local de evaluación | Valor |

@@ -2,6 +2,8 @@
 
 Stefania Córdoba y Sebastian Espinosa · Universidad Cooperativa de Colombia · Ingeniería de Aplicaciones con IA · Profesor Julián Garzón · Momento 3.
 
+La entrega móvil se instala desde la PWA ciudadana. La revisión distribuida se identifica por `main`, la etiqueta correspondiente y la release. [Flujo Git](FLUJO_GIT.md)
+
 | Área | Documento canónico |
 | --- | --- |
 | Arquitectura, capacidad, presupuesto y diagrama | [arquitectura_escala.md](arquitectura_escala.md) |

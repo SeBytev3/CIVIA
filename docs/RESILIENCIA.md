@@ -4,6 +4,8 @@ FastAPI autentica al ciudadano y valida los campos y evidencias. Crea el reporte
 
 PostgreSQL es la fuente de verdad. El worker reclama filas con `FOR UPDATE SKIP LOCKED` y una concesión temporal. Libera la transacción antes de inferencia. La entrega de trabajo puede repetirse tras un reinicio. La versión de reporte y el fencing token impiden la publicación de resultados tardíos por un worker desplazado. La revisión humana prevalece.
 
+La aceptación de cierre incluye una ejecución en modo degradado y un recorrido autorizado con imagen y habla sintéticas que verificó persistencia desde el worker. Los resultados de ese recorrido son independientes del preflight de modalidades. [Estado](estado.md)
+
 | Condición | Efecto |
 | --- | --- |
 | Disponibilidad normal | Gemini intenta analizar, luego Groq si falla y admite la modalidad |

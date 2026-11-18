@@ -2,6 +2,8 @@
 
 Consulta [Swagger](http://localhost:8000/docs) y [OpenAPI JSON](http://localhost:8000/openapi.json) en la instalación local. La API mantiene una sola base PostgreSQL para los tres perfiles. La respuesta de alta distingue la persistencia de la evidencia del diagnóstico asíncrono.
 
+Con un clon aislado, usa el puerto de API que imprime el bootstrap. La verificación automatizada usa el gateway de ese clon. [Instalación](../README.md) · [Caja negra](../eval/README.md)
+
 La sesión web usa cookie HttpOnly y header `X-CSRF-Token` en mutaciones posteriores al login. Android usa el modo `X-Session-Mode: bearer` y `Authorization: Bearer …`. Las sesiones de administración usan cookie. Los roles y permisos constan en [ROLES_Y_PERMISOS.md](ROLES_Y_PERMISOS.md).
 
 `POST /api/reports` recibe multipart con descripción, latitud, longitud y fotografía. Admite título y nota de voz opcionales. Usa `Idempotency-Key` con la misma carga al reintentar. Los clientes de CIVIA también envían `X-Civia-Account` y `X-Civia-Installation` para vincular el borrador al usuario y al servidor. Si el par ya no corresponde a la sesión activa, la API devuelve `409 REPORT_SCOPE_CHANGED` antes de guardar evidencia. Los datos propios y el catálogo identificado se consultan bajo sesión. El mapa público usa las rutas minimizadas.

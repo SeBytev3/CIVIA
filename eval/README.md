@@ -21,6 +21,15 @@ docker compose run --rm --no-deps -T `
     api python /app/acceptance.py --credentials-file /bootstrap/admin-access.json
 ```
 
+En Linux o macOS, ejecuta el mismo recorrido con el UID y GID del usuario que creó el archivo privado:
+
+```bash
+docker compose run --rm --no-deps -T --user "$(id -u):$(id -g)" \
+    --volume "$PWD/.civia/access:/bootstrap:ro" \
+    --volume "$PWD/eval/aceptacion_v111.py:/app/acceptance.py:ro" \
+    api python /app/acceptance.py --credentials-file /bootstrap/admin-access.json
+```
+
 ## Casos dorados
 
 La comprobación determinista emplea PostgreSQL desechable y escribe sus resultados en el contenedor de pruebas:

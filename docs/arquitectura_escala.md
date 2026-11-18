@@ -1,5 +1,7 @@
 # Semana 13 · Arquitectura y capacidad
 
+La PWA ciudadana es la vía móvil de la entrega. El recorrido de cierre verifica la cadena de procesamiento sobre un reporte sintético y no constituye una medición de carga. [Resultados](estado.md)
+
 ```mermaid
 flowchart LR
   C[Ciudadanía Android y web móvil] --> N[Nginx]

@@ -8,6 +8,8 @@ El portal está en `/admin/`, la radicación web en `/`, la PWA ciudadana en `/a
 
 ## Otro proyecto Compose en la misma máquina
 
+En un clon limpio, el primer arranque con `-Isolated` o `--isolated` elige un nombre de proyecto independiente, puertos en loopback y una subred sin colisión con las redes activas de Docker. Los valores se guardan en `.env`. Las instalaciones existentes pueden elegirlos explícitamente con el procedimiento siguiente.
+
 Si Docker informa que la subred predeterminada o su gateway ya está en uso, identifica un rango privado libre con `docker network ls` y `docker network inspect`. Ejemplo equivalente al de la verificación con un clon y volúmenes aparte en Windows:
 
 ```powershell
@@ -25,6 +27,8 @@ Mantén el proxy fuera del rango dinámico. Cada conjunto de puertos publicado n
 ## Credenciales de instalación
 
 Los bootstrap de PowerShell y Bash ejecutan el iniciador administrativo efímero. En una instalación nueva guarda las credenciales iniciales CSPRNG en `.civia/access/admin-access.json` con acceso privado. Conserva el archivo fuera de Git. Si el proyecto ya tiene administración web, el arranque preserva las cuentas y usa la recuperación por los canales habituales.
+
+Para la credencial histórica de PostgreSQL, prepara una copia privada verificable y una ventana de mantenimiento. Rota con `\password` desde `psql` en el contenedor, actualiza en privado `POSTGRES_PASSWORD` y `DATABASE_URL` y comprueba migrador, salud y reportes antes de cerrar la ventana. PostgreSQL aplica la contraseña de `.env` al inicializar un volumen nuevo. El cambio de `.env` por sí solo carece de efecto sobre un rol ya creado. Los tres DSN operativos usan roles separados.
 
 ## Evidencia de versión
 
