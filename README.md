@@ -9,9 +9,10 @@ La experiencia ciudadana usa React y Capacitor en Android y tiene una contingenc
 Instala Git y Docker Desktop con contenedores Linux. Desde PowerShell en Windows 11:
 
 ```powershell
-git clone https://github.com/SeBytev3/CIVIA.git
+git clone --branch feature/civia-v1.1-mobile-security-resilience https://github.com/SeBytev3/CIVIA.git
 cd CIVIA
-.\scriptsun.ps1
+.\scripts
+un.ps1
 ```
 
 En Linux o macOS ejecuta `./scripts/run.sh`. El script inicializa `.env` local y espera la salud de los servicios. Revisa la versión y la rama publicadas antes de evaluar el candidato 1.1.0. El estado del candidato y los resultados están en [docs/estado.md](docs/estado.md).

@@ -14,7 +14,9 @@ Registro del candidato de Momento 3 · 17 de noviembre de 2026 · hora de Bogot�
 
 ## Pruebas y dependencias
 
-- `docker compose --profile test run --rm --build tests pytest -m "not live" -q --tb=short` en PostgreSQL desechable. **196 aprobadas, 1 omitida y 1 deseleccionada**. La prueba de proxy requiere la red del despliegue. La prueba deseleccionada consume cuota externa. Hubo dos avisos de obsolescencia de las bibliotecas para pruebas.
+- El clon del commit de implementación `21c73ec2321ce1863b4abf101cc167da0b18d524` arrancó sin `.env` preexistente, con una subred aislada por coexistencia de proyectos Compose. `/health` confirmó conexión y esquema, OpenAPI reportó 1.1.0 y el smoke de PWA, proxy y rutas privadas pasó.
+- La actualización de un PostgreSQL desechable con migraciones 001–007 a 014 preservó UUID, radicado, estado, fecha y huella de la evidencia de un reporte legado sintético. La fila conservó el propietario vacío. Una segunda ejecución quedó sin migraciones pendientes.
+- `docker compose --profile test run --rm --build tests pytest -m "not live" -q --tb=short` en PostgreSQL desechable. **196 aprobadas, 1 omitida y 1 deseleccionada**. La prueba de proxy pasó por separado en la red de un despliegue real desde clon limpio. La prueba deseleccionada consume cuota externa. Hubo dos avisos de obsolescencia de las bibliotecas para pruebas.
 - `npm run typecheck`, `npm run build` y `npm run test:e2e` pasaron. Seis pruebas de Playwright y un smoke de navegador conectado a la API. Compilación de Python y revisión de espacios Git pasaron.
 - `pip check` y `pip-audit` de las dependencias Python resueltas pasaron tras corregir FastAPI/Starlette, Pillow, python-multipart y pytest. Pytest queda sólo en la imagen de pruebas.
 - `npm audit --omit=dev` reportó cero hallazgos. La auditoría completa reportó cuatro entradas vinculadas a Picomatch y la cadena de Vite. La dependencia afectada queda en la construcción y el servidor de desarrollo en loopback. Nginx sirve el resultado estático. El aviso [GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf) no indicaba una versión corregida al verificar.
