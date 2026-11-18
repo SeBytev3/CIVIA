@@ -1,9 +1,12 @@
-﻿param([switch]$InitializeOnly, [switch]$Stop, [switch]$Lan, [string]$LanAddress, [string]$LanName, [switch]$NoDiscovery)
+﻿param([switch]$InitializeOnly, [switch]$Stop, [switch]$Lan, [string]$LanAddress, [string]$LanName, [switch]$NoDiscovery, [switch]$Interactive, [switch]$Isolated)
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 . (Join-Path $PSScriptRoot 'civia-host.ps1')
 if (($LanAddress -or $LanName -or $NoDiscovery) -and -not $Lan) { throw 'Usa -Lan para estas opciones.' }
-if ($Stop -and ($Lan -or $InitializeOnly)) { throw 'Usa -Stop independientemente.' }
+if ($Stop -and ($Lan -or $InitializeOnly -or $Interactive -or $Isolated)) { throw 'Usa -Stop independientemente.' }
+if ($InitializeOnly -and ($Interactive -or $Isolated)) { throw 'Usa -InitializeOnly independientemente.' }
+if ($Isolated -and (Test-Path -LiteralPath .env)) { throw '-Isolated corresponde al primer arranque de un clon sin .env.' }
+if ($Interactive -and [Console]::IsInputRedirected) { throw '-Interactive requiere una terminal interactiva.' }
 
 function New-CiviaSecret {
     $bytes = New-Object byte[] 32
@@ -17,8 +20,7 @@ function Read-CiviaSetting([string]$Name) {
     return $match.Groups[1].Value.Trim().Trim('"').Trim("'")
 }
 
-function Add-CiviaSetting([string]$Name, [string]$Value) {
-    if (Read-CiviaSetting $Name) { return }
+function Set-CiviaSetting([string]$Name, [string]$Value) {
     if ($script:EnvText -match "(?m)^$Name=[^\r\n]*") {
         $script:EnvText = [regex]::Replace($script:EnvText, "(?m)^$Name=[^\r\n]*", { param($m) "$Name=$Value" })
     } else {
@@ -26,11 +28,19 @@ function Add-CiviaSetting([string]$Name, [string]$Value) {
     }
 }
 
+function Add-CiviaSetting([string]$Name, [string]$Value) {
+    if (-not (Read-CiviaSetting $Name)) { Set-CiviaSetting $Name $Value }
+}
+
 function Initialize-CiviaEnv {
     $envPath = Join-Path (Get-Location).Path '.env'
     $script:EnvText = if (Test-Path -LiteralPath $envPath) {
         [IO.File]::ReadAllText($envPath)
     } else { [IO.File]::ReadAllText((Join-Path (Get-Location).Path '.env.example')) }
+    if ($Isolated) {
+        $settings = New-CiviaIsolatedSettings
+        foreach ($setting in $settings.GetEnumerator()) { Set-CiviaSetting $setting.Key $setting.Value }
+    }
     Add-CiviaSetting POSTGRES_DB 'civia'
     Add-CiviaSetting POSTGRES_USER 'civia'
     Add-CiviaSetting POSTGRES_PASSWORD (New-CiviaSecret)
@@ -51,4 +61,10 @@ function Initialize-CiviaEnv {
 
 if (-not $Stop) { Initialize-CiviaEnv }
 if ($InitializeOnly) { return }
+if ($Interactive -and ((-not (Read-CiviaSetting GOOGLE_API_KEY_PRIMARY)) -or (-not (Read-CiviaSetting GROQ_API_KEY)))) {
+    if ((Read-Host '¿Quieres ingresar las claves de IA ahora? [s/N]') -match '^[sSyY]$') {
+        & "$PSScriptRoot/setup_ai_keys.ps1" -ConfigureOnly
+        $script:EnvText = [IO.File]::ReadAllText((Join-Path (Get-Location).Path '.env'))
+    }
+}
 . (Join-Path $PSScriptRoot 'civia-run-host.ps1')

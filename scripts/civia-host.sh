@@ -47,6 +47,56 @@ civia_ipv4_range() {
     printf '%s %s\n' "$first" "$((first + span - 1))"
 }
 
+civia_find_port() {
+    local port
+    for ((port=$1; port<$1+30; port++)); do
+        if ! (: >/dev/tcp/127.0.0.1/"$port") 2>/dev/null; then
+            printf '%s\n' "$port"
+            return
+        fi
+    done
+    civia_fail 'No se encontró un puerto local para el clon aislado.'
+}
+
+civia_initialize_isolated() {
+    local key networks network ranges subnet interval first last used_first used_last
+    local index candidate prefix='' api_port http_port
+    local occupied=()
+    for key in COMPOSE_PROJECT_NAME CIVIA_SUBNET CIVIA_GATEWAY CIVIA_DYNAMIC_RANGE CIVIA_FRONTEND_IP CIVIA_API_PORT CIVIA_HTTP_PORT; do
+        [[ -z "${!key:-}" ]] || civia_fail "Quita $key del entorno antes de usar --isolated."
+    done
+    civia_require_docker
+    networks=$(docker network ls -q)
+    while read -r network; do
+        [[ -n $network ]] || continue
+        ranges=$(docker network inspect --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' "$network")
+        while read -r subnet; do
+            if interval=$(civia_ipv4_range "$subnet"); then occupied+=("$interval"); fi
+        done <<<"$ranges"
+    done <<<"$networks"
+    for ((index=240; index<=254; index++)); do
+        candidate="172.29.$index"
+        read -r first last <<<"$(civia_ipv4_range "$candidate.0/24")"
+        for interval in "${occupied[@]}"; do
+            read -r used_first used_last <<<"$interval"
+            if ((first <= used_last && used_first <= last)); then continue 2; fi
+        done
+        prefix=$candidate
+        break
+    done
+    [[ -n $prefix ]] || civia_fail 'No se encontró una subred Docker para el clon aislado.'
+    api_port=$(civia_find_port 18000)
+    http_port=$(civia_find_port 15000)
+    civia_initialize_env
+    civia_write_setting COMPOSE_PROJECT_NAME "civia_$(civia_secret | cut -c1-12)"
+    civia_write_setting CIVIA_SUBNET "$prefix.0/24"
+    civia_write_setting CIVIA_GATEWAY "$prefix.1"
+    civia_write_setting CIVIA_DYNAMIC_RANGE "$prefix.128/25"
+    civia_write_setting CIVIA_FRONTEND_IP "$prefix.2"
+    civia_write_setting CIVIA_API_PORT "$api_port"
+    civia_write_setting CIVIA_HTTP_PORT "$http_port"
+}
+
 civia_network_check() {
     local name project subnet gateway pool limits first last networks network ranges range peer_first peer_last
     local details owner label driver ipam

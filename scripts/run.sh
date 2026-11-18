@@ -4,7 +4,7 @@ cd -- "$(dirname -- "$0")/.."
 source scripts/civia-env.sh
 source scripts/civia-host.sh
 
-lan=0; stop=0; init_only=0; discovery=1; address=''; tls_name=''
+lan=0; stop=0; init_only=0; discovery=1; interactive=0; isolated=0; address=''; tls_name=''
 while (($#)); do
     case $1 in
         --lan) lan=1; shift ;;
@@ -13,13 +13,27 @@ while (($#)); do
         --no-discovery) discovery=0; shift ;;
         --stop) stop=1; shift ;;
         --initialize-only) init_only=1; shift ;;
+        --interactive) interactive=1; shift ;;
+        --isolated) isolated=1; shift ;;
         *) civia_fail "Opción no reconocida: $1" ;;
     esac
 done
 if ((!lan)) && [[ -n "$address$tls_name" || $discovery == 0 ]]; then civia_fail 'Usa --lan para estas opciones.'; fi
-if ((stop && (lan || init_only))); then civia_fail 'Usa --stop independientemente.'; fi
-if ((!stop)); then civia_initialize_env; fi
+if ((stop && (lan || init_only || interactive || isolated))); then civia_fail 'Usa --stop independientemente.'; fi
+if ((init_only && (interactive || isolated))); then civia_fail 'Usa --initialize-only independientemente.'; fi
+if ((interactive)) && [[ ! -t 0 ]]; then civia_fail '--interactive requiere una terminal interactiva.'; fi
+if ((isolated)); then
+    [[ ! -e .env ]] || civia_fail '--isolated corresponde al primer arranque de un clon sin .env.'
+    civia_initialize_isolated
+elif ((!stop)); then
+    civia_initialize_env
+fi
 if ((init_only)); then exit 0; fi
+if ((interactive)) && { [[ -z "$(civia_read_setting GOOGLE_API_KEY_PRIMARY)" ]] || [[ -z "$(civia_read_setting GROQ_API_KEY)" ]]; }; then
+    if IFS= read -r -p '¿Quieres ingresar las claves de IA ahora? [s/N] ' answer && [[ $answer =~ ^[sSyY]$ ]]; then
+        ./scripts/setup_ai_keys.sh --configure-only
+    fi
+fi
 
 civia_require_docker
 base=(docker compose -f docker-compose.yml)

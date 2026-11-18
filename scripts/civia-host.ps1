@@ -63,6 +63,45 @@ function Get-CiviaIPv4Range([string]$Subnet) {
     return @($start, ($start + $span - 1))
 }
 
+function New-CiviaIsolatedSettings {
+    $keys = 'COMPOSE_PROJECT_NAME', 'CIVIA_SUBNET', 'CIVIA_GATEWAY', 'CIVIA_DYNAMIC_RANGE', 'CIVIA_FRONTEND_IP', 'CIVIA_API_PORT', 'CIVIA_HTTP_PORT'
+    foreach ($key in $keys) {
+        if ([Environment]::GetEnvironmentVariable($key)) { throw "Quita $key del entorno antes de usar -Isolated." }
+    }
+    $networks = @(docker network ls -q)
+    if ($LASTEXITCODE -ne 0) { throw 'Abre Docker antes de preparar el clon aislado.' }
+    $occupied = @(foreach ($network in $networks) {
+        $ranges = @(docker network inspect --format '{{range .IPAM.Config}}{{println .Subnet}}{{end}}' $network)
+        if ($LASTEXITCODE -ne 0) { throw 'Docker no confirmó las subredes existentes.' }
+        foreach ($range in $ranges) {
+            if ($range -match '^\d+(\.\d+){3}/\d+$') { ,@(Get-CiviaIPv4Range $range) }
+        }
+    })
+    $prefix = $null
+    foreach ($index in 240..254) {
+        $candidate = "172.29.$index"
+        $first, $last = Get-CiviaIPv4Range "$candidate.0/24"
+        if (-not @($occupied | Where-Object { $first -le $_[1] -and $_[0] -le $last }).Count) {
+            $prefix = $candidate
+            break
+        }
+    }
+    if (-not $prefix) { throw 'No se encontró una subred Docker para el clon aislado.' }
+    $listeners = @([Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0), [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0))
+    try {
+        foreach ($listener in $listeners) { $listener.Start() }
+        return [ordered]@{
+            COMPOSE_PROJECT_NAME = 'civia_' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
+            CIVIA_SUBNET = "$prefix.0/24"
+            CIVIA_GATEWAY = "$prefix.1"
+            CIVIA_DYNAMIC_RANGE = "$prefix.128/25"
+            CIVIA_FRONTEND_IP = "$prefix.2"
+            CIVIA_API_PORT = $listeners[0].LocalEndpoint.Port
+            CIVIA_HTTP_PORT = $listeners[1].LocalEndpoint.Port
+        }
+    } finally { foreach ($listener in $listeners) { $listener.Stop() } }
+}
+
 function Assert-CiviaNetwork {
     $project = if ($env:COMPOSE_PROJECT_NAME) { $env:COMPOSE_PROJECT_NAME } else { Read-CiviaSetting COMPOSE_PROJECT_NAME }
     if (-not $project) { $project = (Split-Path (Get-Location).Path -Leaf).ToLowerInvariant() -replace '[^a-z0-9_-]','' }

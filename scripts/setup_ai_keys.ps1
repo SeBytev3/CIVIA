@@ -1,5 +1,6 @@
-﻿param([switch]$ValidateLive, [switch]$NonInteractive)
+﻿param([switch]$ValidateLive, [switch]$NonInteractive, [switch]$ConfigureOnly)
 $ErrorActionPreference = 'Stop'
+if ($ConfigureOnly -and $ValidateLive) { throw 'Selecciona una sola modalidad de configuración.' }
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
 & "$PSScriptRoot/run.ps1" -InitializeOnly
@@ -24,6 +25,7 @@ if (-not $NonInteractive) {
     }
 }
 [IO.File]::WriteAllText($envPath, $envText, [Text.UTF8Encoding]::new($false))
+if ($ConfigureOnly) { return }
 $apiId = docker compose ps -q api
 if ($LASTEXITCODE -ne 0) { throw 'Docker Compose no está disponible.' }
 if (-not $apiId) {

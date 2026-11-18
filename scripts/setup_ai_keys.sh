@@ -6,8 +6,9 @@ civia_initialize_env
 validate_flag=
 case "${1:-}" in
     '') ;;
+    --configure-only) ;;
     --validate-live) validate_flag=--live ;;
-    *) printf '%s\n' 'Uso: ./scripts/setup_ai_keys.sh [--validate-live]' >&2; exit 2 ;;
+    *) printf '%s\n' 'Uso: ./scripts/setup_ai_keys.sh [--configure-only | --validate-live]' >&2; exit 2 ;;
 esac
 
 if [[ -t 0 ]]; then
@@ -24,6 +25,7 @@ if [[ -t 0 ]]; then
         unset key
     done
 fi
+if [[ "${1:-}" == --configure-only ]]; then exit 0; fi
 if [[ -z "$(docker compose ps -q api)" ]]; then
     printf '%s\n' 'Configuración guardada. Inicie con ./scripts/run.sh.'
     exit 0
