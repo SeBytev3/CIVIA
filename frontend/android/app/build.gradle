@@ -7,8 +7,8 @@ android {
         applicationId "co.edu.ucc.civia"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 110
-        versionName "1.1.0"
+        versionCode 111
+        versionName "1.1.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -35,6 +35,8 @@ dependencies {
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
     implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
     implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'com.google.zxing:core:3.5.4'
     implementation project(':capacitor-android')
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
@@ -52,36 +54,3 @@ try {
 } catch(Exception e) {
     logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
 }
-
-
-// Debug-only cleartext for the chosen local demo host and ADB/emulator loopback.
-// Release builds use the main resource, which denies all cleartext traffic.
-def demoEndpoint = System.getenv('VITE_API_BASE_URL') ?: 'http://127.0.0.1:5173'
-def demoUri = new URI(demoEndpoint)
-def debugHosts = ['127.0.0.1', 'localhost', '10.0.2.2'] as Set
-if (demoUri.scheme == 'http') {
-    def demoHost = demoUri.host
-    if (demoHost == null || !(demoHost ==~ /(?:localhost|127\.0\.0\.1|10\.0\.2\.2|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})/)) {
-        throw new GradleException('El backend HTTP de demostración requiere loopback o una IPv4 privada.')
-    }
-    debugHosts.add(demoHost)
-}
-def debugRes = layout.buildDirectory.dir('generated/civia-debug-res')
-def writeDebugNetworkConfig = tasks.register('writeDebugNetworkConfig') {
-    inputs.property('debugHosts', debugHosts.sort().join(','))
-    outputs.dir(debugRes)
-    doLast {
-        def xml = debugRes.get().file('xml/network_security_config.xml').asFile
-        xml.parentFile.mkdirs()
-        xml.text = """<?xml version="1.0" encoding="utf-8"?>
-<network-security-config>
-    <base-config cleartextTrafficPermitted="false" />
-    <domain-config cleartextTrafficPermitted="true">
-        ${debugHosts.collect { "<domain includeSubdomains=\"false\">${it}</domain>" }.join('\n        ')}
-    </domain-config>
-</network-security-config>
-"""
-    }
-}
-android.sourceSets.debug.res.srcDir(debugRes)
-tasks.matching { it.name == 'preDebugBuild' }.configureEach { dependsOn(writeDebugNetworkConfig) }

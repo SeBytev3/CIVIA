@@ -1,11 +1,14 @@
 import type { CapacitorConfig } from '@capacitor/cli';
 
-const endpoint = new URL(process.env.VITE_API_BASE_URL || 'http://127.0.0.1:5173');
 const config: CapacitorConfig = {
   appId: 'co.edu.ucc.civia',
   appName: 'CIVIA',
   webDir: 'dist-native',
-  server: { androidScheme: endpoint.protocol === 'https:' ? 'https' : 'http' },
+  loggingBehavior: 'none',
+  // Capacitor intercepts this loopback-only asset origin without opening a cleartext socket.
+  // Keeping the 1.1.0 origin allows explicit recovery of the legacy IndexedDB draft.
+  server: { androidScheme: 'http' },
   android: { allowMixedContent: false, webContentsDebuggingEnabled: false, adjustMarginsForEdgeToEdge: 'auto' },
+  plugins: { CapacitorHttp: { enabled: false }, CapacitorCookies: { enabled: false } },
 };
 export default config;

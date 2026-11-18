@@ -1,14 +1,24 @@
 import { Capacitor, registerPlugin } from '@capacitor/core';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
 import { Geolocation } from '@capacitor/geolocation';
+import { fromBase64 } from './nativeConnection';
 
 export const isNative = Capacitor.isNativePlatform();
 
-export const sessionVault = registerPlugin<{
-  get(): Promise<{ value?: string }>;
-  set(payload: { value: string }): Promise<void>;
-  clear(): Promise<void>;
-}>('CiviaSession');
+export { randomId } from './nativeConnection';
+
+const microphone = registerPlugin<{
+  start(): Promise<void>;
+  stop(): Promise<{ base64: string }>;
+  cancel(): Promise<void>;
+}>('CiviaAudio');
+
+export const startNativeRecording = () => microphone.start();
+export const cancelNativeRecording = () => microphone.cancel();
+export async function stopNativeRecording() {
+  const { base64 } = await microphone.stop();
+  return new File([fromBase64(base64)], 'nota-de-voz.wav', { type: 'audio/wav' });
+}
 
 export async function takeNativePhoto(source: CameraSource): Promise<File> {
   const photo = await Camera.getPhoto({

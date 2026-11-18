@@ -1,13 +1,14 @@
 {
   "name": "civia-frontend",
   "private": true,
-  "version": "1.1.0",
+  "version": "1.1.1",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 5173",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173",
     "test:e2e": "node e2e/test_roles.cjs",
+    "test:pwa-install": "node e2e/test_pwa_install.cjs",
     "build:android": "tsc -b && vite build --mode android",
     "sync:android": "npm run build:android && cap sync android",
     "typecheck": "tsc --noEmit"

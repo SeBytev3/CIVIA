@@ -74,7 +74,7 @@ export function CaliMap({
     const map = L.map(containerRef.current, {
       center: [3.4372, -76.5225],
       zoom: 12,
-      scrollWheelZoom: true,
+      scrollWheelZoom: false,
     });
 
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -85,8 +85,11 @@ export function CaliMap({
     const layerGroup = L.layerGroup().addTo(map);
     mapRef.current = map;
     markersLayerRef.current = layerGroup;
+    const resize = new ResizeObserver(() => map.invalidateSize({ pan: false, debounceMoveend: true }));
+    resize.observe(containerRef.current);
 
     return () => {
+      resize.disconnect();
       map.remove();
       mapRef.current = null;
       markersLayerRef.current = null;
@@ -196,9 +199,16 @@ export function CaliMap({
       <div
         ref={containerRef}
         style={{ height, width: '100%' }}
-        aria-label="Mapa interactivo de reportes ciudadanos en Santiago de Cali"
+        role="region"
+        aria-label={selectable ? 'Mapa para elegir la ubicación del incidente' : 'Mapa interactivo de reportes ciudadanos en Santiago de Cali'}
       />
-      <div className="civia-map-legend" aria-label="Convenciones del mapa">
+      {selectable ? <div className="map-picker-controls actions">
+        <p>Elige un punto o desplaza el mapa para usar su centro.</p>
+        <button type="button" className="secondary" onClick={() => {
+          const center = mapRef.current?.getCenter();
+          if (center) onPickCoords?.(Number(center.lat.toFixed(6)), Number(center.lng.toFixed(6)));
+        }}>Usar centro del mapa</button>
+      </div> : <div className="civia-map-legend" aria-label="Convenciones del mapa">
         <span>
           <i style={{ background: CATEGORY_COLORS.HUECO }} /> Huecos viales
         </span>
@@ -214,7 +224,7 @@ export function CaliMap({
         <span>
           <i style={{ background: CATEGORY_COLORS.PENDIENTE }} /> En análisis / Otro
         </span>
-      </div>
+      </div>}
     </div>
   );
 }

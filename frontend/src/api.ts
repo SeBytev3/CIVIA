@@ -1,4 +1,5 @@
-import { isNative, sessionVault } from './device';
+import { isNative, randomId } from './device';
+import { connection, nativeProfile, nativeRequest } from './nativeConnection';
 import type {
   AdminNotificationsResponse, AgentQueryResponse, AnalysisQueue, AuditEntry,
   DeadLetterJob, ObservabilityData, Page, PendingApprovalItem, PublicMapItem,
@@ -6,9 +7,7 @@ import type {
   Session, User,
 } from './types';
 
-const apiBase = isNative ? (import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:5173').replace(/\/+$/, '') : '';
 let csrf = '';
-let nativeToken = '';
 
 const failureMessages: Record<number, string> = {
   400: 'Revisa los datos ingresados e intenta nuevamente.',
@@ -31,23 +30,40 @@ export class CiviaError extends Error {
 
 function requestHeaders(options: RequestInit) {
   const headers = new Headers(options.headers);
-  if (nativeToken) headers.set('Authorization', `Bearer ${nativeToken}`);
   if (csrf && !['GET', 'HEAD'].includes(options.method ?? 'GET')) headers.set('X-CSRF-Token', csrf);
   return headers;
 }
 
-async function request(path: string, options: RequestInit = {}): Promise<Response> {
+function deadline(milliseconds: number, parent?: AbortSignal | null) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (parent?.aborted) abort();
+  else parent?.addEventListener('abort', abort, { once: true });
+  const timer = window.setTimeout(abort, milliseconds);
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      window.clearTimeout(timer);
+      parent?.removeEventListener('abort', abort);
+    },
+  };
+}
+
+async function request(path: string, options: RequestInit = {}, ownerId?: string, installationId?: string): Promise<Response> {
   let response: Response;
   try {
-    response = await fetch(`${apiBase}${path}`, {
+    response = isNative ? await nativeRequest(path, options, ownerId, installationId) : await fetch(path, {
       ...options,
       headers: requestHeaders(options),
-      credentials: isNative ? 'omit' : 'same-origin',
+      credentials: 'same-origin',
       cache: 'no-store',
       redirect: 'error',
-      signal: options.signal ?? AbortSignal.timeout(40000),
     });
-  } catch {
+  } catch (error) {
+    const code = (error as { code?: string } | null)?.code;
+    if (isNative && (code === 'identity' || code === 'unavailable') && !options.signal?.aborted) {
+      window.dispatchEvent(new CustomEvent('civia-connection-lost', { detail: code }));
+    }
     throw new CiviaError(0, 'No fue posible conectar con CIVIA. Revisa tu conexión.');
   }
   if (!response.ok) {
@@ -60,14 +76,14 @@ async function request(path: string, options: RequestInit = {}): Promise<Respons
   return response;
 }
 
-async function json<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await request(path, options);
-  if (response.status === 204) return undefined as T;
+async function json<T>(path: string, options?: RequestInit, ownerId?: string, installationId?: string): Promise<T> {
+  const timeout = deadline(40000, options?.signal);
   try {
-    return await response.json() as T;
-  } catch {
-    throw new CiviaError(0, 'No se pudo confirmar la respuesta de CIVIA.');
-  }
+    const response = await request(path, { ...options, signal: timeout.signal }, ownerId, installationId);
+    if (response.status === 204) return undefined as T;
+    try { return await response.json() as T; }
+    catch { throw new CiviaError(0, 'No se pudo confirmar la respuesta de CIVIA.'); }
+  } finally { timeout.dispose(); }
 }
 
 function query(path: string, params: Record<string, string | number | boolean | undefined>) {
@@ -83,32 +99,25 @@ function body(method: string, value: unknown, headers?: Record<string, string>):
   return { method, headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(value) };
 }
 
-async function setSession(session: Session) {
+function setSession(session: Session) {
   csrf = isNative ? '' : session.csrf_token ?? '';
-  if (isNative && session.token) {
-    await sessionVault.set({ value: JSON.stringify(session) });
-    nativeToken = session.token;
-  }
   return session.user;
 }
 
 export async function readSession(): Promise<User | null> {
   let cached: Session | undefined;
   if (isNative) {
-    const secured = (await sessionVault.get()).value;
-    if (secured) {
-      try { cached = JSON.parse(secured) as Session; } catch { await sessionVault.clear(); }
-    }
-    nativeToken = cached?.token ?? '';
-    if (!nativeToken) return null;
+    const selected = nativeProfile();
+    if (!selected) return null;
+    const secured = (await connection.cachedSession({ profileId: selected.profileId })).json;
+    if (!secured || selected.profileId !== nativeProfile()?.profileId) return null;
+    try { cached = JSON.parse(secured) as Session; } catch { return null; }
   }
   try {
     return await setSession(await json<Session>('/api/auth/session'));
   } catch (error) {
     if (error instanceof CiviaError && error.status === 401) {
       csrf = '';
-      nativeToken = '';
-      if (isNative) await sessionVault.clear();
       return null;
     }
     if (cached?.user.role === 'CITIZEN' && Date.parse(cached.expires_at) > Date.now() &&
@@ -120,15 +129,46 @@ export async function readSession(): Promise<User | null> {
 }
 
 export async function authenticate(mode: 'login' | 'register', values: { email: string; password: string; name?: string }) {
-  return setSession(await json<Session>(`/api/auth/${mode}`, body('POST', values, isNative ? { 'X-Session-Mode': 'bearer' } : undefined)));
+  return setSession(await json<Session>(`/api/auth/${mode}`, body('POST', values)));
 }
 
 export async function logout() {
   try { await json<void>('/api/auth/logout', { method: 'POST' }); }
   catch (error) { if (!(error instanceof CiviaError) || error.status !== 401) throw error; }
-  if (isNative) await sessionVault.clear();
-  nativeToken = '';
   csrf = '';
+}
+
+const installationIdPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+async function webInstallation() {
+  const timeout = deadline(5000);
+  try {
+    const meta = await json<{ installation_id: string; protocol: number }>('/api/meta', { signal: timeout.signal });
+    if (meta.protocol !== 1 || !installationIdPattern.test(meta.installation_id)) {
+      throw new CiviaError(409, 'La instalación de CIVIA no es compatible.');
+    }
+    return meta.installation_id.toLowerCase();
+  } finally { timeout.dispose(); }
+}
+
+export async function draftInstallation(ownerId: string) {
+  if (isNative) {
+    const installationId = nativeProfile()?.installationId;
+    if (installationId) return installationId;
+    throw new CiviaError(0, 'Selecciona un servidor CIVIA antes de abrir los borradores.');
+  }
+  const storageKey = `civia-installation:${ownerId}`;
+  try {
+    const installationId = await webInstallation();
+    try { localStorage.setItem(storageKey, installationId); } catch { /* Storage may be disabled. */ }
+    return installationId;
+  } catch (error) {
+    if (error instanceof CiviaError && (error.status === 0 || error.status >= 500)) {
+      const cached = localStorage.getItem(storageKey);
+      if (cached && installationIdPattern.test(cached)) return cached;
+    }
+    throw error;
+  }
 }
 
 export const getStats = () => json<ReportStats>('/api/reports/stats');
@@ -137,14 +177,27 @@ export const getPublicMap = () => json<Page<PublicMapItem>>('/api/public/reports
 export const getReports = (filters: Record<string, string | number | undefined> = {}) => json<Page<ReportItem>>(query('/api/reports', filters));
 export const getReportByCode = (code: string) => json<ReportItem>(`/api/reports/by-code/${encodeURIComponent(code.trim())}`);
 export const getEvents = (id: string) => json<ReportEventItem[]>(`/api/reports/${encodeURIComponent(id)}/events`);
-export const getEvidence = async (id: string, kind: 'photo' | 'audio', signal: AbortSignal) =>
-  (await request(`/api/reports/${encodeURIComponent(id)}/${kind}`, { signal })).blob();
-export const submitReport = (data: FormData, key: string) =>
-  json<ReportItem>('/api/reports', { method: 'POST', headers: { 'Idempotency-Key': key }, body: data });
+export async function getEvidence(id: string, kind: 'photo' | 'audio', signal: AbortSignal) {
+  const timeout = deadline(40000, signal);
+  try {
+    const response = await request(`/api/reports/${encodeURIComponent(id)}/${kind}`, { signal: timeout.signal });
+    return await response.blob();
+  } finally { timeout.dispose(); }
+}
+export async function submitReport(data: FormData, key: string, ownerId: string, installationId: string) {
+  if (!isNative && await webInstallation() !== installationId) {
+    throw new CiviaError(409, 'Este borrador pertenece a otra instalación de CIVIA.');
+  }
+  return json<ReportItem>('/api/reports', {
+    method: 'POST',
+    headers: { 'Idempotency-Key': key, 'X-Civia-Account': ownerId, 'X-Civia-Installation': installationId },
+    body: data,
+  }, ownerId, installationId);
+}
 export const confirmReport = (id: string, category: ReportCategory, severity: ReportSeverity | null, note: string) =>
   json<ReportItem>(`/api/reports/${encodeURIComponent(id)}/confirm`, body('PATCH', { final_category: category, final_severity: severity, human_override_note: note || null }));
 export const queryAgent = (question: string) =>
-  json<AgentQueryResponse>('/api/agent/query', body('POST', { query: question }, { 'Idempotency-Key': crypto.randomUUID() }));
+  json<AgentQueryResponse>('/api/agent/query', body('POST', { query: question }, { 'Idempotency-Key': randomId() }));
 
 export const getNotifications = () => json<AdminNotificationsResponse>('/api/admin/notifications?limit=50');
 export const markRead = (id: string) => json<void>(`/api/admin/notifications/${encodeURIComponent(id)}/read`, { method: 'PATCH' });

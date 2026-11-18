@@ -49,8 +49,9 @@ export function useSession() {
   return { user, setUser, loading, error, refresh, signOut };
 }
 
-export function Login({ allowRegister, onSession, onBack }: {
+export function Login({ allowRegister, onSession, onBack, heading: Heading = 'h1' }: {
   allowRegister?: boolean;
+  heading?: 'h1' | 'h2';
   onSession: (user: User) => void;
   onBack?: () => void;
 }) {
@@ -59,7 +60,7 @@ export function Login({ allowRegister, onSession, onBack }: {
   const [busy, setBusy] = useState(false);
   return (
     <section className="surface login-panel">
-      <h1>{mode === 'register' ? 'Crear cuenta ciudadana' : 'Iniciar sesión'}</h1>
+      <Heading>{mode === 'register' ? 'Crear cuenta ciudadana' : 'Iniciar sesión'}</Heading>
       <form className="stack" onSubmit={async (event) => {
         event.preventDefault();
         setBusy(true);
@@ -89,11 +90,13 @@ export function Login({ allowRegister, onSession, onBack }: {
   );
 }
 
-export function Profile({ user, signOut }: { user: User; signOut: () => Promise<void> }) {
+export function Profile({ user, signOut, onConnectionSettings }: {
+  user: User; signOut: () => Promise<void>; onConnectionSettings?: () => void;
+}) {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   return (
-    <section className="surface">
+    <section className="surface stack">
       <h1>Perfil</h1>
       <dl><dt>Nombre</dt><dd>{user.name}</dd><dt>Correo</dt><dd>{user.email}</dd><dt>Perfil</dt><dd>{roleLabels[user.role]}</dd></dl>
       {error && <p role="alert">{error}</p>}
@@ -104,6 +107,7 @@ export function Profile({ user, signOut }: { user: User; signOut: () => Promise<
         catch (reason) { setError((reason as Error).message); }
         finally { setBusy(false); }
       }}>Cerrar sesión</button>
+      {onConnectionSettings && <button className="secondary" onClick={onConnectionSettings}>Configurar conexión</button>}
     </section>
   );
 }

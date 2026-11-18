@@ -1,4 +1,5 @@
 .env
+.civia/
 .env.*
 !.env.example
 .venv/

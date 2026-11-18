@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { ReactNode } from 'react';
 import { App as NativeApp } from '@capacitor/app';
 import type { PluginListenerHandle } from '@capacitor/core';
 import { getPublicMap, getReportByCode, getReports, getPublicStats, getStats, queryAgent } from './api';
@@ -14,7 +15,7 @@ import { Brand, useLoad, PageControls } from './components/Common';
 type Tab = 'inicio' | 'reportar' | 'reportes' | 'asistente' | 'perfil';
 const tabs: Record<Tab, string> = { inicio: 'Inicio', reportar: 'Reportar', reportes: 'Mis reportes', asistente: 'Asistente', perfil: 'Perfil' };
 const tabIcons: Record<Tab, string> = { inicio: '⌂', reportar: '+', reportes: '☰', asistente: '✦', perfil: '○' };
-const mobileViewport = '(max-width: 767px) and (pointer: coarse)';
+const openConnectionSettings = () => window.dispatchEvent(new Event('civia-connection-settings'));
 
 function selectedTab(): Tab {
   const hash = location.hash.slice(1);
@@ -103,10 +104,9 @@ function Assistant() {
   </section>;
 }
 
-export function CitizenApp() {
+export function CitizenApp({ installation }: { installation?: ReactNode }) {
   const session = useSession();
   const [tab, setTab] = useState(selectedTab);
-  const [mobile, setMobile] = useState(() => isNative || matchMedia(mobileViewport).matches);
   const [sessionError, setSessionError] = useState('');
   const user = session.user?.role === 'CITIZEN' ? session.user : null;
 
@@ -117,10 +117,7 @@ export function CitizenApp() {
   }
 
   useEffect(() => {
-    const viewport = matchMedia(mobileViewport);
-    const update = () => setMobile(isNative || viewport.matches);
     const readTab = () => { setTab(selectedTab()); window.scrollTo(0, 0); };
-    viewport.addEventListener('change', update);
     window.addEventListener('popstate', readTab);
     window.addEventListener('hashchange', readTab);
     let handle: PluginListenerHandle | undefined;
@@ -132,11 +129,10 @@ export function CitizenApp() {
     }).then((listener) => {
       if (cancelled) void listener.remove();
       else handle = listener;
-    });
+    }).catch(() => {});
     return () => {
       cancelled = true;
       void handle?.remove();
-      viewport.removeEventListener('change', update);
       window.removeEventListener('popstate', readTab);
       window.removeEventListener('hashchange', readTab);
     };
@@ -144,12 +140,10 @@ export function CitizenApp() {
 
   let content;
   if (tab === 'inicio') content = <Home user={user} onReport={() => navigate('reportar')} onReports={() => navigate('reportes')} />;
-  else if (tab === 'reportar' && !mobile) content = <section className="surface stack"><h1>Nuevo reporte</h1><p>Para registrar un reporte, utiliza CIVIA desde tu dispositivo móvil.</p></section>;
   else if (session.loading) content = <p role="status">Comprobando sesión…</p>;
   else if (session.error) content = <section className="surface stack"><p role="alert">{session.error}</p><button onClick={session.refresh}>Reintentar conexión</button></section>;
   else if (session.user && !user) content = <section className="surface stack">
     <h1>Cuenta ciudadana requerida</h1>
-    {!isNative && <a href="/admin/">Ir al portal administrativo</a>}
     {sessionError && <p role="alert">{sessionError}</p>}
     <button onClick={() => void session.signOut().catch((reason: Error) => setSessionError(reason.message))}>Cerrar sesión para cambiar de cuenta</button>
   </section>;
@@ -157,14 +151,22 @@ export function CitizenApp() {
   else if (tab === 'reportar') content = <ReportForm key={user.id} ownerId={user.id} onNavigate={() => navigate('reportes')} />;
   else if (tab === 'reportes') content = <MyReports key={user.id} />;
   else if (tab === 'asistente') content = <Assistant key={user.id} />;
-  else content = <Profile user={user} signOut={session.signOut} />;
+  else content = <Profile user={user} signOut={session.signOut}
+    onConnectionSettings={isNative ? openConnectionSettings : undefined} />;
 
   return <div className="citizen-shell">
-    <header className="citizen-header"><Brand href="/" /><div className="actions">
-      {!isNative && <a className="desktop-admin-link" href="/admin/">Portal administrativo</a>}
-      {user ? <button className="quiet" onClick={() => navigate('perfil')}>{user.name}</button> : <button className="quiet" onClick={() => navigate('perfil')}>Entrar</button>}
-    </div></header>
-    <main className="citizen-content">{content}</main>
+    <header className="citizen-header">
+      <Brand href={isNative ? '/' : '/app/'} />
+      {user ? <button className="quiet" onClick={() => navigate('perfil')}>{user.name}</button>
+        : <div className="actions citizen-guest">
+          {isNative && <button className="quiet" onClick={openConnectionSettings}>Configurar conexión</button>}
+          <button className="quiet" onClick={() => navigate('perfil')}>Entrar</button>
+        </div>}
+    </header>
+    <main className="citizen-content stack">
+      {tab === 'inicio' && installation}
+      {content}
+    </main>
     <nav className="citizen-nav" aria-label="Navegación ciudadana">
       {(Object.keys(tabs) as Tab[]).map((key) => <button key={key} className={key === tab ? 'selected' : ''} aria-current={key === tab ? 'page' : undefined} onClick={() => navigate(key)}>
         <span aria-hidden="true">{tabIcons[key]}</span>{tabs[key]}

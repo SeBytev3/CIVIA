@@ -1,3 +1,6 @@
+import { draftInstallation } from './api';
+import { randomId } from './device';
+
 export interface Draft {
   key: string;
   title: string;
@@ -10,10 +13,10 @@ export interface Draft {
 }
 
 export function blankDraft(): Draft {
-  return { key: crypto.randomUUID(), title: '', description: '', pending: false };
+  return { key: randomId(), title: '', description: '', pending: false };
 }
 
-function store<T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+function transaction<T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => () => T): Promise<T> {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open('civia-drafts', 1);
     request.onupgradeneeded = () => request.result.createObjectStore('reports');
@@ -24,7 +27,7 @@ function store<T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => I
       const result = action(tx.objectStore('reports'));
       tx.oncomplete = () => {
         db.close();
-        resolve(result.result);
+        resolve(result());
       };
       tx.onabort = () => {
         db.close();
@@ -34,14 +37,38 @@ function store<T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => I
   });
 }
 
-export function readDraft(ownerId: string) {
-  return store<Draft | undefined>('readonly', (db) => db.get(ownerId));
+function store<T>(mode: IDBTransactionMode, action: (store: IDBObjectStore) => IDBRequest<T>): Promise<T> {
+  return transaction(mode, (db) => {
+    const result = action(db);
+    return () => result.result;
+  });
 }
 
-export function saveDraft(ownerId: string, draft: Draft) {
-  return store('readwrite', (db) => db.put(draft, ownerId));
+export async function draftStorage(ownerId: string) {
+  const installationId = await draftInstallation(ownerId);
+  const key = `${installationId}:${ownerId}`;
+  return {
+    installationId,
+    read: () => store<Draft | undefined>('readonly', (db) => db.get(key)),
+    save: (draft: Draft) => store('readwrite', (db) => db.put(draft, key)),
+    remove: () => store('readwrite', (db) => db.delete(key)),
+    readLegacy: () => store<Draft | undefined>('readonly', (db) => db.get(ownerId)),
+    recoverLegacy: () => transaction<Draft | undefined>('readwrite', (db) => {
+      let restored: Draft | undefined;
+      const current = db.get(key);
+      current.onsuccess = () => {
+        if (current.result) return;
+        const legacy = db.get(ownerId);
+        legacy.onsuccess = () => {
+          if (!legacy.result) return;
+          restored = { ...(legacy.result as Draft), pending: false };
+          db.put(restored, key);
+          db.delete(ownerId);
+        };
+      };
+      return () => restored;
+    }),
+  };
 }
 
-export function deleteDraft(ownerId: string) {
-  return store('readwrite', (db) => db.delete(ownerId));
-}
+export type DraftStorage = Awaited<ReturnType<typeof draftStorage>>;
