@@ -19,7 +19,7 @@ La distribución en GitHub queda pendiente de aprobación del candidato. El arch
 3. Si estás conectando por primera vez, selecciona la instalación que anuncia el computador y escanea `.civia/lan/pairing.svg`. También puedes abrir una imagen del QR o pegar el código de `pairing.txt`. La variante de texto permite emparejar cuando el dispositivo llega al gateway y la red limita mDNS.
 4. Inicia sesión como ciudadano. Para actualizar la dirección de una instalación emparejada, abre **Perfil → Configurar conexión**. Conserva el certificado y la identidad de instalación cuando cambie la IP. Si cambia el certificado, repite el emparejamiento.
 
-La actualización desde el APK 1.1.0 pide volver a emparejar e iniciar sesión. Si encuentra un borrador anterior de esa misma cuenta en los datos locales, muestra **Recuperar borrador anterior**. Revísalo antes de decidir si debe enviarse a la instalación actual.
+La actualización desde el APK 1.1.0 pide volver a emparejar e iniciar sesión. Si encuentra un borrador anterior de esa misma cuenta en los datos locales, muestra **Recuperar borrador anterior**. La transición se probó con los APK de ambas versiones, con recuperación explícita del contenido y la fotografía del borrador antes de cualquier envío.
 
 [Conectividad y diagnóstico](CONECTIVIDAD_LAN.md) · [Resultados y huella del APK](estado.md)
 
