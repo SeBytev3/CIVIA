@@ -1,5 +1,7 @@
 # Evaluación formal de CIVIA (Fase E)
 
+El diseño y la evaluación 1.0 se conserva como referencia histórica. Los resultados vigentes del candidato están en `docs/estado.md`.
+
 Este directorio contiene los artefactos reproducibles de evaluación del Momento Evaluativo 2:
 
 1. `casos_dorados.json`: 6 casos dorados verificados mediante consultas SQL directas sobre PostgreSQL (`GD-01` a `GD-06`), distinguiendo explícitamente los registros sintéticos (`is_synthetic=true`) e incluyendo una consulta irresoluble sin evidencia (`GD-06`, Comuna 99 / NDVI satelital / radiación).

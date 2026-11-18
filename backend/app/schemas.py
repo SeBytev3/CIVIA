@@ -96,6 +96,9 @@ class ReportPublicResponse(BaseModel):
     human_override_note: str | None = None
     status: ReportStatus
     status_message: str
+    analysis_status: Literal["PENDING", "PROCESSING", "AVAILABLE", "MANUAL_REVIEW"] | None = None
+    analysis_status_message: str | None = None
+    analysis_delayed: bool = False
     distance_km: float | None = None
     is_synthetic: bool = False
     citizen_edit_token: str | None = None
@@ -136,21 +139,10 @@ class AgentToolCallPublic(BaseModel):
 
 class AgentQueryResponse(BaseModel):
     answer: str
-    trace_group_id: str
-    tools_invoked: list[dict]
-    iterations_used: int
-    max_iterations: int
-    total_tokens_used: int
-    max_tokens_budget: int
-    latency_ms: int
-    guardrail_triggered: str | None = None
     requires_human_approval: bool = False
     pending_approval_id: str | None = None
-    tokens_estimated: bool = False
-    unknown_consumption: bool = False
     operation_id: str | None = None
     operation_status: str | None = None
-    query_token: str | None = None
 
 
 class OperationStatusResponse(BaseModel):

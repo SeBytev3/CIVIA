@@ -1,5 +1,7 @@
 # Arquitectura implementada — CIVIA
 
+El diseño y la evaluación 1.0 se conserva como referencia histórica. Los resultados vigentes del candidato están en `docs/estado.md`.
+
 **Estado:** Fases A, B, C y D implementadas y verificadas mediante Docker Compose y suite de pruebas automatizadas.
 
 ## Componentes principales

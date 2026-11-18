@@ -1,9 +1,10 @@
 import { useEffect, useRef } from 'react';
 import L from 'leaflet';
-import type { ReportCategory, ReportItem } from '../types';
+import type { PublicMapItem, ReportCategory, ReportItem } from '../types';
 
 interface CaliMapProps {
   reports: ReportItem[];
+  publicPoints?: PublicMapItem[];
   onSelectReport?: (report: ReportItem) => void;
   selectable?: boolean;
   selectedLat?: number;
@@ -54,6 +55,7 @@ const PICKER_ICON = L.divIcon({
 
 export function CaliMap({
   reports,
+  publicPoints,
   onSelectReport,
   selectable = false,
   selectedLat,
@@ -115,6 +117,13 @@ export function CaliMap({
     if (!layer) return;
     layer.clearLayers();
 
+    publicPoints?.forEach((point) => {
+      const category = point.category || 'PENDIENTE';
+      L.marker([point.latitude, point.longitude], { icon: createPinIcon(CATEGORY_COLORS[category] || CATEGORY_COLORS.PENDIENTE, false) })
+        .bindTooltip({ HUECO: 'Hueco vial', BASURAS: 'Basuras o escombros', TALA: 'Tala arbórea', QUEMA: 'Quema', OTRO: 'Otro incidente', PENDIENTE: 'Incidente' }[category] || 'Incidente')
+        .addTo(layer);
+    });
+
     reports.forEach((rep) => {
       const cat = rep.effective_category || 'PENDIENTE';
       const color = CATEGORY_COLORS[cat] || CATEGORY_COLORS.PENDIENTE;
@@ -152,7 +161,7 @@ export function CaliMap({
       marker.bindPopup(wrapper);
       marker.addTo(layer);
     });
-  }, [reports, onSelectReport]);
+  }, [reports, publicPoints, onSelectReport]);
 
   useEffect(() => {
     const map = mapRef.current;

@@ -38,6 +38,9 @@ export interface ReportItem {
   human_override_note: string | null;
   status: ReportStatus;
   status_message: string;
+  analysis_status?: AnalysisStatus;
+  analysis_status_message?: string;
+  analysis_delayed?: boolean;
   distance_km: number | null;
   is_synthetic: boolean;
   citizen_edit_token?: string | null;
@@ -65,41 +68,22 @@ export interface ReportStats {
   by_category: Record<string, number>;
   by_status: Record<string, number>;
   by_comuna: Record<string, number>;
+  by_assignee?: Record<string, number>;
 }
 
-export interface AgentToolInvocation {
-  tool: string;
-  args: Record<string, unknown>;
-  result: Record<string, unknown>;
+export interface PublicStats {
+  total: number;
+  by_category: Record<string, number>;
+  by_status: Record<string, number>;
+  by_severity: Record<string, number>;
 }
 
 export interface AgentQueryResponse {
   answer: string;
-  trace_group_id: string;
-  tools_invoked: AgentToolInvocation[];
-  iterations_used: number;
-  max_iterations: number;
-  total_tokens_used: number;
-  max_tokens_budget: number;
-  latency_ms: number;
-  guardrail_triggered: string | null;
   requires_human_approval: boolean;
   pending_approval_id: string | null;
   operation_id?: string | null;
   operation_status?: string | null;
-  query_token?: string | null;
-}
-
-export interface OperationStatusResponse {
-  operation_id: string;
-  operation_type: string;
-  status: 'PENDING' | 'COMMITTED' | 'ABORTED' | 'UNKNOWN';
-  target_id?: string | null;
-  result_payload?: Record<string, unknown> | null;
-  error_message?: string | null;
-  created_at: string;
-  updated_at?: string | null;
-  reconciled?: boolean;
 }
 
 export interface ObservabilityData {
@@ -171,7 +155,7 @@ export interface PendingApprovalItem {
     proposed_status?: string;
   };
   reason: string;
-  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  status: 'PENDING' | 'APPROVED' | 'REJECTED' | 'EXPIRED';
   decided_by: string | null;
   decided_at: string | null;
   created_at: string;
@@ -210,4 +194,58 @@ export interface AdminNotificationsResponse {
   unread_citizen: number;
   unread_synthetic: number;
   items: AdminNotificationItem[];
+}
+
+export type AnalysisStatus = 'PENDING' | 'PROCESSING' | 'AVAILABLE' | 'MANUAL_REVIEW';
+export type Role = 'CITIZEN' | 'CASE_ADMIN' | 'WEB_ADMIN';
+
+export interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: Role;
+  active: boolean;
+  created_at: string;
+}
+export interface Session {
+  user: User;
+  csrf_token?: string | null;
+  token?: string | null;
+  expires_at: string;
+}
+export interface Page<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+export interface PublicMapItem {
+  latitude: number;
+  longitude: number;
+  category: ReportCategory | null;
+  severity: ReportSeverity | null;
+  status: ReportStatus;
+}
+export interface AuditEntry {
+  id: number;
+  actor_id?: string | null;
+  actor_user_id?: string | null;
+  target_id?: string | null;
+  target_user_id?: string | null;
+  action: string;
+  created_at: string;
+}
+export interface AnalysisQueue {
+  counts: Record<string, number>;
+  oldest_pending_seconds: number | null;
+  worker_available: boolean;
+}
+export interface DeadLetterJob {
+  id: string;
+  report_id: string;
+  tracking_code: string;
+  attempts: number;
+  max_attempts: number;
+  last_error: string | null;
+  finished_at: string | null;
 }

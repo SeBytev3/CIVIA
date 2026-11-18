@@ -9,11 +9,16 @@ import uuid
 
 import psycopg
 
+from app.analysis_queue import enqueue_in_transaction
 from app.db import get_conn
 from app.observability import sanitize_secret_text
 from app.security import _CO_PHONE_RE, _EMAIL_RE, CitizenValidationError
 
 _ON_REPORT_CREATED_HOOK: Callable[[UUID], None] | None = None
+
+
+class ReceiptCommitUncertain(RuntimeError):
+    """La confirmación de PostgreSQL falló y la evidencia podría estar referenciada."""
 
 
 def set_report_created_hook(hook: Callable[[UUID], None] | None) -> None:
@@ -53,6 +58,25 @@ STATUS_MESSAGES: dict[str, str] = {
     "REJECTED": "Reporte descartado tras verificación.",
 }
 
+_ANALYSIS_STATE = """
+    (SELECT CASE
+         WHEN j.state = 'PROCESSING' AND j.lease_expires_at <= clock_timestamp() THEN 'RETRY_SCHEDULED'
+         ELSE j.state
+     END FROM analysis_jobs j
+     WHERE j.report_id = r.id AND j.report_version = r.version) AS analysis_job_state
+"""
+
+_ANALYSIS_MESSAGES = {
+    "PENDING": "El análisis está pendiente.",
+    "PROCESSING": "Estamos analizando la evidencia de tu reporte.",
+    "AVAILABLE": "El análisis está disponible.",
+    "MANUAL_REVIEW": "El reporte requiere revisión manual.",
+}
+_DELAYED_ANALYSIS_MESSAGE = (
+    "En este momento, el servicio de análisis no está disponible. Tu reporte está guardado y "
+    "será procesado automáticamente cuando el servicio se restablezca. No necesitas enviarlo nuevamente."
+)
+
 
 def row_to_public_dict(row: dict[str, Any]) -> dict[str, Any]:
     report_id = str(row["id"])
@@ -69,6 +93,16 @@ def row_to_public_dict(row: dict[str, Any]) -> dict[str, Any]:
     effective_sev = row.get("final_severity") or row.get("ai_severity")
     status = row["status"]
     dist = row.get("distance_km")
+    if row.get("ai_category"):
+        analysis_status = "AVAILABLE"
+    elif row.get("analysis_job_state") == "PROCESSING":
+        analysis_status = "PROCESSING"
+    elif row.get("analysis_job_state") in ("DEAD_LETTER", "CANCELLED") or row.get("human_confirmed"):
+        analysis_status = "MANUAL_REVIEW"
+    else:
+        analysis_status = "PENDING"
+    analysis_delayed = analysis_status == "PENDING" and row.get("analysis_job_state") == "RETRY_SCHEDULED"
+    analysis_message = _DELAYED_ANALYSIS_MESSAGE if analysis_delayed else _ANALYSIS_MESSAGES[analysis_status]
 
     return {
         "id": row["id"],
@@ -91,7 +125,7 @@ def row_to_public_dict(row: dict[str, Any]) -> dict[str, Any]:
         "ai_severity": row.get("ai_severity"),
         "ai_confidence": float(row["ai_confidence"]) if row.get("ai_confidence") is not None else None,
         "ai_summary": _sanitize_public_text(row.get("ai_summary")),
-        "ai_keywords": ai_keywords,
+        "ai_keywords": [cleaned for word in ai_keywords if isinstance(word, str) and (cleaned := _sanitize_public_text(word))],
         "final_category": row.get("final_category"),
         "final_severity": row.get("final_severity"),
         "effective_category": effective_cat,
@@ -99,7 +133,13 @@ def row_to_public_dict(row: dict[str, Any]) -> dict[str, Any]:
         "human_confirmed": bool(row["human_confirmed"]),
         "human_override_note": _sanitize_public_text(row.get("human_override_note")),
         "status": status,
-        "status_message": STATUS_MESSAGES.get(status, "Reporte registrado."),
+        "status_message": (
+            analysis_message if status == "PENDING_ANALYSIS"
+            else STATUS_MESSAGES.get(status, "Reporte registrado.")
+        ),
+        "analysis_status": analysis_status,
+        "analysis_status_message": analysis_message,
+        "analysis_delayed": analysis_delayed,
         "distance_km": round(float(dist), 3) if dist is not None else None,
         "is_synthetic": bool(row.get("is_synthetic", False)),
         "citizen_edit_token": row.get("_citizen_edit_token"),
@@ -210,6 +250,8 @@ def create_report(
     idempotency_key: str | None = None,
     request_fingerprint: str | None = None,
     citizen_edit_token: str | None = None,
+    owner_id: UUID | None = None,
+    enqueue_analysis: bool = True,
 ) -> dict[str, Any]:
     rid = report_id or uuid.uuid4()
     am = audio_meta or {}
@@ -220,7 +262,8 @@ def create_report(
             status_code=422,
             code="INVALID_IDEMPOTENCY_KEY",
         )
-    idem_key_hash = hash_idempotency_key(raw_idem_key) if raw_idem_key else None
+    scoped_key = f"\x00{owner_id}:{raw_idem_key}" if owner_id and raw_idem_key else raw_idem_key
+    idem_key_hash = hash_idempotency_key(scoped_key) if scoped_key else None
     eff_fingerprint = (request_fingerprint or "").strip()[:64]
     c_token = (citizen_edit_token or generate_citizen_edit_token()).strip()
     c_token_hash = hash_edit_token(c_token)
@@ -230,16 +273,17 @@ def create_report(
             if idem_key_hash and raw_idem_key:
                 cur.execute("SELECT pg_advisory_xact_lock(hashtext(%s));", (idem_key_hash,))
                 cur.execute(
-                    """
+                    f"""
                     SELECT r.*,
                            ir.request_fingerprint AS _stored_fingerprint,
-                           ir.citizen_edit_token AS _sealed_edit_token
+                           ir.citizen_edit_token AS _sealed_edit_token,
+                           {_ANALYSIS_STATE}
                     FROM reports r
                     LEFT JOIN idempotency_records ir ON ir.idempotency_key = r.idempotency_key
-                    WHERE r.idempotency_key = %s
+                    WHERE r.idempotency_key = %s AND r.owner_id IS NOT DISTINCT FROM %s
                     LIMIT 1;
                     """,
-                    (idem_key_hash,),
+                    (idem_key_hash, owner_id),
                 )
                 existing_row = cur.fetchone()
                 if existing_row is not None:
@@ -278,8 +322,8 @@ def create_report(
                             photo_path, photo_mime, photo_size_bytes,
                             photo_width, photo_height, photo_sha256,
                             audio_path, audio_mime, audio_size_bytes,
-                            audio_duration_seconds, audio_transcript,
-                            status, is_synthetic, edit_token_hash, idempotency_key, version
+                            audio_duration_seconds, audio_transcript, audio_sha256,
+                            status, is_synthetic, edit_token_hash, idempotency_key, version, owner_id
                         )
                         VALUES (
                             %s, %s, %s, %s,
@@ -288,8 +332,8 @@ def create_report(
                             %s, %s, %s,
                             %s, %s, %s,
                             %s, %s, %s,
-                            %s, %s,
-                            'PENDING_ANALYSIS', %s, %s, %s, 1
+                            %s, %s, %s,
+                            'PENDING_ANALYSIS', %s, %s, %s, 1, %s
                         )
                         RETURNING *;
                         """,
@@ -315,9 +359,11 @@ def create_report(
                             am.get("audio_size_bytes"),
                             am.get("audio_duration_seconds"),
                             audio_transcript,
+                            am.get("audio_sha256"),
                             is_synthetic,
                             c_token_hash,
                             idem_key_hash,
+                            owner_id,
                         ),
                     )
                     row = cur.fetchone()
@@ -328,16 +374,17 @@ def create_report(
                     cur.execute("ROLLBACK TO SAVEPOINT sp_insert_report;")
                     if idem_key_hash and raw_idem_key:
                         cur.execute(
-                            """
+                            f"""
                             SELECT r.*,
                                    ir.request_fingerprint AS _stored_fingerprint,
-                                   ir.citizen_edit_token AS _sealed_edit_token
+                                   ir.citizen_edit_token AS _sealed_edit_token,
+                                   {_ANALYSIS_STATE}
                             FROM reports r
                             LEFT JOIN idempotency_records ir ON ir.idempotency_key = r.idempotency_key
-                            WHERE r.idempotency_key = %s
+                            WHERE r.idempotency_key = %s AND r.owner_id IS NOT DISTINCT FROM %s
                             LIMIT 1;
                             """,
-                            (idem_key_hash,),
+                            (idem_key_hash, owner_id),
                         )
                         concurrent_row = cur.fetchone()
                         if concurrent_row is not None:
@@ -384,50 +431,36 @@ def create_report(
                     ),
                 )
 
-            # Registrar evento inicial de trazabilidad ciudadana
-            try:
-                cur.execute(
-                    """
-                    INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type, created_at)
-                    VALUES (gen_random_uuid(), %s, 'REPORT_REGISTERED', NULL, 'PENDING_ANALYSIS', 'Reporte recibido y registrado exitosamente en la plataforma CIVIA.', 'CITIZEN', %s)
-                    ON CONFLICT DO NOTHING;
-                    """,
-                    (row["id"], row["created_at"]),
-                )
-                # Registrar notificación interna para la administración
-                cur.execute(
-                    """
-                    INSERT INTO admin_notifications (id, report_id, title, message, is_read, is_synthetic, created_at)
-                    VALUES (gen_random_uuid(), %s, %s, %s, FALSE, %s, %s)
-                    ON CONFLICT (report_id) DO NOTHING;
-                    """,
-                    (
-                        row["id"],
-                        f"Nuevo reporte recibido: {row['tracking_code']}",
-                        f"Reporte ciudadano registrado en {row.get('neighborhood') or row.get('comuna') or 'Santiago de Cali'}. Pendiente de revisión.",
-                        bool(is_synthetic),
-                        row["created_at"],
-                    ),
-                )
-            except Exception:
-                pass
+            cur.execute(
+                """
+                INSERT INTO report_events (id, report_id, event_type, previous_status, new_status, public_message, actor_type, created_at)
+                VALUES (gen_random_uuid(), %s, 'REPORT_REGISTERED', NULL, 'PENDING_ANALYSIS', 'Reporte recibido y registrado exitosamente en la plataforma CIVIA.', 'CITIZEN', %s)
+                RETURNING id, report_id, event_type, previous_status, new_status, public_message, actor_type, created_at;
+                """,
+                (row["id"], row["created_at"]),
+            )
+            row["events"] = [cur.fetchone()]
+            cur.execute(
+                """
+                INSERT INTO admin_notifications (id, report_id, title, message, is_read, is_synthetic, created_at)
+                VALUES (gen_random_uuid(), %s, %s, %s, FALSE, %s, %s)
+                """,
+                (
+                    row["id"],
+                    f"Nuevo reporte recibido: {row['tracking_code']}",
+                    f"Reporte ciudadano registrado en {row.get('neighborhood') or row.get('comuna') or 'Santiago de Cali'}. Pendiente de revisión.",
+                    bool(is_synthetic),
+                    row["created_at"],
+                ),
+            )
+            if enqueue_analysis:
+                enqueue_in_transaction(cur, row["id"], row["version"], owner_id)
+                row["analysis_job_state"] = "QUEUED"
 
             try:
-                cur.execute(
-                    """
-                    SELECT id, report_id, event_type, previous_status, new_status,
-                           public_message, actor_type, created_at
-                    FROM report_events
-                    WHERE report_id = %s
-                    ORDER BY created_at ASC;
-                    """,
-                    (row["id"],),
-                )
-                row["events"] = cur.fetchall()
-            except Exception:
-                row["events"] = []
-
-            conn.commit()
+                conn.commit()
+            except Exception as exc:
+                raise ReceiptCommitUncertain("No se pudo confirmar el resultado de la radicación.") from exc
             if _ON_REPORT_CREATED_HOOK is not None and not is_synthetic:
                 try:
                     _ON_REPORT_CREATED_HOOK(UUID(str(row["id"])))
@@ -438,14 +471,19 @@ def create_report(
             return row
 
 
-def get_report_raw(report_id: UUID | str, include_events: bool = True) -> dict[str, Any] | None:
+def get_report_raw(
+    report_id: UUID | str, include_events: bool = True, *, owner_id: UUID | None = None,
+) -> dict[str, Any] | None:
     try:
         rid = UUID(str(report_id))
     except (ValueError, TypeError):
         return None
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM reports WHERE id = %s;", (rid,))
+            cur.execute(
+                f"SELECT r.*, {_ANALYSIS_STATE} FROM reports r WHERE r.id = %s AND (%s::uuid IS NULL OR r.owner_id = %s);",
+                (rid, owner_id, owner_id),
+            )
             row = cur.fetchone()
             if row and include_events:
                 try:
@@ -465,12 +503,14 @@ def get_report_raw(report_id: UUID | str, include_events: bool = True) -> dict[s
             return row
 
 
-def get_report_by_tracking_code(tracking_code: str, include_events: bool = True) -> dict[str, Any] | None:
+def get_report_by_tracking_code(
+    tracking_code: str, include_events: bool = True, *, owner_id: UUID | None = None,
+) -> dict[str, Any] | None:
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT * FROM reports WHERE UPPER(tracking_code) = UPPER(%s);",
-                (tracking_code.strip(),),
+                f"SELECT r.*, {_ANALYSIS_STATE} FROM reports r WHERE UPPER(r.tracking_code) = UPPER(%s) AND (%s::uuid IS NULL OR r.owner_id = %s);",
+                (tracking_code.strip(), owner_id, owner_id),
             )
             row = cur.fetchone()
             if row and include_events:
@@ -580,13 +620,14 @@ def confirm_report_category(
     human_override_note: str | None = None,
     edit_token: str | None = None,
     is_admin: bool = False,
+    owner_id: UUID | None = None,
 ) -> dict[str, Any] | None:
     rid = UUID(str(report_id))
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT * FROM reports WHERE id = %s FOR UPDATE;", (rid,))
             existing = cur.fetchone()
-            if not existing:
+            if not existing or (owner_id is not None and existing["owner_id"] != owner_id):
                 return None
 
             if not is_admin:
@@ -605,7 +646,7 @@ def confirm_report_category(
                 stored_hash = (existing.get("edit_token_hash") or "").strip()
                 provided_token = (edit_token or "").strip()
                 provided_hash = hash_edit_token(provided_token) if provided_token else ""
-                if (
+                if owner_id is None and (
                     not stored_hash
                     or not provided_hash
                     or not hmac.compare_digest(provided_hash, stored_hash)
@@ -660,6 +701,7 @@ def update_report_status(
     *,
     status: str,
     note: str | None = None,
+    actor_id: UUID | None = None,
 ) -> dict[str, Any] | None:
     rid = UUID(str(report_id))
     with get_conn() as conn:
@@ -716,13 +758,14 @@ def update_report_status(
                     proposed_payload, result_payload,
                     created_at, updated_at
                 ) VALUES (
-                    %s, 'admin', 'admin_update_report_status', %s, 'COMMITTED',
+                    %s, %s, 'admin_update_report_status', %s, 'COMMITTED',
                     %s::jsonb, %s::jsonb,
                     clock_timestamp(), clock_timestamp()
                 );
                 """,
                 (
                     str(uuid.uuid4()),
+                    str(actor_id) if actor_id else "admin",
                     str(rid),
                     json.dumps(proposed_payload),
                     json.dumps(result_payload),
@@ -755,6 +798,11 @@ def update_report_status(
             )
             row["events"] = cur.fetchall()
 
+            if actor_id is not None:
+                cur.execute(
+                    "INSERT INTO security_audit (actor_id, action, target_id) VALUES (%s, 'reports.change_status', %s)",
+                    (actor_id, rid),
+                )
             conn.commit()
             return row
 
@@ -771,9 +819,14 @@ def list_reports(
     radius_km: float | None = None,
     limit: int = 50,
     offset: int = 0,
+    owner_id: UUID | None = None,
 ) -> tuple[int, list[dict[str, Any]]]:
     conditions: list[str] = []
     params: list[Any] = []
+
+    if owner_id is not None:
+        conditions.append("owner_id = %s")
+        params.append(owner_id)
 
     if category:
         conditions.append("COALESCE(final_category, ai_category) = %s")
@@ -845,8 +898,8 @@ def list_reports(
             select_params.extend([limit, offset])
 
             query_sql = f"""
-                SELECT *, {distance_select}
-                FROM reports
+                SELECT r.*, {_ANALYSIS_STATE}, {distance_select}
+                FROM reports r
                 {where_sql}
                 ORDER BY {order_clause}
                 LIMIT %s OFFSET %s;
@@ -856,50 +909,65 @@ def list_reports(
             return total, rows
 
 
-def get_reports_summary_stats() -> dict[str, Any]:
+def get_reports_summary_stats(owner_id: UUID | None = None) -> dict[str, Any]:
+    where = "WHERE owner_id = %s" if owner_id is not None else ""
+    params = (owner_id,) if owner_id is not None else ()
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) AS total FROM reports;")
+            cur.execute(f"SELECT COUNT(*) AS total FROM reports {where};", params)
             total = int((cur.fetchone() or {}).get("total", 0))
 
             cur.execute(
-                """
+                f"""
                 SELECT COALESCE(final_category, ai_category, 'SIN_CLASIFICAR') AS category,
                        COUNT(*) AS count
-                FROM reports
+                FROM reports {where}
                 GROUP BY 1
                 ORDER BY count DESC;
-                """
+                """,
+                params,
             )
             by_category = {r["category"]: int(r["count"]) for r in cur.fetchall()}
 
             cur.execute(
-                """
+                f"""
                 SELECT status, COUNT(*) AS count
-                FROM reports
+                FROM reports {where}
                 GROUP BY status
                 ORDER BY count DESC;
-                """
+                """,
+                params,
             )
             by_status = {r["status"]: int(r["count"]) for r in cur.fetchall()}
 
             cur.execute(
-                """
+                f"""
                 SELECT COALESCE(comuna, 'NO_ESPECIFICADA') AS comuna,
                        COUNT(*) AS count
-                FROM reports
+                FROM reports {where}
                 GROUP BY 1
                 ORDER BY count DESC;
-                """
+                """,
+                params,
             )
             by_comuna = {r["comuna"]: int(r["count"]) for r in cur.fetchall()}
 
-            return {
+            stats = {
                 "total_reports": total,
                 "by_category": by_category,
                 "by_status": by_status,
                 "by_comuna": by_comuna,
             }
+            if owner_id is None:
+                cur.execute(
+                    """
+                    SELECT COALESCE(NULLIF(BTRIM(assigned_to), ''), 'SIN_ASIGNAR') AS assignee,
+                           COUNT(*) AS count
+                    FROM reports GROUP BY 1 ORDER BY count DESC, assignee
+                    """
+                )
+                stats["by_assignee"] = {r["assignee"]: int(r["count"]) for r in cur.fetchall()}
+            return stats
 
 
 def get_report_events(report_id: UUID | str) -> list[dict[str, Any]]:
@@ -1050,6 +1118,7 @@ def update_report_management(
     admin_review_status: str | None = None,
     public_note: str | None = None,
     internal_note: str | None = None,
+    actor_id: UUID | None = None,
 ) -> dict[str, Any] | None:
     try:
         rid = UUID(str(report_id))
@@ -1084,6 +1153,17 @@ def update_report_management(
                 query = f"UPDATE reports SET {', '.join(updates)} WHERE id = %s RETURNING *;"
                 cur.execute(query, tuple(params))
                 updated_row = cur.fetchone()
+
+                if actor_id is not None:
+                    cur.execute(
+                        "INSERT INTO security_audit (actor_id, action, target_id) VALUES (%s, 'reports.manage', %s)",
+                        (actor_id, rid),
+                    )
+                    if internal_note and internal_note.strip():
+                        cur.execute(
+                            "INSERT INTO report_internal_notes (report_id, actor_id, note) VALUES (%s, %s, %s)",
+                            (rid, actor_id, internal_note.strip()),
+                        )
 
                 # Evento público si se asigna a una dependencia (sin silenciar errores)
                 if assigned_to is not None and assigned_to.strip() and assigned_to.strip() != (existing.get("assigned_to") or ""):

@@ -6,6 +6,7 @@ import pytest
 
 from app import agent as agent_module
 from app import ai_router as ai_router_module
+from app.analysis_worker import process_next_job
 from app.ai_router import (
     AIProviderError,
     parse_and_validate_analysis_json,
@@ -13,7 +14,7 @@ from app.ai_router import (
     set_runtime_fault_override,
 )
 from app.config import settings
-from app.db import run_migrations
+from app.db import get_conn, run_migrations
 from app.main import app
 from app.observability import sanitize_secret_text
 from app.security import rate_limiter
@@ -27,7 +28,6 @@ def _get_test_image_bytes() -> bytes:
 from tests.conftest import cleanup_tracked_test_records
 
 client = TestClient(app)
-ADMIN_HEADERS = {"X-Admin-Token": settings.ADMIN_TOKEN}
 
 
 @pytest.fixture(autouse=True)
@@ -36,8 +36,12 @@ def hermetic_multimodal_adapter_fixture(monkeypatch):
     Sustitución incondicional de adaptadores multimodales y turnos principales de agente
     para garantizar hermeticidad absoluta en la suite ordinaria, sin intentos de red externa (G2.1.2 y G2.1.4).
     """
+    monkeypatch.setattr(settings, "GOOGLE_API_KEY_PRIMARY", "synthetic-google")
+    monkeypatch.setattr(settings, "GROQ_API_KEY", "synthetic-groq")
+    monkeypatch.setattr(settings, "AI_GROQ_VISION_MODEL", "synthetic-vision")
+
     def _mock_multimodal(*, model: str, api_key: str, prompt_text: str, image_bytes: bytes | None, image_mime: str | None, timeout_sec: float) -> tuple[str, int, int]:
-        p_low = prompt_text.lower()
+        p_low = prompt_text.split('como evidencia.\n', 1)[-1].split('\n\nDevuelve',1)[0].lower()
         if "quema" in p_low or "incendio" in p_low:
             cat = "QUEMA"
             summary = "Quema de pastizal y humo denso detectado en ladera del cerro."
@@ -153,13 +157,13 @@ def test_secret_sanitization_never_leaks_keys():
     assert "[CREDENCIAL_REDACTADA]" in sanitized
 
 
-def test_vertical_flow_create_analyze_confirm_and_query():
+def test_vertical_flow_create_analyze_confirm_and_query(citizen_client):
     """
     Flujo vertical completo:
     Crear reporte -> guardar evidencia -> analizar con IA -> validar respuesta -> confirmar clasificación -> consultar estado.
     """
     img_bytes = _get_test_image_bytes()
-    resp = client.post(
+    resp = citizen_client.post(
         "/api/reports",
         data={
             "title": "Hundimiento de calzada en Calle 5",
@@ -177,6 +181,11 @@ def test_vertical_flow_create_analyze_confirm_and_query():
     created = resp.json()
     report_id = created["id"]
 
+    assert created["status"] == "PENDING_ANALYSIS"
+    assert created["ai_category"] is None
+    assert process_next_job("test-vertical")
+    created = citizen_client.get(f"/api/reports/{report_id}").json()
+
     # Verificar que la IA clasificó y dejó el reporte en ANALYZED_PENDING_CONFIRMATION sin confirmar por humano aún
     assert created["status"] == "ANALYZED_PENDING_CONFIRMATION"
     assert created["ai_category"] in ("HUECO", "BASURAS", "TALA", "QUEMA", "OTRO")
@@ -186,9 +195,8 @@ def test_vertical_flow_create_analyze_confirm_and_query():
     assert created["human_confirmed"] is False
 
     # Confirmar / ajustar por el ciudadano con credencial de edición del reporte
-    confirm_resp = client.patch(
+    confirm_resp = citizen_client.patch(
         f"/api/reports/{report_id}/confirm",
-        headers={"X-Citizen-Edit-Token": created["citizen_edit_token"]},
         json={
             "final_category": "HUECO",
             "final_severity": "ALTA",
@@ -203,298 +211,239 @@ def test_vertical_flow_create_analyze_confirm_and_query():
     assert confirmed["effective_category"] == "HUECO"
 
     # Consultar estado por código de radicado
-    by_code = client.get(f"/api/reports/by-code/{created['tracking_code']}")
+    by_code = citizen_client.get(f"/api/reports/by-code/{created['tracking_code']}")
     assert by_code.status_code == 200
     assert by_code.json()["status"] == "CONFIRMED"
 
 
 @pytest.mark.parametrize("fault_mode", ["429", "503", "TIMEOUT", "INVALID_JSON", "GROQ_FAIL"])
-def test_router_resilience_and_fallback_across_providers(fault_mode: str):
-    """
-    Comprueba que ante 429, 503, TIMEOUT o INVALID_JSON en el proveedor primario (o GROQ_FAIL en primario+Groq),
-    el router conmuta automáticamente al proveedor de respaldo sin exponer ningún error al ciudadano.
-    """
-    r_fault = client.post(
-        "/api/admin/fault-injection",
-        headers=ADMIN_HEADERS,
-        json={"mode": fault_mode, "reset_circuits": True},
+def test_router_resilience_and_fallback_across_providers(fault_mode, web_admin_client):
+    result = web_admin_client.post("/api/admin/fault-injection", json={"mode": fault_mode})
+    assert result.status_code == 200
+    analysis, meta = ai_router_module.classify_evidence_with_router(
+        description="Prueba sintética de quema de vegetación", latitude=3.47, longitude=-76.54,
+        image_bytes=_get_test_image_bytes(), image_mime="image/jpeg", for_queue=True,
     )
-    assert r_fault.status_code == 200
+    assert analysis.category == "QUEMA"
+    assert meta["provider"] == ("google" if fault_mode == "GROQ_FAIL" else "groq")
+    assert meta["attempts"] <= 2
 
-    img_bytes = _get_test_image_bytes()
-    resp = client.post(
+
+def test_total_provider_outage_graceful_degradation(citizen_client, web_admin_client):
+    assert web_admin_client.post("/api/admin/fault-injection", json={"mode": "TOTAL"}).status_code == 200
+    response = citizen_client.post(
         "/api/reports",
-        data={
-            "description": "DATO SINTÉTICO PRUEBA RESILIENCIA: Quema de pastizal y humo denso en ladera del cerro.",
-            "latitude": "3.4710",
-            "longitude": "-76.5430",
-            "comuna": "Comuna 2",
-            "auto_analyze": "true",
-        },
-        files={"photo": ("quema.png", img_bytes, "image/png")},
+        data={"description": "Dato sintético. Bolsas de basura en la esquina.", "latitude": 3.41, "longitude": -76.51},
+        files={"photo": ("demo.jpg", _get_test_image_bytes(), "image/jpeg")},
     )
-    assert resp.status_code == 201
-    data = resp.json()
-    assert data["status"] == "ANALYZED_PENDING_CONFIRMATION"
-    assert data["ai_category"] in ("QUEMA", "HUECO", "BASURAS", "TALA", "OTRO")
-    # Jamás exponer nombres de proveedores ni códigos HTTP internos al ciudadano
-    serialized = resp.text.lower()
-    assert "traceback" not in serialized
-    assert "groq" not in serialized
-    assert "gemini" not in serialized
-    time.sleep(0.05)
+    assert response.status_code == 201
+    report = response.json()
+    assert process_next_job("test-outage")
+    current = citizen_client.get(f"/api/reports/{report['id']}").json()
+    assert current["status"] == "PENDING_ANALYSIS"
+    assert current["ai_category"] is None
+    assert not any(field in response.text.lower() for field in ("traceback", "gemini", "groq"))
+
+    # El reloj del escenario adelanta el tiempo de reintento, sin volver a radicar.
+    assert web_admin_client.post("/api/admin/fault-injection", json={"mode": "NONE"}).status_code == 200
+    with get_conn() as conn:
+        conn.execute("UPDATE analysis_jobs SET available_at = now() WHERE report_id = %s", (report["id"],))
+        conn.commit()
+    assert process_next_job("test-recovered")
+    current = citizen_client.get(f"/api/reports/{report['id']}").json()
+    assert current["status"] == "ANALYZED_PENDING_CONFIRMATION"
+    assert current["ai_category"] == "BASURAS"
+    assert citizen_client.get(current["photo_url"]).status_code == 200
 
 
-def test_total_provider_outage_graceful_degradation():
-    """
-    Si TODOS los proveedores fallan (FALLA_FORZADA=TOTAL), el reporte se guarda con
-    estado PENDING_ANALYSIS y el ciudadano recibe confirmación honesta sin errores técnicos.
-    """
-    client.post(
-        "/api/admin/fault-injection",
-        headers=ADMIN_HEADERS,
-        json={"mode": "TOTAL", "reset_circuits": True},
-    )
+def test_agent_tools_and_unanswerable_query(citizen_client):
+    real = citizen_client.post("/api/agent/query", json={
+        "query": "¿Cuál es la categoría y comuna del reporte CIV-2026-DEMO0001?",
+    })
+    assert real.status_code == 200
+    assert "CIV-2026-DEMO0001" in real.json()["answer"]
+    assert "tools_invoked" not in real.json()
 
-    img_bytes = _get_test_image_bytes()
-    resp = client.post(
+    result = citizen_client.post("/api/agent/query", json={
+        "query": "¿Cuántos reportes sobre radiación o NDVI existen en la Comuna 99?",
+    })
+    assert result.status_code == 200
+    assert "no existe" in result.json()["answer"].lower()
+
+
+def test_assistant_report_lookup_minimizes_stored_data(monkeypatch, citizen_client):
+    sample_text = "Texto sintético de verificación visible para el dueño en su reporte."
+    created = citizen_client.post(
         "/api/reports",
-        data={
-            "description": "DATO SINTÉTICO PRUEBA CAÍDA TOTAL: Acumulación de bolsas de basura en esquina.",
-            "latitude": "3.4120",
-            "longitude": "-76.5110",
-            "comuna": "Comuna 16",
-            "auto_analyze": "true",
-        },
-        files={"photo": ("basuras.png", img_bytes, "image/png")},
+        data={"description": sample_text, "latitude": 3.45, "longitude": -76.53},
+        files={"photo": ("demo.jpg", _get_test_image_bytes(), "image/jpeg")},
     )
-    assert resp.status_code == 201
-    body = resp.json()
-    assert body["status"] == "PENDING_ANALYSIS"
-    assert body["ai_category"] is None
-    assert "pendiente" in body["status_message"].lower()
-    assert "traceback" not in resp.text.lower()
-    assert "429" not in body["status_message"].lower()
+    assert created.status_code == 201
+    report = created.json()
+    assert report["description"] == sample_text
+    lookup = {"identificador": report["tracking_code"]}
+    observed = []
 
-    # Al restaurar el servicio, se puede analizar bajo demanda con POST /api/reports/{id}/analyze
-    client.post(
-        "/api/admin/fault-injection",
-        headers=ADMIN_HEADERS,
-        json={"mode": "NONE", "reset_circuits": True},
-    )
-    re_resp = client.post(f"/api/reports/{body['id']}/analyze")
-    assert re_resp.status_code == 200
-    re_body = re_resp.json()
-    assert re_body["status"] == "ANALYZED_PENDING_CONFIRMATION"
-    assert re_body["ai_category"] is not None
+    def ask_about_report(*, conversation_messages, **_):
+        results = [message["result"] for message in conversation_messages if message["role"] == "tool_result"]
+        if not results:
+            return None, [{"name": "obtener_reporte", "args": lookup}], 45, 15
+        observed.extend(results)
+        return "Tu reporte está pendiente de análisis.", [], 55, 25
 
-
-def test_agent_tools_and_unanswerable_query():
-    # 1. Consulta con datos reales en PostgreSQL
-    r_real = client.post(
-        "/api/agent/query",
-        json={"query": "¿Cuál es la categoría y comuna del reporte con código CIV-2026-DEMO0001?"},
-    )
-    assert r_real.status_code == 200
-    d_real = r_real.json()
-    assert "CIV-2026-DEMO0001" in d_real["answer"] or "HUECO" in d_real["answer"].upper() or "COMUNA 2" in d_real["answer"].upper()
-    assert len(d_real["tools_invoked"]) >= 1
-
-    # 2. Consulta sin respuesta en la base de datos (Comuna 99 / radiación / satélite)
-    r_none = client.post(
-        "/api/agent/query",
-        json={"query": "¿Cuántos reportes de radiación nuclear o índice satelital NDVI existen en la Comuna 99 de Cali?"},
-    )
-    assert r_none.status_code == 200
-    d_none = r_none.json()
-    ans_low = d_none["answer"].lower()
-    assert any(w in ans_low for w in ("no existe", "no hay", "0", "ningún", "ninguno", "sin evidencia"))
+    monkeypatch.setattr(agent_module, "_call_agent_turn_gemini", ask_about_report)
+    response = citizen_client.post("/api/agent/query", json={"query": f"Consulta el radicado {report['tracking_code']}"})
+    assert response.status_code == 200
+    assert "pendiente de análisis" in response.json()["answer"].lower()
+    assert set(observed[0]["reporte"]) == {
+        "tracking_code", "status", "effective_category", "effective_severity", "comuna",
+    }
+    assert sample_text not in str(observed)
 
 
-def test_four_agent_guardrails_enforced(monkeypatch):
-    # Guardrail 1: Máximo de iteraciones (forzamos que el turno de modelo siempre pida una herramienta con max_iterations=2)
-    def fake_turn_always_calls_tool(**kwargs):
+def test_four_agent_guardrails_enforced(monkeypatch, citizen_client, case_admin_client):
+    def always_calls_tool(**kwargs):
         return None, [{"name": "consultar_reportes", "args": {"category": "HUECO"}}], 40, 20
 
-    monkeypatch.setattr(agent_module, "_call_agent_turn_gemini", fake_turn_always_calls_tool)
-    monkeypatch.setattr(agent_module, "_call_agent_turn_groq", fake_turn_always_calls_tool)
+    monkeypatch.setattr(agent_module, "_call_agent_turn_gemini", always_calls_tool)
+    monkeypatch.setattr(agent_module, "_call_agent_turn_groq", always_calls_tool)
+    iterations = agent_module.run_civia_agent("Consulta huecos", max_iterations=2)
+    assert iterations["iterations_used"] == 2
+    assert iterations["guardrail_triggered"] == "MAX_ITERATIONS"
+    budget = agent_module.run_civia_agent("Consulta huecos", max_tokens_budget=50)
+    assert budget["guardrail_triggered"] == "MAX_TOKENS"
 
-    res_iter = client.post(
-        "/api/agent/query",
-        json={"query": "Busca huecos repetidamente", "max_iterations": 2},
-    )
-    assert res_iter.status_code == 200
-    b_iter = res_iter.json()
-    assert b_iter["iterations_used"] == 2
-    assert b_iter["guardrail_triggered"] == "MAX_ITERATIONS"
-
-    # Guardrail 2: Presupuesto máximo de tokens (max_tokens_budget=50 cuando el turno consume 60 tokens)
-    res_tok = client.post(
-        "/api/agent/query",
-        json={"query": "Consulta con presupuesto de tokens muy bajo", "max_tokens_budget": 50},
-    )
-    assert res_tok.status_code == 200
-    b_tok = res_tok.json()
-    assert b_tok["guardrail_triggered"] == "MAX_TOKENS"
-
-    # Guardrail 3: Timeout por herramienta (herramienta lenta > tool_timeout_seconds)
     def slow_tool(args):
         time.sleep(0.25)
         return {"total_encontrados": 0}
 
     monkeypatch.setitem(agent_module.TOOL_DISPATCH, "consultar_reportes", slow_tool)
-    res_timeout = client.post(
-        "/api/agent/query",
-        json={"query": "Consulta que excede timeout de herramienta", "tool_timeout_seconds": 0.06},
-    )
-    assert res_timeout.status_code == 200
-    b_timeout = res_timeout.json()
-    assert b_timeout["guardrail_triggered"] == "TIMEOUT"
+    limited = agent_module.run_civia_agent("Consulta huecos", tool_timeout_seconds=0.06)
+    assert limited["guardrail_triggered"] == "TIMEOUT"
 
-    # Guardrail 4: Aprobación humana obligatoria para escritura crítica (la IA NO modifica reports directamente)
-    # Usamos un reporte propio desechable creado en esta prueba para jamás tocar CIV-2026-DEMO0001
-    img_bytes = _get_test_image_bytes()
-    r_disp = client.post(
+    report = citizen_client.post(
         "/api/reports",
-        data={
-            "title": "Reporte desechable para prueba de guardrail 4",
-            "description": "DATO SINTÉTICO PRUEBA GUARDRAIL: Hueco para validar aprobación humana sin tocar reportes compartidos.",
-            "latitude": "3.4510",
-            "longitude": "-76.5310",
-            "auto_analyze": "false",
-        },
-        files={"photo": ("guardrail4.png", img_bytes, "image/png")},
-    )
-    assert r_disp.status_code == 201
-    disp_body = r_disp.json()
-    disp_code = disp_body["tracking_code"]
+        data={"description": "Prueba sintética de un hueco en calzada.", "latitude": 3.45, "longitude": -76.53},
+        files={"photo": ("demo.jpg", _get_test_image_bytes(), "image/jpeg")},
+    ).json()
+    code = report["tracking_code"]
 
-    r_conf = client.patch(
-        f"/api/reports/{disp_body['id']}/confirm",
-        headers={"X-Citizen-Edit-Token": disp_body["citizen_edit_token"]},
-        json={"final_category": "HUECO", "final_severity": "MEDIA"},
-    )
-    assert r_conf.status_code == 200
+    def propose(**kwargs):
+        return None, [{"name": "proponer_actualizacion_critica", "args": {
+            "identificador": code, "nuevo_estado": "IN_REVIEW", "motivo": "Solicito revisión del reporte.",
+        }}], 30, 15
 
-    def fake_turn_proposes_write(**kwargs):
-        return (
-            None,
-            [
-                {
-                    "name": "proponer_actualizacion_critica",
-                    "args": {
-                        "identificador": disp_code,
-                        "nuevo_estado": "RESOLVED",
-                        "motivo": "Prueba de límite de aprobación humana",
-                    },
-                }
-            ],
-            30,
-            15,
-        )
-
-    monkeypatch.setattr(agent_module, "_call_agent_turn_gemini", fake_turn_proposes_write)
-    monkeypatch.setattr(agent_module, "_call_agent_turn_groq", fake_turn_proposes_write)
-
-    res_write = client.post(
-        "/api/agent/query",
-        json={"query": f"Cambia el estado de {disp_code} a RESOLVED", "max_iterations": 1},
-    )
-    assert res_write.status_code == 200
-    b_write = res_write.json()
-    assert b_write["requires_human_approval"] is True
-    assert b_write["guardrail_triggered"] == "HUMAN_APPROVAL_REQUIRED"
-    approval_id = b_write["pending_approval_id"]
-    assert approval_id is not None
-
-    # Comprobar que el reporte en PostgreSQL NO cambió de estado todavía
-    rep_before = client.get(f"/api/reports/by-code/{disp_code}").json()
-    assert rep_before["status"] == "CONFIRMED"
-
-    # Ahora el humano aprueba la solicitud en el endpoint protegido
-    decide_resp = client.post(
-        f"/api/admin/approvals/{approval_id}/decide",
-        headers=ADMIN_HEADERS,
-        json={"approve": True, "decided_by": "Coordinador Cali"},
-    )
-    assert decide_resp.status_code == 200
-    rep_after = client.get(f"/api/reports/by-code/{disp_code}").json()
-    assert rep_after["status"] == "RESOLVED"
+    monkeypatch.setattr(agent_module, "_call_agent_turn_gemini", propose)
+    monkeypatch.setattr(agent_module, "_call_agent_turn_groq", propose)
+    request = citizen_client.post("/api/agent/query", json={"query": f"Solicita revisión del reporte {code}", "max_iterations": 1})
+    assert request.status_code == 200
+    assert request.json()["requires_human_approval"] is True
+    approval_id = request.json()["pending_approval_id"]
+    lookup = f"/api/reports/by-code/{code}"
+    assert citizen_client.get(lookup).json()["status"] == "PENDING_ANALYSIS"
+    decision = case_admin_client.post(f"/api/admin/approvals/{approval_id}/decide", json={"approve": True})
+    assert decision.status_code == 200
+    assert citizen_client.get(lookup).json()["status"] == "IN_REVIEW"
+    assert case_admin_client.post(f"/api/admin/approvals/{approval_id}/decide", json={"approve": True}).status_code == 409
 
 
-def test_protected_observability_endpoint():
-    # Sin token debe devolver 401
-    unauth = client.get("/api/admin/observability")
-    assert unauth.status_code == 401
-
-    # Con token devuelve métricas reales, estado de circuit breakers y trazas sin secretos
-    auth = client.get("/api/admin/observability", headers=ADMIN_HEADERS)
+def test_protected_observability_endpoint(web_admin_client, case_admin_client):
+    assert client.get("/api/admin/observability").status_code == 401
+    assert case_admin_client.get("/api/admin/observability").status_code == 403
+    auth = web_admin_client.get("/api/admin/observability")
     assert auth.status_code == 200
-    obs_data = auth.json()
-    assert "provider_chain" in obs_data
-    assert len(obs_data["provider_chain"]) == 3
-    assert obs_data["provider_chain"][0]["model"] == settings.AI_PRIMARY_MODEL
-    assert obs_data["provider_chain"][1]["model"] == settings.AI_FALLBACK_MODEL
-    assert obs_data["provider_chain"][2]["model"] == settings.AI_TERTIARY_MODEL
-    metrics = obs_data["observability"]["metrics"]
-    assert metrics["total_trace_events"] >= 1
-    assert metrics["p50_latency_ms"] >= 0
-    assert metrics["p90_latency_ms"] >= 0
-
-    # Ninguna clave del .env puede aparecer en la respuesta JSON de observabilidad
-    raw_json = auth.text
-    for secret_val in (
-        settings.GOOGLE_API_KEY_PRIMARY,
-        settings.GOOGLE_API_KEY_SECONDARY,
-        settings.GROQ_API_KEY,
-    ):
-        if secret_val:
-            assert secret_val not in raw_json
+    view = auth.json()
+    assert [node["model"] for node in view["provider_chain"]] == [settings.AI_PRIMARY_MODEL, settings.AI_FALLBACK_MODEL]
+    assert view["observability"]["metrics"]["p90_latency_ms"] >= 0
+    assert "synthetic-google" not in auth.text and "synthetic-groq" not in auth.text
 
 
-def test_institutional_truth_in_agent_answers():
-    """Verifica que las respuestas del agente mantengan veracidad institucional estricta (Fase 1)."""
-    # 1. Significado de reporte pendiente de revisión
-    answer = agent_module._deterministic_sql_fallback_answer(
-        "¿Qué significa que mi reporte esté pendiente de revisión?",
-        tool_history=[],
-    )
-    assert "pendiente de revisión interna" in answer
-    assert "no envía notificaciones automáticas por correo a entidades externas" in answer
-    assert "Alcaldía" not in answer
-    assert "supervisores de la Alcaldía" not in answer
-
-    # 2. Detalle de reporte sin asignación externa
-    tool_hist = [{
-        "tool": "obtener_reporte",
-        "args": {"tracking_code": "CIV-2026-TEST01"},
-        "result": {
-            "encontrado": True,
-            "reporte": {
-                "tracking_code": "CIV-2026-TEST01",
-                "title": "Bache en calzada",
-                "effective_category": "HUECO",
-                "effective_severity": "MEDIA",
-                "status": "PENDING_ANALYSIS",
-                "comuna": "Comuna 19",
-                "neighborhood": "San Fernando",
-                "assigned_to": None,
-            },
-        },
-    }]
-    rep_answer = agent_module._deterministic_sql_fallback_answer(
-        "consultar reporte CIV-2026-TEST01",
-        tool_history=tool_hist,
-    )
-    assert "sin asignación a dependencia externa registrada" in rep_answer
-    assert "notificaciones externas por correo están deshabilitadas" in rep_answer
-    assert "Alcaldía" not in rep_answer
-
-    # 3. Regla en AGENT_SYSTEM_PROMPT
-    assert "VERACIDAD INSTITUCIONAL" in agent_module.AGENT_SYSTEM_PROMPT
-    assert "No afirmes que funcionarios, supervisores o dependencias de la Alcaldía de Cali están revisando" in agent_module.AGENT_SYSTEM_PROMPT
-
-
+def test_institutional_truth_in_agent_answers():
+
+    """Verifica que las respuestas del agente mantengan veracidad institucional estricta (Fase 1)."""
+
+    # 1. Significado de reporte pendiente de revisión
+
+    answer = agent_module._deterministic_sql_fallback_answer(
+
+        "¿Qué significa que mi reporte esté pendiente de revisión?",
+
+        tool_history=[],
+
+    )
+
+    assert "pendiente de revisión interna" in answer
+
+    assert "no envía notificaciones automáticas por correo a entidades externas" in answer
+
+    assert "Alcaldía" not in answer
+
+    assert "supervisores de la Alcaldía" not in answer
+
+
+
+    # 2. Detalle de reporte sin asignación externa
+
+    tool_hist = [{
+
+        "tool": "obtener_reporte",
+
+        "args": {"tracking_code": "CIV-2026-TEST01"},
+
+        "result": {
+
+            "encontrado": True,
+
+            "reporte": {
+
+                "tracking_code": "CIV-2026-TEST01",
+
+                "title": "Bache en calzada",
+
+                "effective_category": "HUECO",
+
+                "effective_severity": "MEDIA",
+
+                "status": "PENDING_ANALYSIS",
+
+                "comuna": "Comuna 19",
+
+                "neighborhood": "San Fernando",
+
+                "assigned_to": None,
+
+            },
+
+        },
+
+    }]
+
+    rep_answer = agent_module._deterministic_sql_fallback_answer(
+
+        "consultar reporte CIV-2026-TEST01",
+
+        tool_history=tool_hist,
+
+    )
+
+    assert "sin asignación a dependencia externa registrada" in rep_answer
+
+    assert "notificaciones externas por correo están deshabilitadas" in rep_answer
+
+    assert "Alcaldía" not in rep_answer
+
+
+
+    # 3. Regla en AGENT_SYSTEM_PROMPT
+
+    assert "VERACIDAD INSTITUCIONAL" in agent_module.AGENT_SYSTEM_PROMPT
+
+    assert "No afirmes que funcionarios, supervisores o dependencias de la Alcaldía de Cali están revisando" in agent_module.AGENT_SYSTEM_PROMPT
+
+
+
+
+
 def test_hermetic_guard_fails_immediately_on_unexpected_external_http():
     """Verifica que cualquier intento de conexión HTTP externa en pruebas herméticas falle de inmediato (G2.1.2)."""
     import httpx

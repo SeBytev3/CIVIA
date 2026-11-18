@@ -11,7 +11,7 @@ import psycopg
 import pytest
 
 from app import agent as a, db, main as m
-from app.config import generate_admin_token, settings
+from app.config import settings
 from app.db import (
     get_conn,
     get_operation_record,
@@ -21,6 +21,8 @@ from app.db import (
     reconcile_operation,
     register_operation_intent,
 )
+
+from tests.conftest import create_authenticated_client
 
 
 @pytest.fixture
@@ -40,7 +42,7 @@ def test_adversarial_rest_status_mutation_joint_atomic_rollback(clean_db):
     Contrato C: La mutación REST PATCH /api/reports/{id}/status y su registro de auditoría
     se ejecutan en una única transacción PostgreSQL. Si el registro falla, ambos hacen rollback.
     """
-    settings.ADMIN_TOKEN = generate_admin_token()
+    client, profile = create_authenticated_client("CASE_ADMIN", raise_server_exceptions=False)
     rep_id = uuid.uuid4()
     with psycopg.connect(settings.DATABASE_URL, autocommit=True) as c:
         c.execute(
@@ -58,11 +60,9 @@ def test_adversarial_rest_status_mutation_joint_atomic_rollback(clean_db):
             (rep_id, "a" * 64),
         )
 
-    client = TestClient(m.app, raise_server_exceptions=False)
     # 1. Éxito síncrono con auditoría
     r = client.patch(
         f"/api/reports/{rep_id}/status",
-        headers={"X-Admin-Token": settings.ADMIN_TOKEN},
         json={"status": "IN_REVIEW", "human_approved": True, "note": "Aprobado por admin"},
     )
     assert r.status_code == 200
@@ -75,7 +75,7 @@ def test_adversarial_rest_status_mutation_joint_atomic_rollback(clean_db):
         ).fetchone()
         assert rec is not None
         assert rec["status"] == "COMMITTED"
-        assert rec["requester_id"] == "admin"
+        assert rec["requester_id"] == profile["id"]
 
     # 2. Rollback conjunto si la tabla operation_records no estuviese disponible
     with psycopg.connect(settings.DATABASE_URL, autocommit=True) as c:
@@ -84,8 +84,7 @@ def test_adversarial_rest_status_mutation_joint_atomic_rollback(clean_db):
     try:
         r_fail = client.patch(
             f"/api/reports/{rep_id}/status",
-            headers={"X-Admin-Token": settings.ADMIN_TOKEN},
-            json={"status": "RESOLVED", "human_approved": True, "note": "Intento sin tabla"},
+                json={"status": "RESOLVED", "human_approved": True, "note": "Intento sin tabla"},
         )
         assert r_fail.status_code == 500
         # Verificar que el reporte conservó su estado IN_REVIEW anterior
@@ -233,33 +232,21 @@ def test_adversarial_external_timeout_not_local_cancellation():
     assert is_deadline_cancellation(exc, past_deadline) is False
 
 
-def test_adversarial_private_operation_unauthorized_404(clean_db):
-    """
-    Contrato B: Operación privada no revela tipo ni destino a anónimos ni a tokens ajenos (HTTP 404).
-    """
-    claim = register_operation_intent(
-        str(uuid.uuid4()),
-        "ADMIN_PRIVATE_TASK",
-        target_id="SECRET_TARGET_99",
-        requester_id="admin",
+def test_adversarial_private_operation_isolated_between_sessions(clean_db):
+    owner, profile = create_authenticated_client()
+    other, _ = create_authenticated_client()
+    operation_id = uuid.uuid4()
+    register_operation_intent(
+        operation_id, "AUDIT_PRIVATE_TASK", target_id="SYNTHETIC_REPORT", requester_id=profile["id"]
     )
-    op = str(claim["operation_id"])
-    mark_operation_committed(op, {"sensitive": "SECRET_DATA"})
+    mark_operation_committed(operation_id, {"result": "SYNTHETIC_DATA"})
+    path = f"/api/operations/{operation_id}"
 
-    client = TestClient(m.app)
-    # Anónimo -> 404
-    r_anon = client.get(f"/api/operations/{op}")
-    assert r_anon.status_code == 404
-
-    # Token ajeno -> 404
-    other_claim = register_operation_intent(str(uuid.uuid4()), "other")
-    r_other = client.get(f"/api/operations/{op}", headers={"X-Operation-Token": other_claim["query_token"]})
-    assert r_other.status_code == 404
-
-    # Token propio -> 200 con resultado
-    r_own = client.get(f"/api/operations/{op}", headers={"X-Operation-Token": claim["query_token"]})
-    assert r_own.status_code == 200
-    assert r_own.json()["result_payload"] == {"sensitive": "SECRET_DATA"}
+    assert TestClient(m.app).get(path).status_code == 401
+    assert other.get(path).status_code == 404
+    response = owner.get(path)
+    assert response.status_code == 200
+    assert response.json()["result_payload"] == {"result": "SYNTHETIC_DATA"}
 
 
 def test_adversarial_hijack_attempt_fails(clean_db):
@@ -280,22 +267,18 @@ def test_adversarial_hijack_attempt_fails(clean_db):
         assert res_eve["replayed"] is True
 
 
-def test_adversarial_operation_pending_delivers_token():
-    """
-    Contrato B: OPERATION_PENDING entrega query_token en AgentQueryResponse.
-    """
-    def pending_worker(args):
-        raise a.OperationPendingError("Wait pending", operation_id=uuid.uuid4(), status="PENDING", query_token="test_token_123")
-
-    with patch.dict(a.TOOL_DISPATCH, {"audit_tool": pending_worker}), patch.object(
-        a, "_call_agent_turn_gemini", return_value=(None, [{"name": "audit_tool", "args": {}}], 10, 10)
-    ):
-        client = TestClient(m.app)
-        r = client.post("/api/agent/query", json={"query": "consulta sintetica"})
-        assert r.status_code == 200
-        data = r.json()
-        assert data["guardrail_triggered"] == "OPERATION_PENDING"
-        assert data["query_token"] == "test_token_123"
+def test_adversarial_operation_pending_returns_reference_without_token(citizen_client):
+    operation_id = uuid.uuid4()
+    pending = a.OperationPendingError(
+        "Operación en curso", operation_id=operation_id, status="PENDING", query_token="synthetic-capability"
+    )
+    with patch.object(m, "run_civia_agent", side_effect=pending):
+        response = citizen_client.post("/api/agent/query", json={"query": "consulta sintética"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["operation_id"] == str(operation_id)
+    assert data["operation_status"] == "PENDING"
+    assert "query_token" not in data and "guardrail_triggered" not in data
 
 
 # ==============================================================================
@@ -461,16 +444,16 @@ def test_f1_gemini_boundary_mock_transport_no_capacity_in_outbound_json(clean_db
     import secrets
     import httpx
     from app.ai_router import reset_all_circuits
+    from app.inference_transport import record_capability
 
     reset_all_circuits()
     monkeypatch.setattr(a, "_call_agent_turn_gemini", a._ORIGINAL_CALL_AGENT_TURN_GEMINI)
 
     old_pri = settings.GOOGLE_API_KEY_PRIMARY
-    old_sec = settings.GOOGLE_API_KEY_SECONDARY
     old_groq = settings.GROQ_API_KEY
     settings.GOOGLE_API_KEY_PRIMARY = "SYNTHETIC_NOT_REAL"
-    settings.GOOGLE_API_KEY_SECONDARY = ""
     settings.GROQ_API_KEY = ""
+    record_capability("google", settings.AI_PRIMARY_MODEL, "tools", settings.GOOGLE_API_KEY_PRIMARY, True)
 
     cap = secrets.token_urlsafe(32)
     seen = []
@@ -536,7 +519,6 @@ def test_f1_gemini_boundary_mock_transport_no_capacity_in_outbound_json(clean_db
         assert cap not in json.dumps(get_operation_record(result["operation_id"])["proposed_payload"])
     finally:
         settings.GOOGLE_API_KEY_PRIMARY = old_pri
-        settings.GOOGLE_API_KEY_SECONDARY = old_sec
         settings.GROQ_API_KEY = old_groq
 
 

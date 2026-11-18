@@ -1,18 +1,10 @@
-import React from 'react';
-import ReactDOM from 'react-dom/client';
-import { App } from './App';
+import { createRoot } from 'react-dom/client';
+import 'leaflet/dist/leaflet.css';
 import './styles.css';
+import { CitizenApp } from './CitizenApp';
+import { retireLegacyWorker } from './service-worker';
+import { isNative } from './device';
 
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js').catch(() => {
-      // Fallo silencioso de SW en entornos restringidos
-    });
-  });
-}
+if (!isNative) void retireLegacyWorker();
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+createRoot(document.getElementById('root')!).render(<CitizenApp />);

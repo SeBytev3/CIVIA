@@ -60,8 +60,8 @@ def test_health_and_db_ready():
     assert body["db"]["schema_ready"] is True
 
 
-def test_synthetic_fixtures_loaded_and_identifiable():
-    res = client.get("/api/reports?limit=50")
+def test_synthetic_fixtures_loaded_and_identifiable(case_admin_client):
+    res = case_admin_client.get("/api/reports?limit=50")
     assert res.status_code == 200
     data = res.json()
     assert data["total"] >= 10
@@ -72,16 +72,16 @@ def test_synthetic_fixtures_loaded_and_identifiable():
     assert demo1["comuna"] == "Comuna 2"
 
     # Lookup por código de seguimiento
-    res_code = client.get("/api/reports/by-code/CIV-2026-DEMO0001")
+    res_code = case_admin_client.get("/api/reports/by-code/CIV-2026-DEMO0001")
     assert res_code.status_code == 200
     assert res_code.json()["id"] == demo1["id"]
 
 
-def test_create_report_and_pii_sanitization_and_photo_serving():
+def test_create_report_and_pii_sanitization_and_photo_serving(citizen_client, case_admin_client):
     img_bytes = make_test_image_bytes(80, 60, "JPEG")
     wav_bytes = make_test_wav_bytes(1.5)
 
-    resp = client.post(
+    resp = citizen_client.post(
         "/api/reports",
         data={
             "title": "<b>Hueco peligroso en barrio Granada</b>",
@@ -111,20 +111,20 @@ def test_create_report_and_pii_sanitization_and_photo_serving():
     assert created["is_synthetic"] is False
 
     report_id = created["id"]
-    edit_token = created["citizen_edit_token"]
-    assert edit_token is not None and len(edit_token) >= 32
+    assert created["citizen_edit_token"] is None
 
     # Verificar que la foto se sirve con cabeceras seguras
-    photo_resp = client.get(f"/api/reports/{report_id}/photo")
+    photo_resp = citizen_client.get(f"/api/reports/{report_id}/photo")
     assert photo_resp.status_code == 200
     assert photo_resp.headers["content-type"] == "image/jpeg"
     assert photo_resp.headers["x-content-type-options"] == "nosniff"
+    assert photo_resp.headers["cache-control"] == "no-store"
     assert len(photo_resp.content) > 100
+    assert citizen_client.get(f"/api/reports/{report_id}/audio").status_code == 200
 
-    # Confirmar / editar categoría por humano con credencial del reporte
-    confirm_resp = client.patch(
+    # Confirmar analisis con la sesión de su propietario.
+    confirm_resp = citizen_client.patch(
         f"/api/reports/{report_id}/confirm",
-        headers={"X-Citizen-Edit-Token": edit_token},
         json={
             "final_category": "HUECO",
             "final_severity": "ALTA",
@@ -138,28 +138,25 @@ def test_create_report_and_pii_sanitization_and_photo_serving():
     assert confirmed["effective_category"] == "HUECO"
     assert confirmed["status"] == "CONFIRMED"
 
-    admin_headers = {"X-Admin-Token": settings.ADMIN_TOKEN}
-
     # Cambio de estado sin aprobación humana debe rechazarse
-    bad_status = client.patch(
+    bad_status = case_admin_client.patch(
         f"/api/reports/{report_id}/status",
-        headers=admin_headers,
         json={"status": "IN_REVIEW", "human_approved": False},
     )
     assert bad_status.status_code == 400
     assert bad_status.json()["error"] == "HUMAN_APPROVAL_REQUIRED"
 
     # Cambio de estado con autenticación admin y aprobación humana explícita
-    ok_status = client.patch(
+    ok_status = case_admin_client.patch(
         f"/api/reports/{report_id}/status",
-        headers=admin_headers,
         json={"status": "IN_REVIEW", "human_approved": True, "note": "Asignado a cuadrilla vial."},
     )
     assert ok_status.status_code == 200
     assert ok_status.json()["status"] == "IN_REVIEW"
 
 
-def test_security_rejects_invalid_files_and_coordinates():
+def test_security_rejects_invalid_files_and_coordinates(citizen_client):
+    client = citizen_client
     valid_img = make_test_image_bytes(64, 64, "PNG")
 
     # 1. Archivo que no es imagen disfrazado de .jpg
@@ -243,7 +240,8 @@ def test_security_rejects_invalid_files_and_coordinates():
     assert r_long_audio.json()["error"] == "AUDIO_TOO_LONG"
 
 
-def test_spatial_and_category_filtering():
+def test_spatial_and_category_filtering(case_admin_client):
+    client = case_admin_client
     # Búsqueda por categoría QUEMA
     r_quema = client.get("/api/reports?category=QUEMA")
     assert r_quema.status_code == 200
@@ -264,7 +262,8 @@ def test_spatial_and_category_filtering():
     assert distances == sorted(distances)
 
 
-def test_rate_limiter_enforced(monkeypatch):
+def test_rate_limiter_enforced(monkeypatch, citizen_client):
+    client = citizen_client
     monkeypatch.setattr(settings, "RATE_LIMIT_MAX_REQUESTS", 2)
     valid_img = make_test_image_bytes(64, 64, "PNG")
 

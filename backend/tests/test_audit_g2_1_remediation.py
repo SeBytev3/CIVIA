@@ -54,6 +54,7 @@ from app.main import app
 from app.repository import create_report
 from app.schemas import AgentQueryRequest
 from app.security import get_trusted_client_ip, rate_limiter
+from tests.conftest import create_authenticated_client
 
 
 def _get_clean_test_db(db_name: str) -> str:
@@ -444,7 +445,7 @@ def test_g2_1_m03_agent_expired_deadline_returns_honest_degradation_without_http
     Verifica que cuando el agente se ejecuta con un deadline muy ajustado (0.10s)
     y el contexto expira, no lanza TimeoutError no manejado en fallback SQL ni causa HTTP 500.
     """
-    client = TestClient(app)
+    client, _ = create_authenticated_client()
 
     from unittest.mock import patch
 
@@ -466,8 +467,8 @@ def test_g2_1_m03_agent_expired_deadline_returns_honest_degradation_without_http
         )
         assert resp.status_code == 200, f"No debe retornar HTTP 500: {resp.text}"
         data = resp.json()
-        assert data["guardrail_triggered"] == "TIMEOUT"
-        assert "no pudo completar" in data["answer"].lower() or "límite de tiempo" in data["answer"].lower()
+        assert "guardrail_triggered" not in data
+        assert "no pudo completar" in data["answer"].lower() or "tiempo" in data["answer"].lower()
 
 
 def test_g2_1_m03_uncooperative_worker_does_not_block_timeout():
@@ -501,10 +502,9 @@ def test_g2_1_m03_endpoint_literal_010_timeout_and_error_handler():
     """
     Verifica que:
     1) Un payload HTTP literal con total_timeout_seconds=0.10 es aceptado por el esquema Pydantic (HTTP 200, no 422).
-    2) El manejador HTTP final de TimeoutError en main.py responde HTTP 200 con guardrail TIMEOUT
-       y un trace_group_id UUID válido (sin NameError de uuid ni HTTP 500).
+    2) El manejador HTTP final de TimeoutError en main.py responde HTTP 200 con un mensaje ciudadano que omite la telemetría.
     """
-    client = TestClient(app)
+    client, _ = create_authenticated_client()
 
     from unittest.mock import patch
 
@@ -520,11 +520,8 @@ def test_g2_1_m03_endpoint_literal_010_timeout_and_error_handler():
         )
         assert resp.status_code == 200, f"Debe responder 200 en lugar de 422 o 500: {resp.status_code} - {resp.text}"
         data = resp.json()
-        assert data["guardrail_triggered"] == "TIMEOUT"
-        # Verificar que trace_group_id es un UUID válido (corrige NameError uuid.uuid4())
-        uuid_obj = uuid.UUID(data["trace_group_id"])
-        assert str(uuid_obj) == data["trace_group_id"]
-        assert "límite de tiempo" in data["answer"].lower() or "deadline" in data["answer"].lower()
+        assert "a tiempo" in data["answer"].lower()
+        assert "trace_group_id" not in data and "guardrail_triggered" not in data
 
 
 def test_g2_1_m03_router_respects_remaining_deadline_without_05s_floor():
@@ -623,6 +620,8 @@ def test_g2_1_m06_anti_spoofing_full_matrix_public_loopback_private_proxy():
             "latency_ms": 5,
         }
 
+    authenticated, _ = create_authenticated_client(mode="bearer")
+    auth = dict(authenticated.headers)
     try:
         with patch("app.main.run_civia_agent", side_effect=dummy_agent):
             peers_to_test = [
@@ -645,7 +644,7 @@ def test_g2_1_m06_anti_spoofing_full_matrix_public_loopback_private_proxy():
                     resp = peer_client.post(
                         "/api/agent/query",
                         json={"query": f"consulta {i} desde {peer_desc}"},
-                        headers=headers,
+                        headers={**auth, **headers},
                     )
                     statuses.append(resp.status_code)
 
@@ -668,7 +667,7 @@ def test_g2_1_m06_anti_spoofing_full_matrix_public_loopback_private_proxy():
                 resp = proxy_client.post(
                     "/api/agent/query",
                     json={"query": f"consulta {i} a través de Nginx"},
-                    headers=headers,
+                    headers={**auth, **headers},
                 )
                 proxy_statuses.append(resp.status_code)
 
@@ -991,7 +990,8 @@ def test_g2_1_1_m06_direct_container_ip_spoofing_rejected_200_200_429(monkeypatc
     monkeypatch.setattr(settings, "RATE_LIMIT_WINDOW_SECONDS", 60)
     monkeypatch.setattr(settings, "TRUSTED_PROXIES", "172.28.0.2")
 
-    fake_client = TestClient(app, client=("172.19.0.9", 45678))
+    authenticated, _ = create_authenticated_client(mode="bearer")
+    fake_client = TestClient(app, client=("172.19.0.9", 45678), headers=dict(authenticated.headers))
 
     statuses: list[int] = []
     fake_ips = ["203.0.113.1", "203.0.113.2", "203.0.113.3"]
@@ -1036,7 +1036,8 @@ def test_g2_1_1_m06_trusted_proxy_separate_client_quotas(monkeypatch):
     monkeypatch.setattr(settings, "RATE_LIMIT_WINDOW_SECONDS", 60)
     monkeypatch.setattr(settings, "TRUSTED_PROXIES", "172.28.0.2")
 
-    proxy_client = TestClient(app, client=("172.28.0.2", 80))
+    auth_a, _ = create_authenticated_client(mode="bearer")
+    proxy_client = TestClient(app, client=("172.28.0.2", 80), headers=dict(auth_a.headers))
 
     # Cliente A (198.51.100.10): realiza 3 peticiones -> 201, 201, 429
     statuses_a: list[int] = []
@@ -1059,6 +1060,8 @@ def test_g2_1_1_m06_trusted_proxy_separate_client_quotas(monkeypatch):
     assert statuses_a == [201, 201, 429]
 
     # Cliente B (198.51.100.11): cuota independiente -> 201, 201, 429
+    auth_b, _ = create_authenticated_client(mode="bearer")
+    proxy_client.headers.update(auth_b.headers)
     statuses_b: list[int] = []
     for _ in range(3):
         res = proxy_client.post(
@@ -1233,12 +1236,12 @@ def test_g2_1_1_m02_token_accumulation_invalid_json_fallback(monkeypatch):
     )
 
 
-def test_g2_1_1_m02_token_accumulation_three_invalid_responses(monkeypatch):
+def test_g2_1_1_m02_token_accumulation_two_invalid_responses(monkeypatch):
     """
     Reproduce el contraejemplo M-02 de acumulación ante fallo total con tokens conocidos:
-    Tres proveedores devuelven '{}', cada uno con 500 prompt + 100 completion = 600 tokens.
+    Dos proveedores devuelven '{}', cada uno con 500 prompt + 100 completion = 600 tokens.
     Verificación:
-    El router reporta total_tokens = 1800 conocidos (3 x 600), en lugar de sustituir
+    El router reporta total_tokens = 1200 conocidos (2 x 600), en lugar de sustituir
     los tokens conocidos por 1280 estimados o cero.
     """
     from app import ai_router as ai_r
@@ -1251,16 +1254,16 @@ def test_g2_1_1_m02_token_accumulation_three_invalid_responses(monkeypatch):
     monkeypatch.setattr(ai_r, "_call_groq_multimodal", mock_invalid_adapter)
 
     contract, meta = ai_r.classify_evidence_with_router(
-        description="Prueba de tres respuestas inválidas con tokens conocidos",
+        description="Prueba de dos respuestas inválidas con tokens conocidos",
         latitude=3.45,
         longitude=-76.53,
     )
 
     assert contract is None, "Debió fallar la clasificación al no haber esquema válido"
     assert meta["all_failed"] is True
-    # Tres intentos con 600 tokens cada uno = 1800 tokens conocidos
-    assert meta["total_tokens"] == 1800, (
-        f"Violación M-02: total_tokens fue {meta['total_tokens']}, esperado 1800 conocidos (3 x 600)"
+    # Dos intentos con 600 tokens cada uno = 1200 tokens conocidos
+    assert meta["total_tokens"] == 1200, (
+        f"Violación M-02: total_tokens fue {meta['total_tokens']}, esperado 1200 conocidos (2 x 600)"
     )
 
 
@@ -1768,7 +1771,7 @@ def test_g2_1_4_hermetic_suite_zero_external_attempts_synthetic_and_empty():
     from app.main import app
     from app.config import settings
 
-    tc = TestClient(app)
+    tc, _ = create_authenticated_client()
 
     # 1. Con claves sintéticas
     old_google = settings.GOOGLE_API_KEY_PRIMARY
@@ -2127,56 +2130,27 @@ def test_g2_1_6_reconciliation_of_disconnected_operation():
         settings.DATABASE_URL = old_db_url
 
 
-def test_g2_1_6_api_endpoint_operations_status():
-    """
-    Verifica la API pública GET /api/operations/{operation_id}:
-    - 200 con estructura OperationStatusResponse.
-    - 404 para identificador desconocido.
-    """
-    from fastapi.testclient import TestClient
-    from app.main import app
-
-    client = TestClient(app)
-
-    missing_id = uuid.uuid4()
-    r = client.get(f"/api/operations/{missing_id}")
-    assert r.status_code == 404
+def test_g2_1_6_api_endpoint_operations_status(web_admin_client, citizen_client):
+    owner, user = create_authenticated_client()
+    assert owner.get(f"/api/operations/{uuid.uuid4()}").status_code == 404
 
     known_id = uuid.uuid4()
-    claim = register_operation_intent(
-        operation_id=known_id,
-        operation_type="clasificar_evidencia",
-        target_id="rep-test-api",
+    register_operation_intent(
+        operation_id=known_id, operation_type="clasificar_evidencia",
+        target_id="rep-test-api", requester_id=user["id"],
     )
     mark_operation_committed(known_id, result_payload={"diagnostico": "HUECO"})
 
-    # 1. Consulta anónima: entrega estado público pero minimiza información sensible (result_payload None, sin idempotency_key)
-    r_anon = client.get(f"/api/operations/{known_id}")
-    assert r_anon.status_code == 200
-    data_anon = r_anon.json()
-    assert data_anon["operation_id"] == str(known_id)
-    assert data_anon["status"] == "COMMITTED"
-    assert data_anon["operation_type"] == "clasificar_evidencia"
-    assert data_anon.get("result_payload") is None, "Consulta anónima no debe exponer result_payload"
-    assert "idempotency_key" not in data_anon, "idempotency_key no debe figurar en el esquema público"
-
-    # 2. Consulta autorizada con token de consulta de la operación (propietario)
-    r_owner = client.get(
-        f"/api/operations/{known_id}",
-        headers={"X-Operation-Token": claim["query_token"]},
-    )
-    assert r_owner.status_code == 200
-    data_owner = r_owner.json()
-    assert data_owner["result_payload"]["diagnostico"] == "HUECO"
-
-    # 3. Consulta autorizada con token de administrador
-    r_admin = client.get(
-        f"/api/operations/{known_id}",
-        headers={"X-Admin-Token": settings.ADMIN_TOKEN},
-    )
-    assert r_admin.status_code == 200
-    data_admin = r_admin.json()
-    assert data_admin["result_payload"]["diagnostico"] == "HUECO"
+    assert TestClient(app).get(f"/api/operations/{known_id}").status_code == 401
+    assert citizen_client.get(f"/api/operations/{known_id}").status_code == 404
+    for authorized in (owner, web_admin_client):
+        response = authorized.get(f"/api/operations/{known_id}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["operation_id"] == str(known_id)
+        assert data["status"] == "COMMITTED"
+        assert data["result_payload"]["diagnostico"] == "HUECO"
+        assert "idempotency_key" not in data
 
 
 # ==============================================================================

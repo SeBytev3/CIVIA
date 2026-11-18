@@ -187,7 +187,7 @@ def test_update_synthetic_catalog_photos_idempotent_and_safe():
 # PRUEBAS ADVERSARIALES OBLIGATORIAS (CASOS A HASTA L)
 # ---------------------------------------------------------------------------
 
-def test_adversarial_case_a_interruption_after_staging():
+def test_adversarial_case_a_interruption_after_staging(case_admin_client):
     """
     Caso A: Interrupción después de crear archivo de staging temporal.
     Verifica que:
@@ -199,7 +199,7 @@ def test_adversarial_case_a_interruption_after_staging():
     orphan_staging = settings.UPLOAD_DIR / f".staging_deadpid_civ-2026-demo0001_{uuid4().hex}.tmp"
     orphan_staging.write_bytes(b"TEMPORARY_STAGING_BEFORE_CRASH")
 
-    client = TestClient(app)
+    client = case_admin_client
     rep = client.get("/api/reports/by-code/CIV-2026-DEMO0001").json()
     photo_res = client.get(f"/api/reports/{rep['id']}/photo")
     assert photo_res.status_code == 200
@@ -209,7 +209,7 @@ def test_adversarial_case_a_interruption_after_staging():
     assert res["unchanged"] == 10
 
 
-def test_adversarial_case_b_c_interruption_after_publishing_before_commit():
+def test_adversarial_case_b_c_interruption_after_publishing_before_commit(case_admin_client):
     """
     Casos B y C: Interrupción después de publicar imagen nueva en disco pero antes de confirmar SQL.
     Verifica que:
@@ -234,7 +234,7 @@ def test_adversarial_case_b_c_interruption_after_publishing_before_commit():
     simulated_new_file.write_bytes(b"SIMULATED_NEW_PHOTO_CONTENT")
 
     # Corte abrupto antes del commit: en PostgreSQL sigue apuntando a old_path
-    client = TestClient(app)
+    client = case_admin_client
     photo_res = client.get(f"/api/reports/{row_before['id']}/photo")
     assert photo_res.status_code == 200
     assert photo_res.content == old_bytes
@@ -566,16 +566,15 @@ def test_adversarial_case_l_citizen_reports_untouched():
             assert c_row["is_synthetic"] is False
 
 
-def test_photo_endpoint_versioning_etag_and_caching():
+def test_photo_endpoint_requires_session_and_prevents_storage(case_admin_client):
     """
     Verifica:
     1. photo_url incluye parámetro ?v={sha[:16]}
-    2. Endpoint /photo sirve con Cache-Control immutable para URL versionada
-    3. Soporta ETag y responde HTTP 304 Not Modified con If-None-Match
-    4. URL canónica (sin versión) responde con must-revalidate
+    2. Endpoint /photo protege los archivos mediante sesión y Cache-Control no-store
+    3. Una petición condicional anónima tampoco recibe acceso
     """
     seed_synthetic_reports(force_reset=True)
-    client = TestClient(app)
+    client = case_admin_client
 
     rep_res = client.get("/api/reports/by-code/CIV-2026-DEMO0001")
     assert rep_res.status_code == 200
@@ -590,21 +589,21 @@ def test_photo_endpoint_versioning_etag_and_caching():
     # 1. Solicitud a URL versionada
     v_res = client.get(photo_url)
     assert v_res.status_code == 200
-    assert "public, max-age=31536000, immutable" in v_res.headers.get("cache-control", "")
+    assert v_res.headers["cache-control"] == "no-store"
     etag = v_res.headers.get("etag")
     assert etag is not None
 
     # 2. Solicitud condicional con If-None-Match
-    not_mod_res = client.get(photo_url, headers={"If-None-Match": etag})
-    assert not_mod_res.status_code == 304
+    not_mod_res = TestClient(app).get(photo_url, headers={"If-None-Match": etag})
+    assert not_mod_res.status_code == 401
 
     # 3. Solicitud a URL canónica (sin ?v)
     canon_res = client.get(f"/api/reports/{rep_id}/photo")
     assert canon_res.status_code == 200
-    assert "must-revalidate" in canon_res.headers.get("cache-control", "")
+    assert canon_res.headers["cache-control"] == "no-store"
 
 
-def test_synthetic_photo_ethical_provenance_enforced_on_server():
+def test_synthetic_photo_ethical_provenance_enforced_on_server(citizen_client):
     """
     Verifica el principio de procedencia certificada por servidor:
     1. Si un usuario sube una muestra oficial del catálogo sintético (aun enviando is_synthetic=False),
@@ -613,7 +612,7 @@ def test_synthetic_photo_ethical_provenance_enforced_on_server():
        el servidor NO confunde esa marca voluntaria con procedencia certificada y guarda is_synthetic = FALSE.
     """
     seed_synthetic_reports(force_reset=True)
-    client = TestClient(app)
+    client = citizen_client
 
     # Caso 1: Foto del catálogo oficial enviada con is_synthetic=false -> Servidor certifica is_synthetic=True
     sample_path = Path(__file__).resolve().parent.parent.parent / "frontend" / "public" / "demo_evidence" / "sample_hueco.jpg"
@@ -697,11 +696,11 @@ def test_sample_otro_is_independent_and_distinct():
         assert otro_sha != demo9_sha, "sample_otro.jpg no debe ser una copia de civ-2026-demo0009.jpg"
 
 
-def test_photo_endpoint_serves_new_asset():
+def test_photo_endpoint_serves_new_asset(case_admin_client):
     """Verifica que /api/reports/{id}/photo sirva la nueva imagen fotorrealista con sus encabezados de seguridad."""
     seed_synthetic_reports(force_reset=True)
 
-    client = TestClient(app)
+    client = case_admin_client
     # Obtener el primer reporte demo
     rep_res = client.get("/api/reports/by-code/CIV-2026-DEMO0001")
     assert rep_res.status_code == 200

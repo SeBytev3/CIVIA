@@ -1,3 +1,56 @@
+# Estado de CIVIA 1.1.0
+
+Registro del candidato de Momento 3 · 17 de noviembre de 2026 · hora de Bogotá.
+
+## Entorno y resultados
+
+- Base verificada al comenzar en `main` y `origin/main` con SHA `0180b82a2a6a2b53f76bb3f648d66ffe12c92293`. Rama candidata `feature/civia-v1.1-mobile-security-resilience`. La referencia histórica `v1.0.0-academic` apuntaba a `3b74a580949d240d44f9fa92c48f6a8a1fcfc442`.
+- Windows 11, Docker Desktop y PostgreSQL 17. Primera copia fresca compiló y detectó una colisión entre la IP reservada de Nginx y la asignación automática de Docker. Se asignó un rango dinámico separado. Segunda copia fresca con volúmenes nuevos confirmó migraciones, API, PostgreSQL, Nginx y worker saludables mediante `.\scripts\run.ps1`.
+- Smoke real en esa instalación. Registro y sesiones de tres roles, lectura administrativa autorizada, radicación durante simulación TOTAL, fotografía accesible al dueño, reenvío idempotente con un único reporte y trabajo reprogramado. La recepción observada de un reporte fue 186,95 ms. Se restauró el modo NONE. Inferencia externa pendiente de validación privada.
+- En integración web, Playwright cubrió sesión real, GPS de navegador, imagen sintética, radicado, lectura como titular y revocación al cerrar sesión. Seis pruebas herméticas de interfaz cubrieron rutas de roles, aislamiento de PWA y borradores. Consulta el [frontend](../frontend/README.md).
+- Las pruebas herméticas de worker comprobaron retoma de lease, ausencia de efecto tardío, backoff, DLQ, reencolado por WEB_ADMIN, deduplicación, contrapresión y roles PostgreSQL separados. La recuperación de análisis empleó adaptadores simulados.
+- El inventario generado contiene 40 operaciones de [API](API.md). El formulario y el protocolo de autenticación se verificaron por las rutas normales de FastAPI.
+- **Android.** JDK 21, SDK y emulador API 35. `gradlew.bat assembleDebug lintDebug` terminó correctamente, con 0 errores y 21 advertencias de lint de Android. `apksigner` confirmó la firma debug v2. El APK `frontend/android/app/build/outputs/apk/debug/CIVIA-1.1.0-android-debug.apk` tiene SHA-256 `c5c8aa058a20588b7895a15805f1464907760fc46640236bcf9074eaf3c08cdb`. Instalación ADB y arranque verificados en Android 35 con mapa y conteo desde el API mediante `adb reverse`. Login, cámara, GPS y audio nativos quedan pendientes de prueba integral. El navegador sí cubrió registro y GPS.
+
+## Pruebas y dependencias
+
+- `docker compose --profile test run --rm --build tests pytest -m "not live" -q --tb=short` en PostgreSQL desechable. **196 aprobadas, 1 omitida y 1 deseleccionada**. La prueba de proxy requiere la red del despliegue. La prueba deseleccionada consume cuota externa. Hubo dos avisos de obsolescencia de las bibliotecas para pruebas.
+- `npm run typecheck`, `npm run build` y `npm run test:e2e` pasaron. Seis pruebas de Playwright y un smoke de navegador conectado a la API. Compilación de Python y revisión de espacios Git pasaron.
+- `pip check` y `pip-audit` de las dependencias Python resueltas pasaron tras corregir FastAPI/Starlette, Pillow, python-multipart y pytest. Pytest queda sólo en la imagen de pruebas.
+- `npm audit --omit=dev` reportó cero hallazgos. La auditoría completa reportó cuatro entradas vinculadas a Picomatch y la cadena de Vite. La dependencia afectada queda en la construcción y el servidor de desarrollo en loopback. Nginx sirve el resultado estático. El aviso [GHSA-fc5q-39xc-vjpf](https://github.com/advisories/GHSA-fc5q-39xc-vjpf) no indicaba una versión corregida al verificar.
+
+## Mediciones locales
+
+| Muestra | P50 | P90 | P95 | Alcance |
+| --- | ---: | ---: | ---: | --- |
+| 15 consultas al asistente | 485,38 ms | 983,93 ms | — | PostgreSQL determinista sobre Nginx, sin llamadas externas, P90 por rango entero superior |
+| 15 radicaciones sintéticas | 74,98 ms | 86,75 ms | 89,34 ms | PNG 64 × 64, validación, archivo y transacción |
+| 15 trabajos del worker | 174,11 ms | 221,12 ms | 231,64 ms | Worker serial y adaptador simulado, sin llamadas externas |
+| Desde radicación hasta diagnóstico | 2,129 s | 2,621 s | 2,668 s | Recepciones precargadas, luego drenaje serial |
+
+El worker drenó 15 trabajos en 2,651 s (5,66 trabajos/s). La muestra del asistente se ejecutó de forma serial a 1,80 consultas/s. El costo externo observado fue USD 0 en estas mediciones. La capacidad de proveedores y el TCO se tratan como supuestos en [arquitectura_escala.md](arquitectura_escala.md).
+
+La suite dorada repitió tres veces cinco preguntas. Se revisaron manualmente la existencia y el estado del radicado sintético de la corrida, los 3 casos de huecos, los 3 casos de basuras, la ausencia de casos en Comuna 99 y la ausencia de mediciones NDVI. Las salidas pertenecen al catálogo y a la base desechable. Los resultados no miden la exactitud de proveedores externos.
+
+## Matriz de skills y verificación
+
+| Área | Skills aplicadas | Instrucción aplicada | Comprobación |
+| --- | --- | --- | --- |
+| Proveedores y secretos | backend-security-coder, test-driven-development | Destinos fijos, encabezado de clave y preflight por modalidad | RED obtuvo tres niveles y clave en query. GREEN usa dos destinos y encabezado. La llamada bloqueada por política termina el ciclo. |
+| Identidad y propiedad | api-security, backend-security-coder | Autorizar cada recurso y resolver rol y dueño desde la sesión | RED obtuvo 404 en autenticación y acceso anónimo a reportes. GREEN verificó permisos, revocación, scopes e idempotencia. |
+| Radicación y pérdida de confirmación | postgres-best-practices, test-driven-development | Compartir transacción para reporte y trabajo. Conservar evidencias inmutables ante confirmación incierta. | Rollback al fallar la cola. Reenvío recupera un solo radicado y preserva evidencia. |
+| Cola, leasing y decisiones | postgres-best-practices, code-review-and-quality | Lock, publicación cercada, extensión de estado y auditoría autorizada | Reclamo concurrente, recuperación de lease, Retry-After, DLQ, rechazo de reencolado CASE_ADMIN y decisión humana prevalente. |
+| Interfaces y caché | react-patterns, frontend-api-integration-patterns, playwright-skill | Sesión autoritativa, carga autenticada, borradores por cuenta y ámbito PWA | Cuatro casos RED iniciales en el frontend anterior. GREEN con pruebas de roles, navegación, registro y reenvío. |
+| Arranque | systematic-debugging, verification-before-completion | Distinguir fallo de red y salud del proceso | Choque de IP constatado y corregido. Arranque fresco confirmado con servicios saludables. |
+
+## Límites
+
+Se retiró la conexión PostgreSQL predeterminada que coincidía con una configuración histórica local. El candidato fresco usa secretos aleatorios para cada identidad de servicio. La rotación de la credencial existente queda pendiente de una migración privada con respaldo.
+
+La validación en vivo de Gemini, Groq y sus modelos requiere aprobación de cuota. Los resultados locales usan fixtures. Las comprobaciones defensivas verificaron permisos, minimización, límites y efectos en un entorno de datos sintéticos. La reproducción de explotación queda fuera de la evidencia. La prueba de Android en un teléfono físico y el despliegue público quedan pendientes. Los resultados históricos se conservan a continuación.
+
+---
+
 
 ## CIVIA 1.0 — Hotfix Urgente: Credenciales de IA y Acceso Administrativo (2026-11-06)
 

@@ -1,11 +1,10 @@
 from contextlib import asynccontextmanager
 import hashlib
-import hmac
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
-import uuid
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
@@ -21,29 +20,41 @@ from app.agent import (
     run_civia_agent,
 )
 from app.ai_router import (
-    classify_evidence_with_router,
     get_all_circuit_states,
     get_effective_fault_mode,
     get_provider_chain,
     reset_all_circuits,
     set_runtime_fault_override,
-    transcribe_audio_optional,
 )
-from app.config import is_strong_admin_token, settings, validate_admin_token_or_raise
+from app.analysis_queue import enqueue_report_analysis, list_dead_letters, queue_status, requeue_dead_letter
+from app.auth_routes import ALLOWED_ORIGINS, auth_router, users_router
+from app.config import settings
 from app.db import (
     IdempotencyConflictError,
     check_db_health,
+    get_conn,
     get_operation_record,
     reconcile_operation,
     run_migrations,
     sanitize_credentials_deep,
 )
+from app.identity import (
+    CaseAdminSession,
+    CitizenSession,
+    CurrentSession,
+    Role,
+    WebAdminSession,
+    audit,
+    require_case_admin,
+    require_web_admin,
+)
 from app.observability import get_observability_summary
+from app.public_map import router as public_map_router
 from app.repository import (
+    ReceiptCommitUncertain,
     confirm_report_category,
     create_report,
     get_report_by_tracking_code,
-    get_report_events,
     get_report_raw,
     get_reports_summary_stats,
     list_admin_notifications,
@@ -51,7 +62,6 @@ from app.repository import (
     mark_admin_notification_read,
     mark_all_admin_notifications_read,
     row_to_public_dict,
-    update_report_ai_analysis,
     update_report_management,
     update_report_status,
 )
@@ -90,12 +100,12 @@ logger = logging.getLogger("civia.api")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    validate_admin_token_or_raise(settings.ADMIN_TOKEN)
     try:
         settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        applied = run_migrations()
-        if applied:
-            logger.info("Migraciones aplicadas al iniciar: %s", applied)
+        if os.getenv("CIVIA_EXTERNAL_MIGRATIONS") != "1":
+            applied = run_migrations()
+            if applied:
+                logger.info("Migraciones aplicadas al iniciar: %s", applied)
         if settings.AUTO_SEED_SYNTHETIC:
             seed_res = seed_synthetic_reports(force_reset=False)
             logger.info("Seed sintético inicial: %s", seed_res)
@@ -111,11 +121,11 @@ TAGS_METADATA = [
     },
     {
         "name": "Reportes ciudadanos",
-        "description": "Endpoints públicos para el alta de incidentes viales y ambientales en Santiago de Cali, validación geográfica, estadísticas y consulta ciudadana.",
+        "description": "Registro y consulta por propietario, con acceso operativo para los perfiles administrativos.",
     },
     {
         "name": "Fotografías y evidencias",
-        "description": "Almacenamiento y entrega inmutable de evidencias fotográficas (Content-Addressed Storage) con soporte ETag, HTTP 304 y cabeceras CSP.",
+        "description": "Entrega autenticada de evidencias fotográficas y notas de voz con controles de propiedad y caché privada.",
     },
     {
         "name": "Seguimiento y trazabilidad",
@@ -145,9 +155,9 @@ APP_DESCRIPTION = """
 ### Arquitectura y Principios de Diseño:
 * **API RESTful de Alto Rendimiento:** Construida con FastAPI en Python 3.13 con validación de esquemas mediante Pydantic v2.
 * **Persistencia Transaccional:** Motor PostgreSQL 17 con esquema relacional normalizado e integridad referencial estricta.
-* **Enrutador Multimodal Resiliente de Tres Niveles:** Conmutación automática `Gemini 3.8 Flash` → `Groq Qwen 3.8 27B` → `Gemini 3.5 Flash Lite` con interruptores de circuito (*circuit breakers*).
+* **Análisis resiliente:** Un worker consume una cola persistente con dos proveedores, interruptores de circuito y reintentos acotados.
 * **Agente Genuino con SQL Directo y Cuatro Límites:** Invocación de herramientas tipadas parametrizadas sin intermediarios opacos; la IA jamás escribe directamente en la base de datos de reportes.
-* **Seguridad y Privacidad Estrictas:** Descarte garantizado de metadatos EXIF/GPS en fotografías, sanitización de PII, rate limiting por IP y autenticación administrativa basada en tokens CSPRNG comparados en tiempo constante (`hmac.compare_digest`).
+* **Seguridad y privacidad:** Evidencias privadas, credenciales Argon2id, sesiones revocables, permisos por rol y propiedad.
 
 Para la especificación exhaustiva de cada endpoint, guías de desarrollo y códigos de respuesta, consulte la documentación canónica en [`docs/API.md`](https://github.com/SeBytev3/CIVIA/blob/main/docs/API.md).
 """
@@ -155,7 +165,7 @@ Para la especificación exhaustiva de cada endpoint, guías de desarrollo y cód
 app = FastAPI(
     title="CIVIA — API de Gestión Inteligente y Vigilancia Urbana",
     description=APP_DESCRIPTION,
-    version="1.0.0",
+    version="1.1.0",
     openapi_tags=TAGS_METADATA,
     lifespan=lifespan,
     docs_url="/docs",
@@ -165,11 +175,22 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=list(ALLOWED_ORIGINS),
+    allow_credentials=True,
+    allow_methods=["GET", "HEAD", "POST", "PATCH", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-CSRF-Token", "X-Operation-Token", "X-Session-Mode"],
 )
+app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(public_map_router)
+
+
+@app.middleware("http")
+async def prevent_api_caching(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.exception_handler(CitizenValidationError)
@@ -203,21 +224,6 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
-def verify_admin_token(x_admin_token: str | None = Header(default=None)) -> None:
-    expected = (settings.ADMIN_TOKEN or "").strip()
-    provided = (x_admin_token or "").strip()
-    if (
-        not is_strong_admin_token(expected)
-        or not is_strong_admin_token(provided)
-        or not hmac.compare_digest(provided, expected)
-    ):
-        raise CitizenValidationError(
-            "Acceso restringido a observabilidad y administración.",
-            status_code=401,
-            code="UNAUTHORIZED",
-        )
-
-
 @app.get(
     "/health",
     tags=["Salud del sistema"],
@@ -237,10 +243,22 @@ def health() -> dict[str, Any]:
     "/api/reports/stats",
     tags=["Reportes ciudadanos"],
     summary="Obtener estadísticas generales de reportes",
-    description="Retorna el conteo global de reportes registrados, desgloses por categoría, estado operativo y distribución geográfica en el municipio de Cali.",
+    description="Devuelve estadísticas de los reportes propios o de toda la operación según el rol.",
 )
-def reports_stats() -> dict[str, Any]:
-    return get_reports_summary_stats()
+def reports_stats(principal: CurrentSession) -> dict[str, Any]:
+    return get_reports_summary_stats(owner_id=_citizen_owner(principal))
+
+
+def _citizen_owner(principal: CurrentSession) -> UUID | None:
+    return principal.id if principal.role == Role.CITIZEN else None
+
+
+def _visible_report(row: dict[str, Any] | None) -> dict[str, Any]:
+    if row is None:
+        raise CitizenValidationError(
+            "No se encontró el reporte solicitado.", status_code=404, code="REPORT_NOT_FOUND"
+        )
+    return row
 
 
 @app.post(
@@ -249,10 +267,11 @@ def reports_stats() -> dict[str, Any]:
     status_code=201,
     tags=["Reportes ciudadanos"],
     summary="Crear nuevo reporte ciudadano con evidencia fotográfica",
-    description="Registra un nuevo incidente vial o ambiental. Valida coordenadas en Cali, remueve metadatos EXIF de la fotografía con Pillow, almacena en PostgreSQL 17 de forma atómica y opcionalmente ejecuta diagnóstico preliminar con IA.",
+    description="Guarda el reporte del usuario autenticado, elimina los metadatos fotográficos y encola el diagnóstico.",
 )
 async def create_citizen_report(
     request: Request,
+    principal: CitizenSession,
     description: str = Form(...),
     latitude: float = Form(...),
     longitude: float = Form(...),
@@ -260,14 +279,13 @@ async def create_citizen_report(
     comuna: str | None = Form(default=None),
     neighborhood: str | None = Form(default=None),
     address_hint: str | None = Form(default=None),
-    auto_analyze: bool = Form(default=True),
-    is_synthetic: bool = Form(default=False),
     photo: UploadFile = File(...),
     audio: UploadFile | None = File(default=None),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     client_ip = get_trusted_client_ip(request)
-    rate_limiter.check(client_ip)
+    rate_limiter.check(f"report:ip:{client_ip}")
+    rate_limiter.check(f"report:user:{principal.id}")
 
     clean_desc = sanitize_text(
         description,
@@ -292,10 +310,10 @@ async def create_citizen_report(
 
     lat, lon, in_service_area = validate_coordinates(latitude, longitude)
 
-    raw_photo = await photo.read()
+    raw_photo = await photo.read(settings.MAX_PHOTO_BYTES + 1)
     raw_audio = b""
     if audio is not None and audio.filename:
-        raw_audio = await audio.read()
+        raw_audio = await audio.read(settings.MAX_AUDIO_BYTES + 1)
 
     raw_photo_sha = hashlib.sha256(raw_photo).hexdigest() if raw_photo else ""
     raw_audio_sha = hashlib.sha256(raw_audio).hexdigest() if raw_audio else ""
@@ -308,7 +326,6 @@ async def create_citizen_report(
             "comuna": clean_comuna,
             "neighborhood": clean_neighborhood,
             "address_hint": clean_address,
-            "auto_analyze": bool(auto_analyze),
             "photo_sha256": raw_photo_sha,
             "audio_sha256": raw_audio_sha,
         },
@@ -335,22 +352,11 @@ async def create_citizen_report(
         written_files.append(settings.UPLOAD_DIR / Path(photo_meta["photo_path"]).name)
 
         audio_meta = None
-        audio_transcript = None
         if raw_audio:
             audio_meta = await run_in_threadpool(
                 validate_and_store_audio, raw_audio, declared_filename=audio.filename if audio else None
             )
             written_files.append(settings.UPLOAD_DIR / Path(audio_meta["audio_path"]).name)
-            if auto_analyze:
-                try:
-                    audio_transcript = await run_in_threadpool(
-                        transcribe_audio_optional,
-                        raw_audio,
-                        audio.filename if audio and audio.filename else "audio.wav",
-                        audio_meta["audio_mime"],
-                    )
-                except Exception as exc:
-                    logger.warning("Fallo no bloqueante en transcripción opcional: %s", type(exc).__name__)
 
         known_synthetic = get_known_synthetic_sha256_set()
         # Procedencia certificada por servidor: la condición sintética oficial de prueba
@@ -372,12 +378,19 @@ async def create_citizen_report(
             "address_hint": clean_address,
             "photo_meta": photo_meta,
             "audio_meta": audio_meta,
-            "audio_transcript": audio_transcript,
             "is_synthetic": eff_is_synthetic,
             "idempotency_key": eff_idem_key,
             "request_fingerprint": req_fingerprint,
+            "owner_id": principal.id,
+            "enqueue_analysis": True,
         }
         row = await run_in_threadpool(create_report, **create_kwargs)
+    except ReceiptCommitUncertain as exc:
+        raise CitizenValidationError(
+            "No pudimos confirmar la recepción. Reintenta este mismo envío sin crear otro reporte.",
+            status_code=503,
+            code="RECEIPT_UNCONFIRMED",
+        ) from exc
     except Exception:
         for orphan_file in written_files:
             orphan_file.unlink(missing_ok=True)
@@ -387,95 +400,30 @@ async def create_citizen_report(
         for duplicate_file in written_files:
             duplicate_file.unlink(missing_ok=True)
 
-    saved_edit_token = row.get("_citizen_edit_token")
-
-    if auto_analyze and row.get("status") == "PENDING_ANALYSIS":
-        try:
-            active_photo_name = Path(row["photo_path"]).name
-            safe_photo_file = settings.UPLOAD_DIR / active_photo_name
-            stored_photo_bytes = (
-                safe_photo_file.read_bytes() if safe_photo_file.exists() else raw_photo
-            )
-            contract, _ = await run_in_threadpool(
-                classify_evidence_with_router,
-                description=clean_desc,
-                latitude=lat,
-                longitude=lon,
-                image_bytes=stored_photo_bytes,
-                image_mime=row["photo_mime"],
-                address_hint=clean_address,
-                audio_transcript=row.get("audio_transcript") or audio_transcript,
-                report_id=row["id"],
-            )
-            if contract is not None:
-                updated = await run_in_threadpool(
-                    update_report_ai_analysis,
-                    row["id"],
-                    ai_category=contract.category,
-                    ai_severity=contract.severity,
-                    ai_confidence=contract.confidence,
-                    ai_summary=contract.summary,
-                    ai_keywords=contract.keywords,
-                    auto_confirm=False,
-                )
-                if updated is not None:
-                    updated["_citizen_edit_token"] = saved_edit_token
-                    row = updated
-        except Exception as exc:
-            logger.warning(
-                "El reporte %s fue confirmado en BD, pero el análisis post-commit falló de forma aislada: %s",
-                row.get("tracking_code"),
-                type(exc).__name__,
-            )
-
-    row["_citizen_edit_token"] = saved_edit_token
+    row.pop("_citizen_edit_token", None)
     return row_to_public_dict(row)
 
 
 @app.post(
     "/api/reports/{report_id}/analyze",
     response_model=ReportPublicResponse,
+    status_code=202,
     tags=["Reportes ciudadanos"],
     summary="Ejecutar análisis multimodal sobre reporte existente",
-    description="Reintenta o solicita el diagnóstico de visión computacional con IA para un reporte ya persistido en estado PENDING_ANALYSIS, aplicando el contrato estructurado AIAnalysisContract.",
+    description="Encola el diagnóstico de un reporte propio pendiente de análisis.",
 )
-def analyze_existing_report(request: Request, report_id: UUID):
+def analyze_existing_report(request: Request, report_id: UUID, principal: CitizenSession):
     client_ip = get_trusted_client_ip(request)
-    rate_limiter.check(f"analyze:{client_ip}")
-    row = get_report_raw(report_id)
-    if not row:
+    rate_limiter.check(f"analyze:ip:{client_ip}")
+    rate_limiter.check(f"analyze:user:{principal.id}")
+    _visible_report(get_report_raw(report_id, include_events=False, owner_id=principal.id))
+    if not enqueue_report_analysis(report_id, owner_id=principal.id):
         raise CitizenValidationError(
-            "No se encontró el reporte solicitado para análisis.",
-            status_code=404,
-            code="REPORT_NOT_FOUND",
+            "El reporte no está disponible para un nuevo análisis.",
+            status_code=409,
+            code="ANALYSIS_NOT_AVAILABLE",
         )
-    safe_name = Path(row["photo_path"]).name
-    photo_file = settings.UPLOAD_DIR / safe_name
-    img_bytes = photo_file.read_bytes() if photo_file.exists() else None
-
-    contract, _ = classify_evidence_with_router(
-        description=row["description"],
-        latitude=float(row["latitude"]),
-        longitude=float(row["longitude"]),
-        image_bytes=img_bytes,
-        image_mime=row["photo_mime"],
-        address_hint=row.get("address_hint"),
-        audio_transcript=row.get("audio_transcript"),
-        report_id=row["id"],
-    )
-    if contract is not None:
-        updated = update_report_ai_analysis(
-            row["id"],
-            ai_category=contract.category,
-            ai_severity=contract.severity,
-            ai_confidence=contract.confidence,
-            ai_summary=contract.summary,
-            ai_keywords=contract.keywords,
-            auto_confirm=False,
-        )
-        if updated is not None:
-            row = updated
-    return row_to_public_dict(row)
+    return row_to_public_dict(_visible_report(get_report_raw(report_id, owner_id=principal.id)))
 
 
 @app.get(
@@ -486,6 +434,7 @@ def analyze_existing_report(request: Request, report_id: UUID):
     description="Consulta paginada de reportes almacenados en PostgreSQL. Permite filtrar por categoría, severidad, estado, comuna, búsqueda de texto (q) y distancia radial geográfica (Haversine).",
 )
 def list_citizen_reports(
+    principal: CurrentSession,
     category: str | None = Query(default=None),
     severity: str | None = Query(default=None),
     status: str | None = Query(default=None),
@@ -508,6 +457,7 @@ def list_citizen_reports(
         radius_km=radius_km,
         limit=limit,
         offset=offset,
+        owner_id=_citizen_owner(principal),
     )
     return {
         "total": total,
@@ -522,17 +472,12 @@ def list_citizen_reports(
     response_model=ReportPublicResponse,
     tags=["Reportes ciudadanos"],
     summary="Consultar reporte por código de radicado",
-    description="Permite a cualquier ciudadano consultar el estado, diagnóstico y datos públicos de su solicitud utilizando el código de radicado oficial (ej. CIV-2026-DEMO0001).",
+    description="Consulta el detalle y diagnóstico de un reporte accesible para el titular de la sesión.",
 )
-def get_citizen_report_by_code(tracking_code: str):
-    row = get_report_by_tracking_code(tracking_code)
-    if not row:
-        raise CitizenValidationError(
-            "No se encontró ningún reporte con el código indicado.",
-            status_code=404,
-            code="REPORT_NOT_FOUND",
-        )
-    return row_to_public_dict(row)
+def get_citizen_report_by_code(tracking_code: str, principal: CurrentSession):
+    return row_to_public_dict(
+        _visible_report(get_report_by_tracking_code(tracking_code, owner_id=_citizen_owner(principal)))
+    )
 
 
 @app.get(
@@ -542,64 +487,44 @@ def get_citizen_report_by_code(tracking_code: str):
     summary="Obtener detalle de reporte por UUID",
     description="Retorna la información pública detallada de un reporte específico a partir de su identificador único universal (UUID).",
 )
-def get_citizen_report(report_id: UUID):
-    row = get_report_raw(report_id)
-    if not row:
-        raise CitizenValidationError(
-            "No se encontró el reporte solicitado.",
-            status_code=404,
-            code="REPORT_NOT_FOUND",
-        )
-    return row_to_public_dict(row)
+def get_citizen_report(report_id: UUID, principal: CurrentSession):
+    return row_to_public_dict(
+        _visible_report(get_report_raw(report_id, owner_id=_citizen_owner(principal)))
+    )
 
 
 @app.get(
     "/api/reports/{report_id}/photo",
     tags=["Fotografías y evidencias"],
     summary="Descargar o visualizar evidencia fotográfica",
-    description="Sirve el archivo fotográfico limpio almacenado en disco. Soporta validación de caché ETag/HTTP 304 y cabeceras de seguridad CSP (Content-Security-Policy) anti-XSS.",
+    description="Entrega la fotografía limpia al titular del reporte o al personal administrativo.",
 )
-def get_citizen_report_photo(report_id: UUID, request: Request, v: str | None = None):
-    row = get_report_raw(report_id)
-    if not row:
+def get_citizen_report_photo(report_id: UUID, principal: CurrentSession):
+    row = _visible_report(get_report_raw(report_id, include_events=False, owner_id=_citizen_owner(principal)))
+    return _private_evidence(row.get("photo_path"), row.get("photo_mime"))
+
+
+@app.get("/api/reports/{report_id}/audio", tags=["Fotografías y evidencias"])
+def get_citizen_report_audio(report_id: UUID, principal: CurrentSession):
+    row = _visible_report(get_report_raw(report_id, include_events=False, owner_id=_citizen_owner(principal)))
+    return _private_evidence(row.get("audio_path"), row.get("audio_mime"))
+
+
+def _private_evidence(stored_path: str | None, media_type: str | None) -> FileResponse:
+    upload_dir = settings.UPLOAD_DIR.resolve()
+    file_path = (upload_dir / Path(stored_path).name).resolve() if stored_path else None
+    if file_path is None or not file_path.is_relative_to(upload_dir) or not file_path.is_file():
         raise CitizenValidationError(
-            "No se encontró la evidencia fotográfica solicitada.",
+            "La evidencia solicitada no está disponible.",
             status_code=404,
-            code="PHOTO_NOT_FOUND",
+            code="EVIDENCE_NOT_FOUND",
         )
-    safe_name = Path(row["photo_path"]).name
-    file_path = settings.UPLOAD_DIR / safe_name
-    if not file_path.exists():
-        raise CitizenValidationError(
-            "El archivo de imagen no se encuentra disponible en el almacenamiento.",
-            status_code=404,
-            code="PHOTO_FILE_MISSING",
-        )
-
-    sha = row.get("photo_sha256") or ""
-    etag = f'"{sha[:32]}"' if sha else f'"{safe_name}"'
-
-    # Verificar If-None-Match para 304 Not Modified
-    if_none_match = request.headers.get("if-none-match")
-    if if_none_match and (if_none_match == etag or if_none_match == "*"):
-        return Response(status_code=304, headers={"ETag": etag})
-
-    # Cache policy: Si v coincide con el hash del archivo, es inmutable; si no, revalidar
-    is_version_match = bool(v and sha and v == sha[:16])
-    cache_control = (
-        "public, max-age=31536000, immutable"
-        if is_version_match
-        else "public, max-age=0, must-revalidate"
-    )
-
     return FileResponse(
         path=file_path,
-        media_type=row["photo_mime"],
+        media_type=media_type or "application/octet-stream",
         headers={
             "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'none'; script-src 'none'",
-            "Cache-Control": cache_control,
-            "ETag": etag,
+            "Content-Security-Policy": "default-src 'none'",
         },
     )
 
@@ -614,16 +539,8 @@ def get_citizen_report_photo(report_id: UUID, request: Request, v: str | None = 
 def confirm_citizen_report(
     report_id: UUID,
     payload: ReportConfirmRequest,
-    x_citizen_edit_token: str | None = Header(default=None),
-    x_admin_token: str | None = Header(default=None),
+    principal: CitizenSession,
 ):
-    existing = get_report_raw(report_id)
-    if not existing:
-        raise CitizenValidationError(
-            "No se encontró el reporte a confirmar.",
-            status_code=404,
-            code="REPORT_NOT_FOUND",
-        )
     clean_note = (
         sanitize_text(
             payload.human_override_note,
@@ -633,58 +550,35 @@ def confirm_citizen_report(
         )
         or None
     )
-    expected_admin = (settings.ADMIN_TOKEN or "").strip()
-    provided_admin = (x_admin_token or "").strip()
-    is_admin = (
-        is_strong_admin_token(expected_admin)
-        and is_strong_admin_token(provided_admin)
-        and hmac.compare_digest(provided_admin, expected_admin)
-    )
-    eff_edit_token = x_citizen_edit_token or payload.edit_token
     updated = confirm_report_category(
         report_id,
         final_category=payload.final_category,
         final_severity=payload.final_severity,
         human_override_note=clean_note,
-        edit_token=eff_edit_token,
-        is_admin=is_admin,
+        owner_id=principal.id,
     )
-    assert updated is not None
-    return row_to_public_dict(updated)
+    return row_to_public_dict(_visible_report(updated))
 
 
 @app.patch(
     "/api/reports/{report_id}/status",
     response_model=ReportPublicResponse,
-    dependencies=[Depends(verify_admin_token)],
     tags=["Administración y gestión operativa"],
     summary="Actualizar estado operativo de un reporte (Requiere autorización)",
-    description="Endpoint administrativo protegido. Modifica el estado final de un reporte (CONFIRMED, IN_REVIEW, RESOLVED, REJECTED). Exige cabecera X-Admin-Token válida y human_approved=True.",
+    description="Modifica el estado final de un reporte con permiso de gestión y confirmación humana explícita.",
 )
-def change_report_status(report_id: UUID, payload: ReportStatusUpdateRequest):
+def change_report_status(report_id: UUID, payload: ReportStatusUpdateRequest, principal: CaseAdminSession):
     if not payload.human_approved:
         raise CitizenValidationError(
             "Se requiere confirmación humana explícita para modificar el estado del reporte.",
             status_code=400,
             code="HUMAN_APPROVAL_REQUIRED",
         )
-    existing = get_report_raw(report_id)
-    if not existing:
-        raise CitizenValidationError(
-            "No se encontró el reporte solicitado.",
-            status_code=404,
-            code="REPORT_NOT_FOUND",
-        )
     clean_note = (
         sanitize_text(payload.note, field_name="nota de estado", max_len=500, required=False) or None
     )
-    try:
-        updated = update_report_status(report_id, status=payload.status, note=clean_note)
-    except Exception as exc:
-        logger.error("Fallo al actualizar estado de reporte %s: %s", report_id, exc)
-        raise HTTPException(status_code=500, detail="Error interno al actualizar estado del reporte.") from exc
-    assert updated is not None
-    return row_to_public_dict(updated)
+    updated = update_report_status(report_id, status=payload.status, note=clean_note, actor_id=principal.id)
+    return row_to_public_dict(_visible_report(updated))
 
 
 @app.post(
@@ -697,11 +591,13 @@ def change_report_status(report_id: UUID, payload: ReportStatusUpdateRequest):
 def query_civia_agent(
     request: Request,
     payload: AgentQueryRequest,
+    principal: CitizenSession,
     idempotency_key_header: str | None = Header(default=None, alias="Idempotency-Key"),
     operation_token_header: str | None = Header(default=None, alias="X-Operation-Token"),
 ):
     client_ip = get_trusted_client_ip(request)
-    rate_limiter.check(f"agent:{client_ip}")
+    rate_limiter.check(f"agent:ip:{client_ip}")
+    rate_limiter.check(f"agent:user:{principal.id}")
     clean_q = sanitize_text(
         payload.query,
         field_name="consulta",
@@ -720,57 +616,32 @@ def query_civia_agent(
             total_timeout_seconds=payload.total_timeout_seconds,
             client_token=eff_client_token,
             idempotency_key=eff_idemp_key,
+            owner_id=principal.id,
         )
     except IdempotencyConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc))
+        raise CitizenValidationError(
+            "La clave de solicitud ya se usó con datos diferentes.",
+            status_code=409,
+            code="IDEMPOTENCY_CONFLICT",
+        ) from exc
     except OperationPendingError as exc:
         return {
-            "answer": "La operación transaccional quedó pendiente de confirmación en base de datos. Puede consultar su estado con el identificador de operación.",
-            "trace_group_id": str(uuid.uuid4()),
-            "tools_invoked": [],
-            "iterations_used": 1,
-            "max_iterations": payload.max_iterations or settings.AGENT_MAX_ITERATIONS,
-            "total_tokens_used": 0,
-            "max_tokens_budget": payload.max_tokens_budget or settings.AGENT_MAX_TOKENS,
-            "latency_ms": int((payload.total_timeout_seconds or settings.AI_TIMEOUT_SECONDS) * 1000),
-            "guardrail_triggered": "OPERATION_PENDING",
+            "answer": "Tu solicitud sigue pendiente. Puedes consultar su estado con el identificador.",
             "requires_human_approval": False,
             "pending_approval_id": None,
             "operation_id": str(exc.operation_id) if exc.operation_id else None,
             "operation_status": exc.status,
-            "query_token": getattr(exc, "query_token", None),
         }
     except TimeoutError:
         return {
-            "answer": "El agente no pudo completar el procesamiento dentro del límite de tiempo asignado (deadline agotado).",
-            "trace_group_id": str(uuid.uuid4()),
-            "tools_invoked": [],
-            "iterations_used": 1,
-            "max_iterations": payload.max_iterations or settings.AGENT_MAX_ITERATIONS,
-            "total_tokens_used": 0,
-            "max_tokens_budget": payload.max_tokens_budget or settings.AGENT_MAX_TOKENS,
-            "latency_ms": int((payload.total_timeout_seconds or settings.AI_TIMEOUT_SECONDS) * 1000),
-            "guardrail_triggered": "TIMEOUT",
-            "requires_human_approval": False,
-            "pending_approval_id": None,
-            "operation_id": None,
-            "operation_status": None,
+            "answer": "El asistente no pudo responder a tiempo. Intenta de nuevo en unos minutos.",
         }
     return {
         "answer": res["answer"],
-        "trace_group_id": res["trace_group_id"],
-        "tools_invoked": sanitize_credentials_deep(res.get("tools_invoked", [])),
-        "iterations_used": res["iterations_used"],
-        "max_iterations": res["max_iterations"],
-        "total_tokens_used": res["total_tokens_used"],
-        "max_tokens_budget": res["max_tokens_budget"],
-        "latency_ms": res["latency_ms"],
-        "guardrail_triggered": res.get("guardrail_triggered"),
         "requires_human_approval": res.get("requires_human_approval", False),
         "pending_approval_id": res.get("pending_approval_id"),
         "operation_id": res.get("operation_id"),
         "operation_status": res.get("operation_status"),
-        "query_token": res.get("query_token"),
     }
 
 
@@ -779,69 +650,25 @@ def query_civia_agent(
     response_model=OperationStatusResponse,
     tags=["Asistente ciudadano e IA"],
     summary="Consultar estado definitivo de una operación agéntica transaccional",
-    description="Permite verificar y reconciliar operaciones de escritura o consulta agéntica con idempotencia. Acceso autorizado restringido mediante tokens de operación o administración.",
+    description="Permite verificar operaciones del titular de la sesión y operaciones auditadas por la administración web.",
 )
 def get_operation_status(
     operation_id: UUID,
-    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
-    x_operation_token: str | None = Header(default=None, alias="X-Operation-Token"),
-    x_edit_token: str | None = Header(default=None, alias="X-Edit-Token"),
+    principal: CurrentSession,
 ) -> OperationStatusResponse:
     rec = get_operation_record(operation_id)
-    if not rec:
+    if rec is None or (principal.role != Role.WEB_ADMIN and rec.get("requester_id") != str(principal.id)):
         raise HTTPException(status_code=404, detail="Operación no encontrada.")
-
-    # 1. Determinar si el consultante está autorizado (admin, poseedor del token de consulta o del edit_token del reporte)
-    is_authorized = False
-    if x_admin_token:
-        try:
-            verify_admin_token(x_admin_token)
-            is_authorized = True
-        except CitizenValidationError:
-            is_authorized = False
-
-    if not is_authorized and x_operation_token and rec.get("query_token_hash"):
-        hashed = hashlib.sha256(x_operation_token.encode("utf-8")).hexdigest()
-        if hmac.compare_digest(hashed, rec["query_token_hash"]):
-            is_authorized = True
-
-    is_admin_or_private = (
-        (rec.get("requester_id") != "citizen")
-        or rec.get("operation_type", "").startswith("ADMIN_")
-        or rec.get("operation_type", "").startswith("admin_")
-    )
-
-    # X-Edit-Token solo puede autorizar operaciones ciudadanas sobre el reporte objetivo (F3)
-    if not is_authorized and not is_admin_or_private and x_edit_token and rec.get("target_id"):
-        try:
-            target_report = get_report_raw(UUID(str(rec["target_id"])))
-            if target_report and target_report.get("edit_token_hash"):
-                hashed_edit = hashlib.sha256(x_edit_token.encode("utf-8")).hexdigest()
-                if hmac.compare_digest(hashed_edit, target_report["edit_token_hash"]):
-                    is_authorized = True
-        except Exception:
-            pass
-
-    # Operaciones privadas o administrativas: si no está autorizado, responder 404 ANTES de reconciliar (F6)
-    if not is_authorized and is_admin_or_private:
-        raise HTTPException(status_code=404, detail="Operación no encontrada.")
-
-    # 2. Reconciliación con escritura reservada exclusivamente a peticiones autorizadas (F6)
-    if is_authorized and rec.get("status") in ("PENDING", "UNKNOWN"):
-        rec = reconcile_operation(operation_id)
-
-    # 3. Minimización de datos: result_payload, target_id y error solo para invocadores autorizados (F2)
-    safe_result = rec.get("result_payload") if is_authorized else None
-    safe_error = rec.get("error_message") if is_authorized else None
-    safe_target = rec.get("target_id") if is_authorized else None
+    if rec.get("status") in ("PENDING", "UNKNOWN"):
+        rec = reconcile_operation(operation_id) or rec
 
     return OperationStatusResponse(
         operation_id=rec["operation_id"],
         operation_type=rec["operation_type"],
         status=rec["status"],
-        target_id=safe_target,
-        result_payload=safe_result,
-        error_message=safe_error,
+        target_id=rec.get("target_id"),
+        result_payload=sanitize_credentials_deep(rec.get("result_payload")),
+        error_message=rec.get("error_message") if principal.role == Role.WEB_ADMIN else None,
         created_at=rec["created_at"],
         updated_at=rec["updated_at"],
         reconciled=bool(rec.get("reconciled", False)),
@@ -850,7 +677,7 @@ def get_operation_status(
 
 @app.get(
     "/api/admin/observability",
-    dependencies=[Depends(verify_admin_token)],
+    dependencies=[Depends(require_web_admin)],
     tags=["Observabilidad y resiliencia"],
     summary="Consultar métricas de observabilidad y circuit breakers (Requiere autorización)",
     description="Consola de telemetría protegida. Retorna la cadena activa de proveedores de IA, estado de los interruptores de circuito, métricas P50/P90 de latencia y trazas técnicas sanitizadas sin secretos.",
@@ -864,24 +691,26 @@ def admin_get_observability(limit: int = Query(default=60, ge=1, le=300)) -> dic
     return {
         "provider_chain": chain_public,
         "circuit_breakers": get_all_circuit_states(),
-        "effective_fault_mode": get_effective_fault_mode() or "NONE",
+        "effective_fault_mode": get_effective_fault_mode(persisted=True) or "NONE",
         "observability": summary,
     }
 
 
 @app.post(
     "/api/admin/fault-injection",
-    dependencies=[Depends(verify_admin_token)],
     tags=["Observabilidad y resiliencia"],
     summary="Simular fallas en caliente para pruebas de resiliencia (Requiere autorización)",
     description="Inyecta fallos sintéticos controlados (429, 503, TIMEOUT, INVALID_JSON, TOTAL) para auditar y verificar los mecanismos de fallback y conmutación automática entre proveedores.",
 )
-def admin_set_fault_injection(payload: FaultInjectionRequest) -> dict[str, Any]:
-    active = set_runtime_fault_override(payload.mode)
+def admin_set_fault_injection(payload: FaultInjectionRequest, principal: WebAdminSession) -> dict[str, Any]:
+    active = set_runtime_fault_override(payload.mode, persist=True)
     if payload.reset_circuits:
         reset_all_circuits()
+    with get_conn(3000) as conn, conn.cursor() as cur:
+        audit(cur, "system.configure_fault_mode", principal.id)
+        conn.commit()
     return {
-        "effective_fault_mode": get_effective_fault_mode() or "NONE",
+        "effective_fault_mode": get_effective_fault_mode(persisted=True) or "NONE",
         "runtime_override": active or "NONE",
         "circuit_breakers": get_all_circuit_states(),
     }
@@ -889,28 +718,34 @@ def admin_set_fault_injection(payload: FaultInjectionRequest) -> dict[str, Any]:
 
 @app.get(
     "/api/admin/approvals",
-    dependencies=[Depends(verify_admin_token)],
+    dependencies=[Depends(require_case_admin)],
     tags=["Aprobaciones humanas"],
     summary="Listar solicitudes de escritura crítica pendientes (Requiere autorización)",
     description="Retorna la lista de propuestas de modificación de estado generadas por el agente de IA que requieren aprobación humana obligatoria por un operador calificado.",
 )
-def admin_list_approvals(status: str | None = Query(default=None)) -> dict[str, Any]:
-    items = list_pending_approvals(status=status)
-    return {"total": len(items), "items": items}
+def admin_list_approvals(
+    status: str | None = Query(default=None, max_length=16),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=1_000_000),
+) -> dict[str, Any]:
+    total, items = list_pending_approvals(status=status, limit=limit, offset=offset)
+    return {"total": total, "items": items, "limit": limit, "offset": offset}
 
 
 @app.post(
     "/api/admin/approvals/{approval_id}/decide",
-    dependencies=[Depends(verify_admin_token)],
     tags=["Aprobaciones humanas"],
     summary="Aprobar o rechazar solicitud de modificación crítica (Requiere autorización)",
     description="Aplica de forma atómica y de un solo uso la decisión humana sobre una propuesta de cambio de estado. Si se aprueba, actualiza el reporte en PostgreSQL; si se rechaza, cancela la propuesta.",
 )
-def admin_decide_approval(approval_id: UUID, payload: ApprovalDecisionRequest) -> dict[str, Any]:
+def admin_decide_approval(
+    approval_id: UUID, payload: ApprovalDecisionRequest, principal: CaseAdminSession
+) -> dict[str, Any]:
     updated = decide_pending_approval(
         approval_id,
         approve=payload.approve,
-        decided_by=payload.decided_by,
+        decided_by=str(principal.id),
+        reviewer_id=principal.id,
     )
     if not updated:
         raise CitizenValidationError(
@@ -918,9 +753,9 @@ def admin_decide_approval(approval_id: UUID, payload: ApprovalDecisionRequest) -
             status_code=404,
             code="APPROVAL_NOT_FOUND",
         )
-    if payload.approve and updated.get("stale_conflict"):
+    if updated.get("stale_conflict"):
         raise CitizenValidationError(
-            "La solicitud de aprobación quedó obsoleta porque el estado o versión del reporte cambió previamente.",
+            "La solicitud ya no está disponible para esta decisión.",
             status_code=409,
             code="STALE_APPROVAL",
         )
@@ -929,7 +764,7 @@ def admin_decide_approval(approval_id: UUID, payload: ApprovalDecisionRequest) -
 
 @app.post(
     "/api/admin/seed",
-    dependencies=[Depends(verify_admin_token)],
+    dependencies=[Depends(require_web_admin)],
     tags=["Administración y gestión operativa"],
     summary="Sembrar o reiniciar catálogo sintético de prueba (Requiere autorización)",
     description="Inicializa o actualiza los 10 reportes sintéticos de demostración con evidencias fotorrealistas en Cali bajo almacenamiento inmutable Content-Addressed.",
@@ -945,15 +780,9 @@ def admin_seed_reports(force_reset: bool = Query(default=False)) -> dict[str, An
     summary="Obtener historial de eventos de un reporte por UUID",
     description="Retorna la cronología pública y transparente de actuaciones (registro, análisis IA, confirmación, cambios de estado y notas públicas) asociadas al reporte.",
 )
-def get_report_events_by_id(report_id: UUID):
-    raw = get_report_raw(report_id, include_events=False)
-    if not raw:
-        raise CitizenValidationError(
-            "No se encontró el reporte solicitado.",
-            status_code=404,
-            code="REPORT_NOT_FOUND",
-        )
-    return get_report_events(report_id)
+def get_report_events_by_id(report_id: UUID, principal: CurrentSession):
+    row = _visible_report(get_report_raw(report_id, owner_id=_citizen_owner(principal)))
+    return row_to_public_dict(row)["events"]
 
 
 @app.get(
@@ -963,21 +792,15 @@ def get_report_events_by_id(report_id: UUID):
     summary="Obtener historial de eventos de un reporte por código de radicado",
     description="Permite al ciudadano visualizar la línea de tiempo completa de su solicitud ingresando su número de radicado oficial.",
 )
-def get_report_events_by_tracking_code(tracking_code: str):
-    raw = get_report_by_tracking_code(tracking_code, include_events=False)
-    if not raw:
-        raise CitizenValidationError(
-            "No se encontró ningún reporte con el código indicado.",
-            status_code=404,
-            code="REPORT_NOT_FOUND",
-        )
-    return get_report_events(raw["id"])
+def get_report_events_by_tracking_code(tracking_code: str, principal: CurrentSession):
+    row = _visible_report(get_report_by_tracking_code(tracking_code, owner_id=_citizen_owner(principal)))
+    return row_to_public_dict(row)["events"]
 
 
 @app.get(
     "/api/admin/notifications",
     response_model=AdminNotificationsResponse,
-    dependencies=[Depends(verify_admin_token)],
+    dependencies=[Depends(require_case_admin)],
     tags=["Administración y gestión operativa"],
     summary="Listar notificaciones internas para operadores (Requiere autorización)",
     description="Bandeja de alertas internas generadas automáticamente al registrarse reportes ciudadanos. Permite filtrar por leídas/no leídas y por tipo de reporte (ciudadano o sintético).",
@@ -992,7 +815,7 @@ def admin_get_notifications(
 
 @app.patch(
     "/api/admin/notifications/{notification_id}/read",
-    dependencies=[Depends(verify_admin_token)],
+    dependencies=[Depends(require_case_admin)],
     tags=["Administración y gestión operativa"],
     summary="Marcar notificación interna como leída (Requiere autorización)",
     description="Actualiza el estado de lectura de una notificación interna en la bandeja de administración.",
@@ -1010,7 +833,7 @@ def admin_mark_notification_as_read(notification_id: UUID) -> dict[str, Any]:
 
 @app.post(
     "/api/admin/notifications/mark-all-read",
-    dependencies=[Depends(verify_admin_token)],
+    dependencies=[Depends(require_case_admin)],
     tags=["Administración y gestión operativa"],
     summary="Marcar todas las notificaciones internas como leídas (Requiere autorización)",
     description="Marca simultáneamente como leídas todas las notificaciones pendientes en la bandeja de administración.",
@@ -1023,7 +846,6 @@ def admin_mark_all_notifications_as_read() -> dict[str, Any]:
 @app.post(
     "/api/admin/reports/{report_id}/management",
     response_model=ReportPublicResponse,
-    dependencies=[Depends(verify_admin_token)],
     tags=["Administración y gestión operativa"],
     summary="Asignar dependencia municipal y gestionar notas (Requiere autorización)",
     description="Permite a los operadores administrativos asignar una dependencia responsable (ej. Secretaría de Infraestructura, Dagma), registrar notas públicas de seguimiento y notas internas confidenciales.",
@@ -1031,6 +853,7 @@ def admin_mark_all_notifications_as_read() -> dict[str, Any]:
 def admin_update_report_management(
     report_id: UUID,
     payload: ReportManagementUpdateRequest,
+    principal: CaseAdminSession,
 ):
     updated = update_report_management(
         report_id,
@@ -1038,6 +861,7 @@ def admin_update_report_management(
         admin_review_status=payload.admin_review_status,
         public_note=payload.public_note,
         internal_note=payload.internal_note,
+        actor_id=principal.id,
     )
     if not updated:
         raise CitizenValidationError(
@@ -1046,3 +870,53 @@ def admin_update_report_management(
             code="REPORT_NOT_FOUND",
         )
     return row_to_public_dict(updated)
+
+
+@app.get("/api/admin/reports/{report_id}/internal-notes", tags=["Administración y gestión operativa"])
+def admin_get_internal_notes(
+    report_id: UUID,
+    principal: CaseAdminSession,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=1_000_000),
+) -> dict[str, Any]:
+    _visible_report(get_report_raw(report_id, include_events=False))
+    with get_conn(3000) as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT note, created_at FROM report_internal_notes WHERE report_id = %s
+            ORDER BY created_at DESC, id DESC LIMIT %s OFFSET %s;
+            """,
+            (report_id, limit, offset),
+        )
+        return {"items": cur.fetchall(), "limit": limit, "offset": offset}
+
+
+@app.get("/api/admin/system", dependencies=[Depends(require_web_admin)], tags=["Observabilidad y resiliencia"])
+def admin_system_status() -> dict[str, Any]:
+    return {**health(), "version": app.version}
+
+
+@app.get("/api/admin/queue", dependencies=[Depends(require_web_admin)], tags=["Observabilidad y resiliencia"])
+def admin_queue_status() -> dict[str, Any]:
+    return queue_status()
+
+
+@app.get("/api/admin/queue/dead-letter", dependencies=[Depends(require_web_admin)], tags=["Observabilidad y resiliencia"])
+def admin_queue_dead_letter(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, le=1_000_000),
+) -> dict[str, Any]:
+    return {"items": list_dead_letters(limit=limit, offset=offset), "limit": limit, "offset": offset}
+
+
+@app.post("/api/admin/queue/dead-letter/{job_id}/requeue", status_code=202, tags=["Observabilidad y resiliencia"])
+def admin_requeue_dead_letter(
+    job_id: UUID,
+    principal: WebAdminSession,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=8, max_length=128),
+) -> dict[str, str]:
+    if not requeue_dead_letter(job_id, principal.id, idempotency_key=idempotency_key):
+        raise CitizenValidationError(
+            "El trabajo no está disponible para reintentar.", status_code=404, code="JOB_NOT_FOUND"
+        )
+    return {"status": "accepted"}

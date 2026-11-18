@@ -10,7 +10,12 @@ __pycache__/
 .DS_Store
 coverage/
 dist/
+dist-native/
 build/
+*.apk
+*.aab
+*.jks
+*.keystore
 *.tsbuildinfo
 orchestrator/simulation_state.json
 orchestrator/reports/simulation_*

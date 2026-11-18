@@ -1,3 +1,11 @@
+# Decisiones de arquitectura
+
+## CIVIA 1.1.0 · SQL directo
+
+Los reportes, estados, roles, eventos, escenas sintéticas y conteos están estructurados en PostgreSQL. Consultas parametrizadas y vistas de alcance permiten responder con datos actuales, autorizados y reproducibles. Un índice vectorial no aporta a la consulta por radicado, categoría, estado o comuna. Replicaría datos con obligaciones de sincronización y privacidad. Se reserva RAG para una futura necesidad validada de consultar documentos autorizados.
+
+El worker multimodal usa PostgreSQL para la cola, Gemini como principal y Groq como respaldo independiente. Las versiones previas documentadas abajo conservan su contexto histórico desde el cual evolucionó el candidato.
+
 # CIVIA — Decisiones de Ingeniería y Mediciones Reales (Momento Evaluativo 2)
 
 **Equipo:** Stefania Córdoba y Sebastian Espinosa  
