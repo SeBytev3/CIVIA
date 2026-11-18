@@ -1,4 +1,5 @@
 from datetime import datetime
+from ipaddress import ip_address
 import os
 from typing import Annotated, Literal
 from uuid import UUID
@@ -30,7 +31,7 @@ from app.identity import (
     verify_password,
     verify_web_admin_at_write,
 )
-from app.security import CitizenValidationError, get_trusted_client_ip
+from app.security import CitizenValidationError, get_trusted_client_ip, get_trusted_proxy_networks
 
 DEFAULT_CORS_ORIGINS = "http://localhost:5173,http://127.0.0.1:5173,https://localhost,http://localhost"
 ALLOWED_ORIGINS = tuple(
@@ -95,15 +96,28 @@ class AuditPage(BaseModel):
     offset: int
 
 
+def _request_scheme(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-proto")
+    if request.client and forwarded in ("http", "https"):
+        try:
+            peer = ip_address(request.client.host)
+            if any(peer == net.network_address and net.prefixlen == peer.max_prefixlen
+                   for net in get_trusted_proxy_networks()):
+                return forwarded
+        except ValueError:
+            pass
+    return request.url.scheme
+
+
 def _require_trusted_origin(request: Request) -> None:
     origin = request.headers.get("origin")
-    effective_origin = f"{request.url.scheme}://{request.url.netloc}"
+    effective_origin = f"{_request_scheme(request)}://{request.url.netloc}"
     if origin and origin not in ALLOWED_ORIGINS and origin != effective_origin:
         raise forbidden()
 
 
 def _secure_cookie(request: Request) -> bool:
-    return _COOKIE_SECURE or request.url.scheme == "https"
+    return _COOKIE_SECURE or _request_scheme(request) == "https"
 
 
 def _send_session(

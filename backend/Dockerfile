@@ -17,3 +17,5 @@ COPY tests ./tests
 COPY pytest.ini .
 
 FROM runtime AS application
+ARG CIVIA_BUILD_SHA=unknown
+ENV CIVIA_BUILD_SHA=${CIVIA_BUILD_SHA}

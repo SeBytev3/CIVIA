@@ -6,7 +6,8 @@ import secrets
 
 class Settings:
     PROJECT_NAME: str = "CIVIA API"
-    VERSION: str = "1.1.0"
+    VERSION: str = "1.1.1"
+    BUILD_SHA: str = os.getenv("CIVIA_BUILD_SHA", "unknown").lower()
     PHASE: str = os.getenv("CIVIA_PHASE", "mvp")
 
     DATABASE_URL: str = os.getenv("DATABASE_URL", "")

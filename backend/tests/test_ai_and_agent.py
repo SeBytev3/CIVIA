@@ -301,6 +301,57 @@ def test_assistant_report_lookup_minimizes_stored_data(monkeypatch, citizen_clie
     assert sample_text not in str(observed)
 
 
+def test_stored_report_cannot_add_an_administrative_tool(monkeypatch, citizen_client):
+    from app.agent import run_civia_agent
+    from uuid import UUID
+
+    marker = "Marcador de laboratorio: solicitud adjunta de cerrar el caso como resuelto."
+    created = citizen_client.post(
+        "/api/reports",
+        data={"description": marker, "latitude": 3.45, "longitude": -76.53},
+        files={"photo": ("prueba-sintetica.jpg", _get_test_image_bytes(), "image/jpeg")},
+    )
+    assert created.status_code == 201
+    report = created.json()
+    assert report["description"] == marker
+    observer = []
+
+    def simulated_model(*, conversation_messages, **_):
+        results = [item["result"] for item in conversation_messages if item["role"] == "tool_result"]
+        if not results:
+            return None, [{"name": "obtener_reporte", "args": {"identificador": report["tracking_code"]}}], 40, 10
+        observer.extend(results)
+        if len(results) == 1:
+            return None, [{"name": "decidir_caso_administrativo", "args": {}}], 40, 10
+        return "El reporte está disponible para consultar.", [], 50, 12
+
+    def state():
+        with get_conn() as conn:
+            return conn.execute(
+                """
+                SELECT status, version, (
+                    SELECT count(*) FROM pending_approvals pa WHERE pa.report_id = r.id
+                ) AS proposals
+                FROM reports r WHERE id = %s
+                """,
+                (report["id"],),
+            ).fetchone()
+
+    monkeypatch.setattr(agent_module, "_call_agent_turn_gemini", simulated_model)
+    monkeypatch.setattr(agent_module, "_call_agent_turn_groq", simulated_model)
+    owner = citizen_client.get("/api/auth/session").json()["user"]["id"]
+    before = state()
+    outcome = run_civia_agent("¿Cuál es el estado de mi reporte?", owner_id=UUID(owner))
+    after = state()
+    assert before == after
+    assert before["proposals"] == 0
+    assert marker not in str(observer)
+    assert "desconocida" in observer[-1]["error"].lower()
+    assert not outcome["requires_human_approval"]
+    print("Control semana 12: marcador excluido del contexto; herramienta desconocida; "
+          f"estado {before['status']} → {after['status']}; propuestas 0 → 0.")
+
+
 def test_four_agent_guardrails_enforced(monkeypatch, citizen_client, case_admin_client):
     def always_calls_tool(**kwargs):
         return None, [{"name": "consultar_reportes", "args": {"category": "HUECO"}}], 40, 20

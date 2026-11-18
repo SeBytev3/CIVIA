@@ -39,9 +39,17 @@ def test_check_google_key_live_valid(mock_post):
 
 @patch("app.validate_providers.post_inference")
 def test_check_google_key_live_invalid(mock_post):
-    mock_post.return_value = MagicMock(status_code=403)
+    mock_post.return_value = MagicMock(status_code=401)
     res = check_google_key("AIzaSyInvalidKey123", "gemini-3.8-flash", "primary", live_check=True)
     assert res["status"] == "CLAVE_INVALIDA"
+    assert "AIzaSyInvalidKey123" not in str(res)
+
+
+@patch("app.validate_providers.post_inference")
+def test_check_google_key_live_generation_denied(mock_post):
+    mock_post.return_value = MagicMock(status_code=403)
+    res = check_google_key("AIzaSyInvalidKey123", "gemini-3.8-flash", "primary", live_check=True)
+    assert res["status"] == "PERMISO_DENEGADO"
     assert "AIzaSyInvalidKey123" not in str(res)
 
 

@@ -4,13 +4,15 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+import re
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
 from app.agent import (
@@ -165,7 +167,7 @@ Para la especificación exhaustiva de cada endpoint, guías de desarrollo y cód
 app = FastAPI(
     title="CIVIA — API de Gestión Inteligente y Vigilancia Urbana",
     description=APP_DESCRIPTION,
-    version="1.1.0",
+    version=settings.VERSION,
     openapi_tags=TAGS_METADATA,
     lifespan=lifespan,
     docs_url="/docs",
@@ -178,7 +180,10 @@ app.add_middleware(
     allow_origins=list(ALLOWED_ORIGINS),
     allow_credentials=True,
     allow_methods=["GET", "HEAD", "POST", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "X-CSRF-Token", "X-Operation-Token", "X-Session-Mode"],
+    allow_headers=[
+        "Authorization", "Content-Type", "Idempotency-Key", "X-CSRF-Token",
+        "X-Operation-Token", "X-Session-Mode", "X-Civia-Account", "X-Civia-Installation",
+    ],
 )
 app.include_router(auth_router)
 app.include_router(users_router)
@@ -229,14 +234,50 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     tags=["Salud del sistema"],
     summary="Comprobar salud y conectividad de la plataforma",
     description="Verifica la disponibilidad de la API REST, la versión y fase activa, y el estado de la conexión a la base de datos PostgreSQL 17 junto con la preparación del esquema.",
+    responses={503: {"description": "La base de datos o el esquema no está disponible"}},
 )
-def health() -> dict[str, Any]:
+def health(response: Response) -> dict[str, Any]:
+    payload = _health_payload()
+    if payload["status"] != "ok":
+        response.status_code = 503
+    response.headers["Cache-Control"] = "no-store"
+    return payload
+
+
+def _health_payload() -> dict[str, Any]:
     db_info = check_db_health()
     return {
-        "status": "ok",
+        "status": "ok" if db_info["connected"] and db_info["schema_ready"] else "degraded",
+        "version": settings.VERSION,
         "phase": settings.PHASE,
         "db": db_info,
     }
+
+
+class InstallationMetadata(BaseModel):
+    version: str
+    commit: str
+    installation_id: UUID
+    protocol: Literal[1] = 1
+
+
+def _installation_id() -> UUID:
+    with get_conn(2000) as conn:
+        row = conn.execute("SELECT installation_id FROM installation_metadata WHERE singleton").fetchone()
+    if row is None:
+        raise HTTPException(status_code=503, detail="Identidad de instalación no disponible.")
+    return row["installation_id"]
+
+
+@app.get("/api/meta", tags=["Salud del sistema"], response_model=InstallationMetadata,
+         summary="Identificar la instalación y la compilación de CIVIA")
+def installation_metadata() -> InstallationMetadata:
+    sha = settings.BUILD_SHA
+    return InstallationMetadata(
+        version=settings.VERSION,
+        commit=sha if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})(?:-dirty)?", sha) else "unknown",
+        installation_id=_installation_id(),
+    )
 
 
 @app.get(
@@ -282,7 +323,18 @@ async def create_citizen_report(
     photo: UploadFile = File(...),
     audio: UploadFile | None = File(default=None),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    expected_account: UUID | None = Header(default=None, alias="X-Civia-Account"),
+    expected_installation: UUID | None = Header(default=None, alias="X-Civia-Installation"),
 ):
+    if expected_account is not None or expected_installation is not None:
+        if (expected_account != principal.id or expected_installation is None
+                or expected_installation != await run_in_threadpool(_installation_id)):
+            raise CitizenValidationError(
+                "La cuenta o el servidor cambió. El borrador sigue guardado en el dispositivo.",
+                status_code=409,
+                code="REPORT_SCOPE_CHANGED",
+            )
+
     client_ip = get_trusted_client_ip(request)
     rate_limiter.check(f"report:ip:{client_ip}")
     rate_limiter.check(f"report:user:{principal.id}")
@@ -893,7 +945,7 @@ def admin_get_internal_notes(
 
 @app.get("/api/admin/system", dependencies=[Depends(require_web_admin)], tags=["Observabilidad y resiliencia"])
 def admin_system_status() -> dict[str, Any]:
-    return {**health(), "version": app.version}
+    return _health_payload()
 
 
 @app.get("/api/admin/queue", dependencies=[Depends(require_web_admin)], tags=["Observabilidad y resiliencia"])

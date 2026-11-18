@@ -1186,13 +1186,17 @@ def check_db_health() -> dict[str, Any]:
                 cur.execute("SELECT 1 AS ok;")
                 row = cur.fetchone()
                 cur.execute(
-                    "SELECT COUNT(*) AS count FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'reports';"
+                    """
+                    SELECT COUNT(*) = 3 AS ready
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                      AND table_name IN ('reports', 'users', 'installation_metadata');
+                    """
                 )
                 tbl = cur.fetchone()
-                has_reports = bool(tbl and tbl["count"] > 0)
                 return {
                     "connected": bool(row and row["ok"] == 1),
-                    "schema_ready": has_reports,
+                    "schema_ready": bool(tbl and tbl["ready"]),
                 }
     except Exception as exc:
         logger.error("Error de salud de BD: %s", type(exc).__name__)
