@@ -435,8 +435,15 @@ def _query_scoped_reports(
 ) -> tuple[int, list[dict[str, Any]]]:
     from app.db import get_agent_conn
 
+    owner = _AGENT_OWNER.get()
     filters: list[str] = []
     params: list[Any] = []
+    if identifier is None:
+        if args.get("scope") == "catalog":
+            filters.append("is_synthetic AND owner_id IS NULL")
+        else:
+            filters.append("owner_id = %s")
+            params.append(owner)
     for field in ("category", "severity", "status", "comuna"):
         if args.get(field):
             filters.append(f"{field} = %s")
@@ -450,7 +457,7 @@ def _query_scoped_reports(
             filters.append("tracking_code = %s")
             params.append(identifier.upper())
     where = "WHERE " + " AND ".join(filters) if filters else ""
-    with get_agent_conn(_AGENT_OWNER.get()) as conn:
+    with get_agent_conn(owner) as conn:
         total = conn.execute(f"SELECT count(*) AS total FROM agent_reports {where}", params).fetchone()["total"]
         rows = conn.execute(
             f"""SELECT id, owner_id, tracking_code, status, category, severity, comuna, version
@@ -487,6 +494,7 @@ def tool_consultar_reportes(args: dict[str, Any]) -> dict[str, Any]:
         total, rows = _query_scoped_reports(args)
         return {
             "total_encontrados": total, "evidencia_disponible": bool(total),
+            "alcance": "el catálogo sintético" if args.get("scope") == "catalog" else "tu cuenta",
             "items": [_minimize_agent_report(row) for row in rows],
         }
     category = args.get("category")
@@ -1096,11 +1104,15 @@ def _active_tool_specs() -> list[dict[str, Any]]:
         return AGENT_TOOLS_SPEC
     specs = copy.deepcopy(AGENT_TOOLS_SPEC)
     listing = specs[0]
-    listing["description"] = "Consulta hasta 20 reportes de la cuenta y del catálogo sintético por categoría, severidad, estado o comuna."
+    listing["description"] = "Consulta hasta 20 reportes de la cuenta o del catálogo sintético por categoría, severidad, estado o comuna."
     for property_name in ("q", "lat", "lon", "radius_km"):
         del listing["parameters"]["properties"][property_name]
     listing["parameters"]["properties"]["limit"] = {
         "type": "integer", "description": "Cantidad de reportes, de 1 a 20.",
+    }
+    listing["parameters"]["properties"]["scope"] = {
+        "type": "string", "enum": ["own", "catalog"],
+        "description": "Usa own para reportes propios (predeterminado); usa catalog si se pide el catálogo sintético.",
     }
     specs[1]["description"] = "Consulta estado, categoría, severidad y comuna de un reporte de la cuenta o del catálogo sintético."
     specs[2]["description"] = "Consulta el estado de diagnóstico de una evidencia autorizada."
@@ -1114,6 +1126,8 @@ def _gemini_tools_declaration() -> list[dict[str, Any]]:
         props = {}
         for k, v in t["parameters"]["properties"].items():
             props[k] = {"type": v["type"].upper(), "description": v["description"]}
+            if "enum" in v:
+                props[k]["enum"] = v["enum"]
         decls.append(
             {
                 "name": t["name"],
@@ -1377,9 +1391,9 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
             elif any(w in q_up for w in ("COMO PUEDO CONSULTAR", "CÓMO PUEDO CONSULTAR", "COMO CONSULTAR", "CÓMO CONSULTAR", "CONSULTAR EL ESTADO", "HACER SEGUIMIENTO")):
                 return (
                     "Para consultar el estado de tu reporte en CIVIA, sigue estos pasos:\n\n"
-                    "1. Ingresa a la pestaña **Seguimiento Radicado** en el menú superior.\n"
-                    "2. Escribe tu número de radicado (por ejemplo `CIV-2026-DEMO0001`).\n"
-                    "3. Haz clic en **Consultar Radicado**.\n\n"
+                    "1. Abre **Mis reportes** en la aplicación ciudadana.\n"
+                    "2. Escribe el número de radicado que recibiste.\n"
+                    "3. Selecciona **Consultar por radicado**.\n\n"
                     "Allí podrás verificar la categoría confirmada, la evidencia fotográfica y la cronología completa de actuaciones operativas."
                 )
             elif any(w in q_up for w in ("QUE SIGNIFICA", "QUÉ SIGNIFICA")) and any(w in q_up for w in ("PENDIENTE DE REVIS", "PENDIENTE DE CONFIRM", "PENDIENTE DE ANÁLISIS", "PENDIENTE DE ANALISIS")):
@@ -1427,6 +1441,8 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
                         return "CIVIA no dispone de información satelital ni mediciones de radiación."
                     if args.get("lat"):
                         return "Consulta el mapa de CIVIA para ver reportes cerca de una ubicación."
+                    if any(term in q_up for term in ("CATÁLOGO", "CATALOGO", "REPORTES DE DEMO")):
+                        args["scope"] = "catalog"
                     if not args and not detected_categories and "REPORTE" not in q_up:
                         return "El asistente no está disponible temporalmente. Puedes consultar tus reportes y realizar otras gestiones mientras se restablece el servicio."
 
@@ -1447,6 +1463,7 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
                         "evidencia_disponible": total_multi > 0,
                         "por_categoria": breakdown,
                         "items": all_items,
+                        "alcance": c_res.get("alcance"),
                     }
                     tool_history.append({"tool": "consultar_reportes", "args": {"categories": detected_categories, **args}, "result": multi_res})
                 else:
@@ -1476,7 +1493,10 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
             )
     if "total_encontrados" in last:
         total = last["total_encontrados"]
+        scope = last.get("alcance")
         if total == 0:
+            if scope:
+                return f"No existe evidencia de reportes para los criterios consultados en {scope}."
             return "No existe evidencia ni reportes registrados en la base de datos de CIVIA para los criterios consultados (0 encontrados)."
         if "por_categoria" in last:
             det = ", ".join(f"{c}: {cnt}" for c, cnt in last["por_categoria"].items())
@@ -1485,13 +1505,14 @@ def _deterministic_sql_fallback_answer(query: str, tool_history: list[dict[str, 
                 f"{it['tracking_code']} ({it['effective_category']})"
                 for it in items[:5]
             )
-            return f"Se encontraron {total} reporte(s) registrados en total ({det}) para los criterios consultados: {codigos}."
+            source = f" en {scope}" if scope else ""
+            return f"Se encontraron {total} reporte(s){source} ({det}) para los criterios consultados: {codigos}."
         items = last.get("items") or []
         codigos = ", ".join(
             f"{it['tracking_code']} ({it['effective_category']}, {it.get('effective_severity')}, {it.get('comuna') or 'Cali'}, {it.get('neighborhood') or ''}, estado {it.get('status')})"
             for it in items[:5]
         )
-        return f"Se encontraron {total} reporte(s) registrados en la base de datos: {codigos}."
+        return f"Se encontraron {total} reporte(s) registrados en {scope or 'la base de datos'}: {codigos}."
     if last.get("requiere_aprobacion_humana"):
         tcode = last.get("tracking_code", "")
         st = last.get("estado_propuesto", "")

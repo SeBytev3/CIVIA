@@ -271,6 +271,29 @@ def test_agent_tools_and_unanswerable_query(citizen_client):
     assert "no existe" in result.json()["answer"].lower()
 
 
+def test_citizen_fallback_keeps_own_counts_separate_from_demo_catalog(citizen_client, monkeypatch):
+    monkeypatch.setattr(agent_module, "get_provider_chain", lambda: [])
+    created = citizen_client.post(
+        "/api/reports",
+        data={"description": "Reporte sintético para comprobar el conteo de la cuenta.",
+              "latitude": "3.41", "longitude": "-76.51"},
+        files={"photo": ("demo.jpg", _get_test_image_bytes(), "image/jpeg")},
+    )
+    assert created.status_code == 201
+    own_code = created.json()["tracking_code"]
+
+    own = citizen_client.post("/api/agent/query", json={"query": "¿Cuántos reportes propios tengo?"})
+    assert own.status_code == 200
+    assert "encontraron 1 reporte" in own.json()["answer"].lower()
+    assert own_code in own.json()["answer"]
+    assert "DEMO" not in own.json()["answer"]
+
+    catalog = citizen_client.post("/api/agent/query", json={"query": "¿Qué reportes hay en el catálogo sintético?"})
+    assert catalog.status_code == 200
+    assert "DEMO" in catalog.json()["answer"]
+    assert own_code not in catalog.json()["answer"]
+
+
 def test_assistant_report_lookup_minimizes_stored_data(monkeypatch, citizen_client):
     sample_text = "Texto sintético de verificación visible para el dueño en su reporte."
     created = citizen_client.post(

@@ -15,6 +15,7 @@ class ReportLookup(BaseModel):
 class ReportFilters(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
+    scope: Literal["own", "catalog"] = "own"
     category: Literal["HUECO", "BASURAS", "TALA", "QUEMA", "OTRO"] | None = None
     severity: Literal["BAJA", "MEDIA", "ALTA", "CRITICA"] | None = None
     status: Literal[

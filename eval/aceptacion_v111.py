@@ -153,6 +153,9 @@ def _manage_report(cases: httpx.Client, citizen: httpx.Client, report: dict) -> 
     result = expect(citizen.post("/api/agent/query",
                                  json={"query": f"Estado del reporte {report['tracking_code']}"}), 200).json()
     assert report["tracking_code"] in result["answer"]
+    own = expect(citizen.post("/api/agent/query", json={"query": "¿Cuántos reportes propios tengo?"}), 200).json()
+    assert "encontraron 1 reporte" in own["answer"].lower()
+    assert report["tracking_code"] in own["answer"] and "DEMO" not in own["answer"]
 
 
 if __name__ == "__main__":
