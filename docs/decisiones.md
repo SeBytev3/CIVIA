@@ -154,3 +154,50 @@ Durante las corridas iterativas de `eval/evaluar.py` detectamos y corregimos tre
 
 6. **Verificación y ajuste de modelo terciario (`gemini-3.5-flash-lite`)**:
    - Tras comprobar el agotamiento de la cuota diaria gratuita en `gemini-3.6-flash` (`20 req/day`), se verificó mediante API la disponibilidad y capacidades de visión de `gemini-3.5-flash-lite`, adoptándolo como el modelo terciario oficial en configuración y Compose.
+
+---
+
+# ANEXO MOMENTO 3 — Comparación de la línea base y métricas finales (21 de noviembre de 2026)
+
+> **Lectura obligatoria:** las secciones anteriores se conservan como historia de M2. La versión 1.1.1 cambió arquitectura, proveedores y tipos de consulta. No es correcto presentar como métricas finales actuales cifras históricas de una ejecución de tres proveedores; tampoco es correcto comparar una búsqueda SQL rápida con una inferencia multimodal sin indicar el cambio de carga. Esta sección distingue **medido**, **histórico**, **no comparable** y **pendiente**.
+
+## Evidencia identificada y discrepancia documental
+
+1. `docs/decisiones.md` (histórico de M2) conserva una iteración de **14/15 aciertos (93,33 %)** con P50 **3549 ms**, P90 **4815,2 ms**, **30 400 tokens**, **0 USD facturados**, costo equivalente promedio **0,000375 USD/consulta**. Otra ejecución inicial se describe como **9/15 aciertos (60 %)**, P50 **7128 ms**, P90 **16 155 ms**. La comparación inicial→mejorada aparece en el texto histórico del documento.
+2. `eval/resultados/reporte_evaluacion.json`, **fechado 2026-11-02T15:16:49Z**, contiene una ejecución **diferente y posterior**: **11/15 aciertos (73,33 %)**, clasificación de referencia **40 %**, P50 **2767 ms**, P90 **6380,4 ms**, **26 995 tokens**, costo equivalente medio estimado **0,000325 USD/consulta** y **0 USD facturados**. Utilizó una cadena de modelos hoy obsoleta (Gemini→Groq→Gemini). **No mezclar esa ejecución con la de 93,33 %.**
+3. `docs/estado.md` registra para la evolución 1.1.x **15 consultas de respaldo SQL** con P50 **485,38 ms** y P90 **983,93 ms**, así como una prueba de worker con **15 trabajos en 2,651 segundos (5,66 trabajos/s)** usando adaptador simulado. **No son un test de precisión ni un benchmark de inferencia real.**
+4. El cierre de 1.1.1 registra un preflight real autorizado con **Groq** (visión, herramientas, JSON y audio de prueba), clasificación de una evidencia como `HUECO` y persistencia por worker. Gemini devolvió **403** en generación. **Ese recorrido aislado no constituye un conjunto de 15 preguntas ni proporciona una nueva tasa global de exactitud.**
+
+## Las cuatro cifras solicitadas en el Momento 3
+
+| Métrica | Línea base histórica de iteración M2 | Otra corrida histórica M2 (JSON 02-11) | Evidencia 1.1.1 | Comparación defendible |
+| --- | ---: | ---: | --- | --- |
+| Exactitud (aciertos/casos) | 9/15 = **60,00 %** (iteración inicial); 14/15 = **93,33 %** (iteración mejorada) | **11/15 = 73,33 %** | **No medida** sobre los mismos 15 casos y modelos vigentes | **No es posible afirmar mejora o deterioro final** hasta reejecutar misma batería y mismas reglas |
+| Latencia P50 | **7128 ms** inicial; **3549 ms** mejorada | **2767 ms** | **485,38 ms** para 15 consultas SQL; no inferencia real equivalente | **No comparable** (SQL determinista vs agente remoto) |
+| Tokens por ejecución | **30 400/15 = 2026,7 tokens** por consulta en corrida mejorada | **26 995/15 = 1799,7** | **No medido** como media de consulta LLM real en la batería final | **No comparable**; filtros SQL disminuyen invocaciones potenciales pero no equivalen a gasto LLM observado |
+| Costo por consulta | **0 USD facturado** y **0,000375 USD equivalente estimado** (corrida mejorada) | **0 USD facturado** y **0,000325 USD estimado** | Preflight Groq sin facturación monetaria documentada; **sin costo equivalente final comparable** | **No comparable**; depende de modelo, modalidad y tarifas del periodo |
+
+**Métrica auxiliar de clasificación:** la ejecución histórica mejorada describe **5/5 = 100 %** de aciertos visuales sintéticos; el JSON posterior reporta **40 %** sobre su batería. Son corridas distintas. El recorrido Groq final validó un ejemplo `HUECO`, no cinco casos; no convertir un ejemplo exitoso en 100 % de precisión.
+
+**Métrica auxiliar de recuperación:** las pruebas 1.1.1 verifican radicado durable, deduplicación, reintentos, recuperación de worker y DLQ. El rendimiento de **5,66 trabajos/s** procede de adaptador simulado y **no** presupone throughput equivalente de Groq/Gemini.
+
+## Qué cambió en CIVIA y cómo afecta la comparación
+
+- El asistente ya no depende de la misma cadena histórica de tres niveles: el despliegue vigente usa Gemini → Groq; la indisponibilidad de ambos no cancela la radicación.
+- Se separó **creación de reporte** de **análisis IA** mediante PostgreSQL y un worker; por tanto, latencia de recepción HTTP y latencia total de clasificación ya no son la misma métrica.
+- Se incorporaron sesiones y tres roles, autorizaciones por propietario y restricciones de herramientas; estas comprobaciones introducen trabajo fuera del modelo, pero previenen efectos indebidos.
+- El respaldo SQL responde solo consultas cubiertas por datos estructurados y no puede utilizarse como sustituto de clasificación de imágenes.
+- La validación real de Groq acredita disponibilidad de modalidades concretas, no una métrica global equivalente de la suite anterior.
+
+## Protocolo para cerrar la comparación final sin falsear datos
+
+**Estado actual: pendiente de una evaluación final comparable.** Ejecutar en una instalación aislada y con cuota autorizada:
+
+1. Congelar el commit exacto de `main`, fecha, región, modelos reales y catálogo sintético de referencia. Mantener las **mismas 15 consultas y seis casos dorados** y las reglas de acierto históricas; documentar cualquier caso que dejó de ser aplicable por RBAC o cambios de contrato.
+2. Para cada caso registrar: acierto verificado contra SQL y/o evidencia humana, estado, latencia total, proveedor/modelo, motivo de fallback, tokens de entrada y salida efectivamente informados, costo facturado y costo equivalente de referencia con precio fechado. Separar `SQL puro`, `agente` y `multimodal`.
+3. Calcular exactitud = aciertos/casos aplicables, P50/P90 con la misma definición de tiempo, tokens promedio y costo por ejecución. Informar valores faltantes como **no observados**, nunca como cero.
+4. Ejecutar dos rutas: **comparación metodológica** con casos históricamente comparables y **recorrido integral M3** con PWA, worker, espera en cola y fallo/reintento. No sumar latencias de universos distintos.
+5. Conservar archivos JSON/Markdown de la nueva corrida con commit, fecha, configuración sanitizada y trazas de fallos; **no sobrescribir** los informes históricos de M2.
+6. Agregar una tabla final histórica ↔ M3 con variaciones absolutas/relativas únicamente para métricas medidas de forma comparable. Explicar los fallos, como exige la rúbrica.
+
+**Estado de entrega de esta sección:** documento comparativo y metodología preparados; **no se afirma una nueva medición de 15 casos sobre CIVIA 1.1.1**. Los archivos de respaldo histórico se conservan en `eval/resultados/` y las pruebas actuales en `docs/estado.md`.

@@ -28,6 +28,14 @@ La revisión documental es posterior a la etiqueta `v1.1.1`. El ensayo siguió e
 | `code-documentation-doc-generate` y `code-review-and-quality` | Comparación con el README histórico, los scripts y la configuración vigente. Se comprobaron enlaces relativos, variables, opciones, Markdown GFM y el diagrama Mermaid. |
 | `verification-before-completion` | Clon sin `.env`, dependencias ni almacenamiento preexistentes, aislamiento del proyecto habitual y pruebas del procedimiento publicado. El workflow verificó ejecución real en Linux AMD64 y ARM64. [CI del ensayo](https://github.com/SeBytev3/CIVIA/actions/runs/44323465055) |
 
+## Complemento documental de Momento 3
+
+El paquete incorpora la [ficha de gobernanza](gobernanza.md), la [respuesta a auditorías](respuesta_auditoria.md) y los anexos de [métricas](decisiones.md#anexo-momento-3--comparación-de-la-línea-base-y-métricas-finales-21-de-noviembre-de-2026) y [seguridad](seguridad.md#anexo-momento-3--ataque-propio-documentado-y-trazabilidad-exacta). La auditoría externa y la medición final comparable siguen pendientes.
+
+| Tarea | Skill | Aplicación | Comprobación |
+| --- | --- | --- | --- |
+| Integrar el paquete documental | `verification-before-completion`, `commit` | Conservar el texto vigente y añadir sólo los anexos; revisar enlaces, secretos y alcance del diff | La integración conserva el contenido previo de ambos documentos y se valida con los controles de Docker en el PR. |
+
 ## Evidencia anterior al cierre
 
 Validación del [PR #1](https://github.com/SeBytev3/CIVIA/pull/1) en Windows 11, Docker Desktop, PostgreSQL 17 y Android Emulator API 35.
