@@ -17,3 +17,14 @@ La aceptación de cierre incluye una ejecución en modo degradado y un recorrido
 Los circuitos abren ante saturación o fallo y conceden un sondeo después de su enfriamiento. Los reintentos durables usan backoff exponencial, jitter y `Retry-After` acotado. La ejecución queda limitada por leases, timeout, capacidad de trabajos y presupuesto. La DLQ conserva código sanitizado e historial. WEB_ADMIN puede reencolar trabajos elegibles. La simulación persistente se activa desde esa sesión y se restaura con `NONE`. Haz la demostración en un entorno aislado.
 
 El asistente puede responder consultas de dominio con SQL. Las solicitudes conversacionales quedan fuera de la cola de evidencias. Revisa los casos ejecutados en [estado.md](estado.md).
+
+En **Configuración → Simulación de fallos**, aplica el modo y realiza una operación nueva. **Observabilidad** muestra el proveedor afectado y el código del fallo aun cuando otro proveedor pueda responder.
+
+| Modo | Resultado esperado |
+| --- | --- |
+| Desactivada | Gemini primero y Groq como respaldo. |
+| Límite de solicitudes, Servicio no disponible, Tiempo de espera o JSON inválido | Gemini registra respectivamente `HTTP_429`, `HTTP_503`, `TIMEOUT` o `INVALID_JSON`. Luego se intenta Groq. |
+| Fallo de respaldo | Se registra primero un `HTTP_503` simulado de Groq y luego se intenta Gemini. |
+| Caída total | Se registran errores en ambos proveedores sin inferencia externa. Un nuevo reporte obtiene radicado y su diagnóstico se reprograma. |
+
+El fallo simulado no consume cuota ni altera los circuitos de los proveedores. Si tienes claves habilitadas, el proveedor que queda disponible puede consumir cuota. Restaura **Desactivada** al terminar.

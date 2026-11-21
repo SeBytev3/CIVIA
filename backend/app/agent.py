@@ -22,7 +22,8 @@ import psycopg.errors
 
 from app.ai_router import (
     AIProviderError,
-    _check_forced_fault,
+    get_effective_fault_mode,
+    get_simulated_provider_error,
     build_classification_prompt,
     classify_evidence_with_router,
     check_gemini_safety,
@@ -1570,7 +1571,8 @@ def run_civia_agent(
     active_model = "none"
     fallback_used = False
 
-    chain = get_provider_chain()
+    fault_mode = get_effective_fault_mode()
+    chain = get_provider_chain(fault_mode)
     operation_id: str | None = None
     operation_status: str | None = None
     query_token: str | None = client_token
@@ -1604,6 +1606,17 @@ def run_civia_agent(
                 api_key = node["api_key"]
                 tier = node["tier"]
 
+                fault = get_simulated_provider_error(fault_mode, tier, provider)
+                if fault:
+                    _safe_record_trace(
+                        trace_group_id=trace_group_id, operation="agent_turn",
+                        provider=provider, model=model, attempt_number=turn, success=False,
+                        latency_ms=0, error_code=fault.code, error_detail=fault.message,
+                        metadata={"turn": turn, "tier": tier, "simulated_fault_mode": fault_mode},
+                    )
+                    fallback_used = True
+                    continue
+
                 cb = get_circuit(f"{provider}:agent" if owner_id is not None else provider, model)
                 if not cb.allow_request():
                     continue
@@ -1626,10 +1639,6 @@ def run_civia_agent(
                 out_tok = 0
 
                 try:
-                    forced = _check_forced_fault(tier, provider)
-                    if forced is not None:
-                        raise AIProviderError("INVALID_JSON", "JSON inválido forzado en turno de agente.", retryable=False)
-
                     if provider == "google":
                         turn_text, turn_tool_calls, in_tok, out_tok = _call_agent_turn_gemini(
                             model=model,

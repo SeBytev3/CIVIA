@@ -93,7 +93,7 @@ El anfitrión requiere **Git, Docker con contenedores Linux y Docker Compose**. 
 | Sistema | Preparación | Evidencia de 1.1.1 |
 | --- | --- | --- |
 | Windows | Git, PowerShell y Docker Desktop. Habilita virtualización y el backend de Docker correspondiente, por ejemplo WSL 2. [Docker para Windows](https://docs.docker.com/desktop/setup/install/windows-install/) | Windows 11 AMD64 verificado con Docker Desktop. |
-| Linux | Git, Bash, Docker Engine y el complemento Compose. Usa una sesión autorizada para acceder al motor. [Docker Engine](https://docs.docker.com/engine/install/) | AMD64 y ARM64 verificados en runners nativos. |
+| Linux | Git, Bash, Docker Engine y el complemento Compose. Usa una sesión autorizada para acceder al motor. [Docker Engine](https://docs.docker.com/engine/install/) | AMD64 verificado en un runner nativo. |
 | macOS | Git, Bash y Docker Desktop compatible con el equipo. Autoriza virtualización cuando el sistema lo requiera. [Docker para macOS](https://docs.docker.com/desktop/setup/install/mac-install/) | Arranque completo pendiente de comprobación. |
 
 Comprueba `git --version`, `docker info` y `docker compose version`. `docker info --format '{{.OSType}}'` debe devolver `linux`. Consulta `docker compose ls` antes de arrancar si el equipo puede tener otro despliegue.
@@ -174,7 +174,7 @@ Un checkout con cambios locales puede mostrar el sufijo `-dirty`. El frontend y 
 5. **Conectividad.** Comprueba que el teléfono puede llegar al puerto HTTPS. Las redes de invitados pueden aislar clientes. `-NoDiscovery` y `--no-discovery` mantienen HTTPS sin anuncio LAN. La PWA abre por URL.
 
 > [!NOTE]
-> Windows verificó el gateway HTTPS LAN. Linux AMD64 y ARM64 verificaron el arranque base. Chromium en un entorno desechable verificó la PWA con una CA confiable. La PWA en un teléfono físico y el despliegue completo en macOS siguen pendientes. [Conectividad](docs/CONECTIVIDAD_LAN.md) · [Evidencia](docs/estado.md)
+> Windows verificó el gateway HTTPS LAN. Linux AMD64 verificó el arranque base. Chromium en un entorno desechable verificó la PWA con una CA confiable. La PWA en un teléfono físico y el despliegue completo en macOS siguen pendientes. [Conectividad](docs/CONECTIVIDAD_LAN.md) · [Evidencia](docs/estado.md)
 
 ## Configuración e inteligencia artificial
 
@@ -244,7 +244,7 @@ flowchart LR
 
 ```text
 CIVIA/
-├── .github/workflows/civia.yml   CI de Docker en Linux AMD64 y ARM64
+├── .github/workflows/civia.yml   CI de Docker en Linux AMD64
 ├── backend/
 │   ├── app/                     API, identidad, asistente y worker
 │   ├── migrations/              Migraciones SQL de PostgreSQL
@@ -310,7 +310,7 @@ Para pruebas de interfaz, usa Node.js en el entorno de pruebas y ejecuta `npm --
 
 | Evidencia | Alcance observado en 1.1.1 |
 | --- | --- |
-| CI en AMD64 y ARM64 | 204 pruebas backend aprobadas por arquitectura. Proxy comprobado por separado. La prueba en vivo quedó excluida de la suite hermética. Arranque real y reinicio en ambos runners. [CI estable](https://github.com/SeBytev3/CIVIA/actions/runs/44241890791) |
+| CI en AMD64 | 204 pruebas backend aprobadas en la publicación 1.1.1. Proxy comprobado por separado. La prueba en vivo quedó excluida de la suite hermética. Arranque real y reinicio en el runner de AMD64. [CI estable](https://github.com/SeBytev3/CIVIA/actions/runs/44241890791) |
 | Playwright y PWA | 13 pruebas web, instalación y apertura de escritorio en Chromium y recorrido HTTPS en un navegador desechable. [Evidencia web](docs/pruebas_web_1_1_1.md) |
 | Proveedores reales | Preflight y recorrido autorizado con Groq. Gemini devolvió 403 de generación. [Estado de cierre](docs/estado.md#cierre-de-aceptación-de-momento-3) |
 | Seguridad y evaluación histórica | Verificación defensiva con datos sintéticos. Los informes de 15 consultas son históricos y conservan sus resultados. [Semana 12](docs/seguridad.md) · [Evaluación](eval/README.md) |
@@ -344,7 +344,7 @@ El adaptador restringe destinos de inferencia. La red Docker del servicio conser
 
 ## Desarrollo y colaboración
 
-`main` distribuye la versión estable. Los cambios se preparan en `dev` y pasan por PR `dev → main` con los controles Docker AMD64 y ARM64. La etiqueta `v1.0.0-academic` conserva la entrega histórica, y `v1.1.1` conserva la revisión original de esa release. Las novedades de cada versión figuran en el [registro de cambios](CHANGELOG.md). Las correcciones documentales en `main` pueden ser posteriores a la etiqueta. Después de integrar, sincroniza `dev` mediante avance rápido cuando corresponda. [Flujo Git](docs/FLUJO_GIT.md) · [Releases](https://github.com/SeBytev3/CIVIA/releases)
+`main` distribuye la versión estable. Los cambios se preparan en `dev` y pasan por PR `dev → main` con el control Docker AMD64. La etiqueta `v1.0.0-academic` conserva la entrega histórica, y `v1.1.1` conserva la revisión original de esa release. Las novedades de cada versión figuran en el [registro de cambios](CHANGELOG.md). Las correcciones documentales en `main` pueden ser posteriores a la etiqueta. Después de integrar, sincroniza `dev` mediante avance rápido cuando corresponda. [Flujo Git](docs/FLUJO_GIT.md) · [Releases](https://github.com/SeBytev3/CIVIA/releases)
 
 ## Documentación técnica
 
@@ -361,7 +361,7 @@ El adaptador restringe destinos de inferencia. La red Docker del servicio conser
 
 ## Estado, limitaciones y próximos pasos
 
-**Disponible en 1.1.2.** Radicación, PWA, portal por roles, persistencia, cola y preflight de dos proveedores. Despliegue comprobado en Windows AMD64 y Linux AMD64 y ARM64. Groq completó un recorrido real autorizado y Gemini sigue sujeto al permiso de generación de la cuenta.
+**Disponible en 1.1.2.** Radicación, PWA, portal por roles, persistencia, cola y preflight de dos proveedores. Despliegue comprobado en Windows AMD64 y Linux AMD64. Groq completó un recorrido real autorizado y Gemini sigue sujeto al permiso de generación de la cuenta.
 
 **Pendiente.** Instalación PWA por HTTPS en un teléfono físico y arranque completo en macOS. La exposición pública y la integración con autoridades requieren infraestructura y acuerdos. La instalación histórica con una credencial propietaria de PostgreSQL anterior al bootstrap aleatorio requiere rotación coordinada. [Estado y límites](docs/estado.md) · [Rotación](docs/DEPLOYMENT.md#credenciales-de-instalación)
 

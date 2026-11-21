@@ -384,9 +384,9 @@ def parse_and_validate_analysis_json(raw_text: str) -> AIAnalysisContract:
         raise AIProviderError("INVALID_SCHEMA", f"Violación de esquema en contrato AI: {exc}", retryable=False) from exc
 
 
-def get_provider_chain() -> list[dict[str, str]]:
-    """Gemini seguido de Groq, sin repetir un proveedor en el ciclo."""
-    return [
+def get_provider_chain(fault_mode: str = "") -> list[dict[str, str]]:
+    """En la prueba del respaldo, intenta Groq primero para observar su fallo."""
+    chain = [
         {
             "tier": "primary",
             "provider": "google",
@@ -400,25 +400,24 @@ def get_provider_chain() -> list[dict[str, str]]:
             "api_key": settings.GROQ_API_KEY,
         },
     ]
+    return chain[::-1] if fault_mode == "GROQ_FAIL" else chain
 
 
-def _check_forced_fault(tier: str, provider: str) -> str | None:
-    """Evalúa si hay una falla forzada activa para este nivel/proveedor."""
-    mode = get_effective_fault_mode()
+def get_simulated_provider_error(mode: str, tier: str, provider: str) -> AIProviderError | None:
     if not mode:
         return None
     if mode in ("TOTAL", "CAIDA_TOTAL", "429_ALL", "ALL_FAIL"):
-        raise AIProviderError("HTTP_429", "Falla forzada total (429/caída total en todos los proveedores).", retryable=True)
+        return AIProviderError("HTTP_429", "Caída total simulada.", retryable=True)
     if mode in ("429", "429_PRIMARY") and tier == "primary":
-        raise AIProviderError("HTTP_429", "Falla forzada 429 en proveedor primario.", retryable=True)
+        return AIProviderError("HTTP_429", "Límite de solicitudes simulado.", retryable=True)
     if mode in ("503", "503_PRIMARY") and tier == "primary":
-        raise AIProviderError("HTTP_503", "Falla forzada 503 en proveedor primario.", retryable=True)
+        return AIProviderError("HTTP_503", "Servicio no disponible simulado.", retryable=True)
     if mode in ("TIMEOUT", "TIMEOUT_PRIMARY") and tier == "primary":
-        raise AIProviderError("TIMEOUT", "Falla forzada de timeout en proveedor primario.", retryable=True)
+        return AIProviderError("TIMEOUT", "Tiempo de espera simulado.", retryable=True)
     if mode in ("INVALID_JSON", "INVALID_JSON_PRIMARY") and tier == "primary":
-        return "{bad_json: true, unclosed"
+        return AIProviderError("INVALID_JSON", "JSON inválido simulado.", retryable=False)
     if mode == "GROQ_FAIL" and provider == "groq":
-        raise AIProviderError("HTTP_503", "Falla forzada independiente en Groq.", retryable=True)
+        return AIProviderError("HTTP_503", "Fallo de respaldo simulado.", retryable=True)
     return None
 
 
@@ -614,7 +613,8 @@ def classify_evidence_with_router(
         except Exception:
             eff_tracker = None
 
-    chain = get_provider_chain()
+    fault_mode = get_effective_fault_mode()
+    chain = get_provider_chain(fault_mode)
     per_call_timeout = max(1.0, min(settings.AI_TIMEOUT_SECONDS, 6.0))
     t_start = time.perf_counter()
     total_timeout = float(total_timeout_override if total_timeout_override is not None else settings.AI_TIMEOUT_SECONDS)
@@ -643,12 +643,24 @@ def classify_evidence_with_router(
         model = node["model"]
         api_key = node["api_key"]
         tier = node["tier"]
-        if provider == "groq" and image_bytes:
-            if not settings.AI_GROQ_VISION_MODEL:
-                failures.append(AIProviderError("MODALITY_UNSUPPORTED", "Visión de respaldo pendiente de configuración.", False))
-                continue
+        if provider == "groq" and image_bytes and settings.AI_GROQ_VISION_MODEL:
             model = settings.AI_GROQ_VISION_MODEL
-        if for_queue and not api_key and not get_effective_fault_mode():
+        fault = get_simulated_provider_error(fault_mode, tier, provider)
+        if fault:
+            failures.append(fault)
+            attempt_global += 1
+            _safe_record_trace(
+                trace_group_id=eff_trace_group_id, operation="classify_evidence",
+                provider=provider, model=model, attempt_number=attempt_global, success=False,
+                latency_ms=0, report_id=report_id, error_code=fault.code, error_detail=fault.message,
+                metadata={"tier": tier, "simulated_fault_mode": fault_mode},
+            )
+            provider_switches += 1
+            continue
+        if provider == "groq" and image_bytes and not settings.AI_GROQ_VISION_MODEL:
+            failures.append(AIProviderError("MODALITY_UNSUPPORTED", "Visión de respaldo pendiente de configuración.", False))
+            continue
+        if for_queue and not api_key:
             failures.append(AIProviderError("MISSING_API_KEY", "Credencial pendiente.", defer_attempt=True))
             continue
 
@@ -686,7 +698,7 @@ def classify_evidence_with_router(
 
         # Reserva atómica previa para este intento individual (M-02)
         active_reservation = None
-        if attempt_global == 0 and pending_initial_reservation is not None:
+        if pending_initial_reservation is not None:
             active_reservation = pending_initial_reservation
             pending_initial_reservation = None
         elif eff_tracker is not None:
@@ -701,10 +713,7 @@ def classify_evidence_with_router(
         in_tok = 0
         out_tok = 0
         try:
-            forced_raw = _check_forced_fault(tier, provider)
-            if forced_raw is not None:
-                raw_text, in_tok, out_tok = forced_raw, 40, 12
-            elif provider == "google":
+            if provider == "google":
                 raw_text, in_tok, out_tok = _call_gemini_multimodal(
                     model=model,
                     api_key=api_key,
@@ -937,7 +946,7 @@ def transcribe_audio_optional(audio_bytes: bytes, filename: str, mime_type: str)
     """Transcribe nota de voz opcional (<=60s/5MB) usando el modelo de audio configurado en Groq si está disponible."""
     if not settings.GROQ_API_KEY or not audio_bytes:
         return None
-    if get_effective_fault_mode() in ("TOTAL", "CAIDA_TOTAL", "429_ALL", "GROQ_FAIL"):
+    if get_simulated_provider_error(get_effective_fault_mode(), "fallback", "groq"):
         return None
 
     trace_group_id = uuid.uuid4()
