@@ -216,8 +216,19 @@ def test_vertical_flow_create_analyze_confirm_and_query(citizen_client):
     assert by_code.json()["status"] == "CONFIRMED"
 
 
-@pytest.mark.parametrize("fault_mode", ["429", "503", "TIMEOUT", "INVALID_JSON", "GROQ_FAIL"])
-def test_router_resilience_and_fallback_across_providers(fault_mode, web_admin_client):
+@pytest.mark.parametrize(("fault_mode", "failed_provider", "error_code", "successful_provider"), [
+    ("NONE", None, None, "google"),
+    ("429", "google", "HTTP_429", "groq"),
+    ("503", "google", "HTTP_503", "groq"),
+    ("TIMEOUT", "google", "TIMEOUT", "groq"),
+    ("INVALID_JSON", "google", "INVALID_JSON", "groq"),
+    ("GROQ_FAIL", "groq", "HTTP_503", "google"),
+])
+def test_router_resilience_and_fallback_across_providers(
+    fault_mode, failed_provider, error_code, successful_provider, web_admin_client, monkeypatch,
+):
+    traces = []
+    monkeypatch.setattr(ai_router_module, "_safe_record_trace", lambda **event: traces.append(event))
     result = web_admin_client.post("/api/admin/fault-injection", json={"mode": fault_mode})
     assert result.status_code == 200
     analysis, meta = ai_router_module.classify_evidence_with_router(
@@ -225,8 +236,39 @@ def test_router_resilience_and_fallback_across_providers(fault_mode, web_admin_c
         image_bytes=_get_test_image_bytes(), image_mime="image/jpeg", for_queue=True,
     )
     assert analysis.category == "QUEMA"
-    assert meta["provider"] == ("google" if fault_mode == "GROQ_FAIL" else "groq")
-    assert meta["attempts"] <= 2
+    assert meta["provider"] == successful_provider
+    assert meta["attempts"] == (2 if failed_provider else 1)
+    assert [(event["provider"], event["error_code"]) for event in traces if not event["success"]] == (
+        [(failed_provider, error_code)] if failed_provider else []
+    )
+    assert all(event["metadata"]["simulated_fault_mode"] == fault_mode for event in traces if not event["success"])
+
+
+@pytest.mark.parametrize(("fault_mode", "expected"), [
+    ("NONE", []),
+    ("429", [("google", "HTTP_429")]),
+    ("503", [("google", "HTTP_503")]),
+    ("TIMEOUT", [("google", "TIMEOUT")]),
+    ("INVALID_JSON", [("google", "INVALID_JSON")]),
+    ("GROQ_FAIL", [("groq", "HTTP_503")]),
+    ("TOTAL", [("google", "HTTP_429"), ("groq", "HTTP_429")]),
+])
+def test_configured_fault_reaches_agent_via_shared_runtime(fault_mode, expected, web_admin_client, monkeypatch):
+    monkeypatch.setattr(settings, "AI_SHARED_RUNTIME", True)
+    traces = []
+    monkeypatch.setattr(agent_module, "_safe_record_trace", lambda **event: traces.append(event))
+    try:
+        response = web_admin_client.post("/api/admin/fault-injection", json={"mode": fault_mode})
+        assert response.status_code == 200
+        assert response.json()["effective_fault_mode"] == fault_mode
+        answer = agent_module.run_civia_agent("¿Cuántos reportes hay?", max_iterations=1)
+        failures = [(event["provider"], event["error_code"]) for event in traces if not event["success"]]
+        assert failures == expected
+        assert answer["answer"]
+        if fault_mode == "TOTAL":
+            assert not any(event["success"] for event in traces)
+    finally:
+        web_admin_client.post("/api/admin/fault-injection", json={"mode": "NONE"})
 
 
 def test_total_provider_outage_graceful_degradation(citizen_client, web_admin_client):
@@ -272,7 +314,7 @@ def test_agent_tools_and_unanswerable_query(citizen_client):
 
 
 def test_citizen_fallback_keeps_own_counts_separate_from_demo_catalog(citizen_client, monkeypatch):
-    monkeypatch.setattr(agent_module, "get_provider_chain", lambda: [])
+    monkeypatch.setattr(agent_module, "get_provider_chain", lambda fault_mode="": [])
     created = citizen_client.post(
         "/api/reports",
         data={"description": "Reporte sintético para comprobar el conteo de la cuenta.",

@@ -181,6 +181,7 @@ export function Settings() {
   return <section className="surface stack">
     <h1>Configuración operativa</h1>
     <h2>Simulación de fallos</h2>
+    <p>Elige un modo y realiza una consulta nueva o radica un reporte sintético. Los fallos aparecen en Observabilidad aunque el otro proveedor responda correctamente.</p>
     <LoadNotice {...data} />
     {data.value && <form className="stack" onSubmit={async (event) => {
       event.preventDefault();
@@ -193,6 +194,7 @@ export function Settings() {
       finally { setBusy(false); }
     }}>
       <p>Modo activo: <strong>{data.value.effective_fault_mode}</strong></p>
+      <p>Caída total bloquea ambos proveedores. Fallo de respaldo prueba primero Groq. Los demás modos de fallo se aplican al proveedor principal.</p>
       <label>Nuevo modo<select name="mode" defaultValue={data.value.effective_fault_mode}>
         {[['NONE','Desactivada'],['429','Límite de solicitudes'],['503','Servicio no disponible'],['TIMEOUT','Tiempo de espera'],['INVALID_JSON','JSON inválido'],['GROQ_FAIL','Fallo de respaldo'],['TOTAL','Caída total']].map(([mode, label]) => <option key={mode} value={mode}>{label}</option>)}
       </select></label>
