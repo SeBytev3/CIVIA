@@ -47,6 +47,16 @@ La radicación web y la PWA usan el host canónico de OpenStreetMap. Sólo las i
 
 Compilación, chequeo de tipos, suite web e instalación PWA standalone en Chromium aprobados. Se actualizó sólo el frontend habitual y se verificaron `/`, `/app/`, `/admin/` y `/health` con HTTP 200. La cámara física en móvil queda pendiente de comprobación.
 
+## Verificación de simulación de fallos
+
+| Hallazgo | Skill | Aplicación y verificación |
+| --- | --- | --- |
+| Fallo del respaldo no observable con el principal sano | `systematic-debugging`, `test-driven-development` | RED: un intento exitoso de Gemini sin traza de Groq. GREEN: el modo prueba primero Groq y permite el intento de Gemini. |
+| Simulación visible con o sin respaldo | `verification-before-completion` | Se verificaron los siete modos mediante la configuración compartida y trazas herméticas. Caída total conserva el radicado y reprograma el diagnóstico. Suite AMD64: 212 aprobadas, una omitida y una excluida. |
+| Alcance de integración | `verification-before-completion` | El workflow y la protección de `main` conservan sólo `Docker AMD64` como control requerido. |
+
+La API, el worker y el frontend se actualizaron localmente. La base se conservó y la salud del gateway respondió HTTP 200. La prueba de modos usó adaptadores sintéticos.
+
 ## Evidencia anterior al cierre
 
 Validación del [PR #1](https://github.com/SeBytev3/CIVIA/pull/1) en Windows 11, Docker Desktop, PostgreSQL 17 y Android Emulator API 35.

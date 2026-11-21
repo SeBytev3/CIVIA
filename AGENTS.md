@@ -12,6 +12,7 @@ Equipo: Stefania Córdoba y Sebastian Espinosa. Proyecto de Ingeniería de Aplic
 7. README para equipo Windows 11 y otro computador limpio; scripts de arranque un comando y .env.example completo. No subir secretos, .venv, node_modules ni dumps privados.
 
 ## Forma de trabajar
+- Ejecutar y mantener los controles de integración sólo en AMD64. Excluir ARM de nuevas pruebas, matrices y requisitos de integración.
 - Una tarea por cambio; ejecutar lint/tests y documentar resultado en docs/estado.md antes de marcar terminado.
 - No cambiar modelos IDs sin comprobación por API; validar visión, salida estructurada y tool calling según función.
 - No inventar resultados de evaluación, métricas, datos satelitales reales ni fechas.

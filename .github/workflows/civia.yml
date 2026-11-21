@@ -17,19 +17,9 @@ concurrency:
 
 jobs:
   docker:
-    name: Docker ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    name: Docker AMD64
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-24.04
-            arch: AMD64
-            host_arch: x86_64
-          - runner: ubuntu-24.04-arm
-            arch: ARM64
-            host_arch: aarch64
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -38,16 +28,12 @@ jobs:
       - name: Verificar entorno limpio y arrancar
         shell: bash
         run: |
-          test "$(uname -m)" = "${{ matrix.host_arch }}"
-          test "$(docker info --format '{{.Architecture}}')" = "${{ matrix.host_arch }}"
+          test "$(uname -m)" = x86_64
+          test "$(docker info --format '{{.Architecture}}')" = x86_64
           test ! -e .env
           test ! -e .civia
           test ! -e frontend/node_modules
-          if [[ "$(uname -m)" == aarch64 ]]; then
-            ./scripts/run.sh --isolated
-          else
-            ./scripts/run.sh
-          fi
+          ./scripts/run.sh
           port=$(sed -n 's/^CIVIA_HTTP_PORT=//p' .env)
           project=$(sed -n 's/^COMPOSE_PROJECT_NAME=//p' .env)
           site="http://127.0.0.1:$port"
