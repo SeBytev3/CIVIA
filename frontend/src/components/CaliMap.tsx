@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import L from 'leaflet';
 import type { PublicMapItem, ReportCategory, ReportItem } from '../types';
 
@@ -67,6 +67,7 @@ export function CaliMap({
   const mapRef = useRef<L.Map | null>(null);
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
   const pickerMarkerRef = useRef<L.Marker | null>(null);
+  const [tileUnavailable, setTileUnavailable] = useState(false);
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
@@ -77,10 +78,21 @@ export function CaliMap({
       scrollWheelZoom: false,
     });
 
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-      attribution: '&copy; OpenStreetMap contributors · CIVIA Cali',
+    const tiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors · CIVIA Cali',
+      referrerPolicy: 'strict-origin',
       maxZoom: 19,
-    }).addTo(map);
+    });
+    let failedInBatch = false;
+    tiles.on('loading', () => { failedInBatch = false; });
+    tiles.on('tileerror', () => {
+      failedInBatch = true;
+      setTileUnavailable(true);
+    });
+    tiles.on('load', () => {
+      if (!failedInBatch) setTileUnavailable(false);
+    });
+    tiles.addTo(map);
 
     const layerGroup = L.layerGroup().addTo(map);
     mapRef.current = map;
@@ -202,6 +214,9 @@ export function CaliMap({
         role="region"
         aria-label={selectable ? 'Mapa para elegir la ubicación del incidente' : 'Mapa interactivo de reportes ciudadanos en Santiago de Cali'}
       />
+      {tileUnavailable && <p className="map-tile-status" role="status">
+        El mapa base no está disponible.{selectable && ' Puedes usar el GPS para ubicar el incidente.'}
+      </p>}
       {selectable ? <div className="map-picker-controls actions">
         <p>Elige un punto o desplaza el mapa para usar su centro.</p>
         <button type="button" className="secondary" onClick={() => {

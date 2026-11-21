@@ -20,7 +20,7 @@ def test_installation_metadata_is_public_minimal_and_stable(monkeypatch):
     document = first.json()
     assert document == second.json()
     assert set(document) == {"version", "commit", "installation_id", "protocol"}
-    assert document["version"] == "1.1.1"
+    assert document["version"] == settings.VERSION
     assert document["commit"] == "a" * 40
     assert document["protocol"] == 1
     assert UUID(document["installation_id"]).version == 4

@@ -6,6 +6,7 @@ import { blankDraft, draftStorage, type Draft } from '../draft';
 import type { ReportItem } from '../types';
 import { CaliMap } from './CaliMap';
 import { AnalysisState } from './ReportDetail';
+import { WebCamera } from './WebCamera';
 
 const AUDIO_LIMIT_MS = 60_000;
 const AUDIO_LIMIT_BYTES = 5 * 1024 * 1024;
@@ -361,7 +362,7 @@ export function ReportForm({ ownerId, onNavigate }: { ownerId: string; onNavigat
             try { selectPhoto(await takeNativePhoto(source as CameraSource)); }
             catch { setError('No se agregó una foto. Revisa los permisos o vuelve a intentarlo.'); }
           }}>{label}</button>)}</div> : <>
-            <label>Abrir cámara<input type="file" accept="image/*" capture="environment" onChange={(event) => selectPhoto(event.target.files?.[0])} /></label>
+            {!busy && !draft.pending && <WebCamera onCapture={selectPhoto} onError={setError} />}
             <label>Seleccionar foto<input type="file" accept="image/jpeg,image/png,image/webp" onChange={(event) => selectPhoto(event.target.files?.[0])} /></label>
           </>}
           <BlobPreview file={draft.photo} kind="photo" />

@@ -223,6 +223,8 @@ th { background: #eef5f3; color: #2c4a50; font-size: .82rem; }
 }
 .civia-map-shell { border: 1px solid var(--civia-line); border-radius: 11px; min-width: 0; overflow: hidden; }
 .civia-map-shell .leaflet-control-attribution { white-space: normal; overflow-wrap: anywhere; text-align: end; }
+.map-tile-status { margin: 0; padding: .55rem; background: #f5faf8; color: var(--civia-muted); }
+.web-camera-preview { width: 100%; max-height: 55vh; object-fit: contain; background: #12263a; border-radius: 10px; }
 .map-picker-controls { padding: .55rem; background: #f5faf8; color: var(--civia-muted); }
 .civia-map-legend { display: flex; flex-wrap: wrap; gap: .3rem .8rem; padding: .55rem; background: #f5faf8; color: var(--civia-muted); font-size: .76rem; }
 .civia-map-legend i { display: inline-block; inline-size: .58rem; block-size: .58rem; border-radius: 50%; margin-inline-end: .15rem; }

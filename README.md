@@ -1,17 +1,17 @@
 # CIVIA · Ciudad Inteligente y Vigilancia Ambiental
 
-[![Versión estable 1.1.1](https://img.shields.io/github/v/release/SeBytev3/CIVIA?label=versi%C3%B3n%20estable)](https://github.com/SeBytev3/CIVIA/releases/tag/v1.1.1)
+[![Versión estable 1.1.2](https://img.shields.io/github/v/release/SeBytev3/CIVIA?label=versi%C3%B3n%20estable)](https://github.com/SeBytev3/CIVIA/releases/tag/v1.1.2)
 [![CI de main](https://github.com/SeBytev3/CIVIA/actions/workflows/civia.yml/badge.svg?branch=main)](https://github.com/SeBytev3/CIVIA/actions/workflows/civia.yml?query=branch%3Amain)
 [![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
 [![React 19](https://img.shields.io/badge/React-19-087EA4?logo=react&logoColor=white)](frontend/package.json)
 [![FastAPI](https://img.shields.io/badge/FastAPI-Python-009688?logo=fastapi&logoColor=white)](backend/requirements.txt)
 [![PostgreSQL 17](https://img.shields.io/badge/PostgreSQL-17-4169E1?logo=postgresql&logoColor=white)](docker-compose.yml)
 
-**Versión 1.1.1 · Momento 3** · Ingeniería de Aplicaciones con IA, Universidad Cooperativa de Colombia.
+**Versión 1.1.2 · Momento 3** · Ingeniería de Aplicaciones con IA, Universidad Cooperativa de Colombia.
 
 **Stefania Córdoba y Sebastian Espinosa** · Profesor Julián Garzón.
 
-Plataforma académica de reportes viales y ambientales para Cali y el Valle del Cauca. La versión estable se distribuye en `main`, se despliega con Docker Compose y ofrece una PWA ciudadana como entrega móvil. El despliegue comprobado es local y en red privada. [Release](https://github.com/SeBytev3/CIVIA/releases/tag/v1.1.1) · [Aceptación](docs/estado.md)
+Plataforma académica de reportes viales y ambientales para Cali y el Valle del Cauca. La versión estable se distribuye en `main`, se despliega con Docker Compose y ofrece una PWA ciudadana como entrega móvil. El despliegue comprobado es local y en red privada. [Release](https://github.com/SeBytev3/CIVIA/releases/tag/v1.1.2) · [Aceptación](docs/estado.md)
 
 ## Contenido
 
@@ -50,7 +50,7 @@ Autenticación, permisos, validación, radicados, persistencia, consultas SQL y 
 Copia el prompt en Claude Code, OpenAI Codex, Gemini CLI, Google Antigravity, OpenCode o un agente equivalente con terminal y acceso a Docker. Los pasos usan Git y Compose y se pueden ejecutar con cualquier proveedor del agente.
 
 ```text
-Instala y verifica CIVIA 1.1.1. Ejecuta los pasos con tus herramientas hasta
+Instala y verifica CIVIA 1.1.2. Ejecuta los pasos con tus herramientas hasta
 obtener evidencia de funcionamiento o identificar un impedimento concreto.
 
 1. Detecta el sistema operativo y la arquitectura. Comprueba Git, Docker con
@@ -344,7 +344,7 @@ El adaptador restringe destinos de inferencia. La red Docker del servicio conser
 
 ## Desarrollo y colaboración
 
-`main` distribuye la versión estable. Los cambios se preparan en `dev` y pasan por PR `dev → main` con los controles Docker AMD64 y ARM64. La etiqueta `v1.0.0-academic` conserva la entrega histórica, y `v1.1.1` conserva la revisión original de la release. Las correcciones documentales en `main` pueden ser posteriores a la etiqueta. Después de integrar, sincroniza `dev` mediante avance rápido cuando corresponda. [Flujo Git](docs/FLUJO_GIT.md) · [Releases](https://github.com/SeBytev3/CIVIA/releases)
+`main` distribuye la versión estable. Los cambios se preparan en `dev` y pasan por PR `dev → main` con los controles Docker AMD64 y ARM64. La etiqueta `v1.0.0-academic` conserva la entrega histórica, y `v1.1.1` conserva la revisión original de esa release. Las novedades de cada versión figuran en el [registro de cambios](CHANGELOG.md). Las correcciones documentales en `main` pueden ser posteriores a la etiqueta. Después de integrar, sincroniza `dev` mediante avance rápido cuando corresponda. [Flujo Git](docs/FLUJO_GIT.md) · [Releases](https://github.com/SeBytev3/CIVIA/releases)
 
 ## Documentación técnica
 
@@ -361,7 +361,7 @@ El adaptador restringe destinos de inferencia. La red Docker del servicio conser
 
 ## Estado, limitaciones y próximos pasos
 
-**Disponible en 1.1.1.** Radicación, PWA, portal por roles, persistencia, cola y preflight de dos proveedores. Despliegue comprobado en Windows AMD64 y Linux AMD64 y ARM64. Groq completó un recorrido real autorizado y Gemini sigue sujeto al permiso de generación de la cuenta.
+**Disponible en 1.1.2.** Radicación, PWA, portal por roles, persistencia, cola y preflight de dos proveedores. Despliegue comprobado en Windows AMD64 y Linux AMD64 y ARM64. Groq completó un recorrido real autorizado y Gemini sigue sujeto al permiso de generación de la cuenta.
 
 **Pendiente.** Instalación PWA por HTTPS en un teléfono físico y arranque completo en macOS. La exposición pública y la integración con autoridades requieren infraestructura y acuerdos. La instalación histórica con una credencial propietaria de PostgreSQL anterior al bootstrap aleatorio requiere rotación coordinada. [Estado y límites](docs/estado.md) · [Rotación](docs/DEPLOYMENT.md#credenciales-de-instalación)
 
