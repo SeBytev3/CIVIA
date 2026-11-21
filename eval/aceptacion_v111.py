@@ -11,6 +11,7 @@ from uuid import uuid4
 import wave
 
 import httpx
+from app.config import settings
 
 ORIGIN = "http://frontend"
 
@@ -58,7 +59,7 @@ def verify(credentials_file: Path) -> dict:
     try:
         meta = expect(web.get("/api/meta"), 200).json()
         build = expect(web.get("/build.json"), 200).json()
-        assert meta["version"] == build["version"] == "1.1.1"
+        assert meta["version"] == build["version"] == settings.VERSION
         assert meta["commit"] == build["commit"]
         assert meta["installation_id"] == private["installation_id"]
         for path in ("/", "/app/", "/admin/", "/health"):

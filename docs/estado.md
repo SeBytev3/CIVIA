@@ -1,4 +1,4 @@
-# Estado de CIVIA 1.1.1
+# Estado de CIVIA
 
 ## Cierre de aceptación de Momento 3
 
@@ -35,6 +35,17 @@ El paquete incorpora la [ficha de gobernanza](gobernanza.md), la [respuesta a au
 | Tarea | Skill | Aplicación | Comprobación |
 | --- | --- | --- | --- |
 | Integrar el paquete documental | `verification-before-completion`, `commit` | Conservar el texto vigente y añadir sólo los anexos; revisar enlaces, secretos y alcance del diff | La integración conserva el contenido previo de ambos documentos y se valida con los controles de Docker en el PR. |
+
+## CIVIA 1.1.2 · Corrección de mapa y cámara web
+
+La radicación web y la PWA usan el host canónico de OpenStreetMap. Sólo las imágenes de sus teselas envían el origen del sitio como referencia. Si fallan, CIVIA informa la indisponibilidad del mapa base y ofrece el GPS como alternativa. La cámara del formulario web solicita video mediante el navegador, captura un JPEG y libera el dispositivo. Para acceder a la cámara desde otro dispositivo, la PWA requiere HTTPS confiable y permiso del navegador.
+
+| Hallazgo | Skill | Aplicación y verificación |
+| --- | --- | --- |
+| Teselas 403 | `systematic-debugging`, `test-driven-development`, `playwright-skill` | RED por host antiguo. GREEN en Nginx aislado con el host canónico, referencia limitada al origen y 403 simulado con selección de coordenadas disponible. Una solicitud real de Chromium devolvió HTTP 200 y `image/png`. |
+| «Abrir cámara» mostraba el selector de archivos | `systematic-debugging`, `test-driven-development`, `playwright-skill` | RED por ausencia de captura. GREEN con una cámara sintética de Chromium, vista previa, foto, cierre de la pista y degradación al selector ante un permiso denegado. |
+
+Compilación, chequeo de tipos, suite web e instalación PWA standalone en Chromium aprobados. Se actualizó sólo el frontend habitual y se verificaron `/`, `/app/`, `/admin/` y `/health` con HTTP 200. La cámara física en móvil queda pendiente de comprobación.
 
 ## Evidencia anterior al cierre
 

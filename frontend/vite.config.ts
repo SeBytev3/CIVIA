@@ -37,7 +37,7 @@ export default defineConfig(({ mode }) => {
               tag: 'meta',
               attrs: {
                 'http-equiv': 'Content-Security-Policy',
-                content: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.tile.openstreetmap.org; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'",
+                content: "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://tile.openstreetmap.org; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'",
               },
               injectTo: 'head-prepend',
             }],

@@ -16,7 +16,7 @@ const sample = {
 const viewports = [[320, 568], [360, 800], [375, 667], [390, 844], [412, 915], [768, 1024], [1366, 768], [1920, 1080], [800, 360]];
 const stats = { total: 1, total_reports: 1, by_category: {}, by_status: { PENDING_ANALYSIS: 1 }, by_comuna: {} };
 const citizen = { id: 'owner', email: 'demo@example.invalid', name: 'NombreSintético'.repeat(8), role: 'CITIZEN', active: true };
-const installation = { installation_id: '73d37868-959d-4c7b-81bf-eea7d081e72c', version: '1.1.1', commit: 'test', protocol: 1 };
+const installation = { installation_id: '73d37868-959d-4c7b-81bf-eea7d081e72c', version: require('../package.json').version, commit: 'test', protocol: 1 };
 const photo = readFileSync(join(__dirname, '..', 'public', 'demo_evidence', 'sample_hueco.jpg'));
 const browserErrors = [];
 
@@ -40,7 +40,7 @@ function wav() {
 
 async function setup(context, role, handleSubmit = async (route) => route.fulfill({ status: 201, json: sample })) {
   context.on('page', (page) => page.on('pageerror', (error) => browserErrors.push(error.message)));
-  await context.route('https://*.tile.openstreetmap.org/**', (route) => route.abort());
+  await context.route(/^https:\/\/(?:[abc]\.)?tile\.openstreetmap\.org\//, (route) => route.abort());
   await context.route('**/api/**', async (route) => {
     const { pathname } = new URL(route.request().url());
     const session = { user: { ...citizen, role }, csrf_token: 'synthetic-test-csrf' };
@@ -128,24 +128,69 @@ async function waitForSavedTitle(page, title) {
 }
 
 async function run() {
-  const browser = await chromium.launch({ channel });
+  const browser = await chromium.launch({ channel, args: ['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream'] });
   const failures = [];
   const runCase = async (name, test) => {
     try { await test(); console.log('PASS', name); }
     catch (error) { failures.push(error); console.error('FAIL', name, error.message); }
   };
   try {
+    await runCase('la cámara web captura una foto y libera el dispositivo', async () => {
+      const context = await browser.newContext();
+      try {
+        await setup(context, 'CITIZEN');
+        await context.addInitScript(() => {
+          const devices = navigator.mediaDevices;
+          if (!devices?.getUserMedia) return;
+          const getUserMedia = devices.getUserMedia.bind(devices);
+          devices.getUserMedia = async (constraints) => {
+            const stream = await getUserMedia(constraints);
+            window.civiaTestCamera = stream;
+            return stream;
+          };
+        });
+        const page = await context.newPage();
+        page.setDefaultTimeout(5000);
+        await page.goto(base);
+        await page.getByRole('button', { name: 'Abrir cámara' }).click();
+        await page.getByRole('button', { name: 'Tomar foto' }).click();
+        await page.getByRole('img', { name: 'Evidencia seleccionada' }).waitFor();
+        await page.waitForFunction(() => window.civiaTestCamera.getVideoTracks()[0].readyState === 'ended');
+        assert.equal(await page.getByLabel('Seleccionar foto').getAttribute('type'), 'file');
+        await page.evaluate(() => {
+          navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Denied in test', 'NotAllowedError'); };
+        });
+        await page.getByRole('button', { name: 'Abrir cámara' }).click();
+        await page.getByText('Permite el acceso a la cámara en el navegador o selecciona una foto.').waitFor();
+        assert.equal(await page.getByRole('button', { name: 'Cerrar cámara' }).count(), 0);
+        assert.equal(await page.getByLabel('Seleccionar foto').isEnabled(), true);
+      } finally { await context.close(); }
+    });
     await runCase('la raíz es exclusivamente de radicación en todas las resoluciones', async () => {
       const context = await browser.newContext();
       try {
         await setup(context, 'CITIZEN');
+        const tileRequests = [];
+        await context.route(/^https:\/\/(?:[abc]\.)?tile\.openstreetmap\.org\//, async (route) => {
+          tileRequests.push({ url: route.request().url(), referer: await route.request().headerValue('referer') });
+          await route.fulfill({ status: 403 });
+        });
         const page = await context.newPage();
         page.setDefaultTimeout(8000);
         await page.goto(new URL('/#asistente', base).href);
         await page.getByLabel('Título').waitFor({ timeout: 3000 });
         await page.getByLabel('Título').fill('TítuloSintéticoLargo'.repeat(8));
         await page.getByLabel('Descripción').fill('Descripción sintética larga para verificar el trazado. '.repeat(25));
-        await page.getByRole('button', { name: 'Elegir en el mapa' }).click();
+        await Promise.all([
+          page.waitForResponse((response) => response.status() === 403 && /tile\.openstreetmap\.org/.test(response.url())),
+          page.getByRole('button', { name: 'Elegir en el mapa' }).click(),
+        ]);
+        assert.ok(tileRequests.length > 0);
+        for (const { url, referer } of tileRequests) {
+          assert.equal(new URL(url).hostname, 'tile.openstreetmap.org');
+          assert.equal(referer, `${new URL(base).origin}/`);
+        }
+        await page.getByText('El mapa base no está disponible.', { exact: false }).waitFor();
         await page.getByRole('button', { name: 'Usar centro del mapa' }).click();
         await page.getByText(/^3\.\d{6}, -76\.\d{6}$/).waitFor();
         await page.getByLabel('Seleccionar foto').setInputFiles({
